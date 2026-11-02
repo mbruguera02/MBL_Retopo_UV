@@ -130,13 +130,6 @@ def run_instant_meshes(command, destination, timeout, log_path, tick=None):
         raise RetopoError(str(exc))
 
 
-def _run_once(*args, **kwargs):
-    try:
-        return _process._run_once(*args, **kwargs)
-    except _process.EngineError as exc:
-        raise RetopoError(str(exc))
-
-
 def _export_obj(transform, path):
     cmds.loadPlugin("objExport", quiet=True)
     previous = cmds.ls(selection=True, long=True) or []
@@ -285,7 +278,7 @@ def orient_pieces_like(source, target):
 
 
 ENGINES = {"auto": "Automático", "maya": "Maya (polyRetopo)", "instant_meshes": "Instant Meshes",
-           "quadwild": "QuadWild (por parches)", "mbl": "Motor MBL"}
+           "mbl": "Motor MBL"}
 
 
 def _prepared_copy(transform, settings, log, tick):
@@ -426,7 +419,7 @@ def retopo(transform, settings, log=default_log, tick=None):
 
 
 def _classic_retopo(transform, settings, log, tick):
-    """Retopo con Maya, QuadWild o Instant Meshes (con simetría y guías)."""
+    """Retopo con Maya o Instant Meshes (con simetría y guías)."""
     mode = settings.get("retopo_symmetry", "off")
     if mode != "off" and settings.get("_guide_curves") and not settings.get("_symmetry_half"):
         # con guías, polyRetopo sobre la mitad cortada se dispara a veces (esfera: 800 -> 2.700 caras)
@@ -439,19 +432,11 @@ def _classic_retopo(transform, settings, log, tick):
             return _symmetric_retopo(transform, settings, log, tick, mean, p95)
         symmetry.log_skip(transform, mean, p95, log)
     engine = settings.get("retopo_engine", "maya")
-    if engine == "auto":
-        return _auto_retopo(transform, settings, log, tick)
-    if engine == "maya":
+    if engine in ("auto", "maya"):
+        # Automático llega aquí cuando el Motor MBL no entra (mitades, guías, detalle pintado) o como el
+        # candidato clásico que se compara con él: el clásico es Maya
+        engine = "maya"
         new, fixes = _maya_engine(transform, settings, log, tick)
-    elif engine == "quadwild":
-        try:
-            new, fixes = _quadwild_engine(transform, settings, log, tick)
-        except QuadwildFailed as exc:
-            if settings.get("_quadwild_no_fallback"):
-                raise
-            log("{}: {}; se usa el retopo de Maya.".format(short_name(transform), exc), "warning")
-            engine = "maya"
-            new, fixes = _maya_engine(transform, settings, log, tick)
     else:
         engine = "instant_meshes"
         new, fixes = _instant_meshes_engine(transform, settings, log, tick)
@@ -517,8 +502,8 @@ def _candidate(transform, new):
 
 
 def _auto_with_mbl(transform, settings, log, tick):
-    """Automático con el Motor MBL: el mejor de Maya y QuadWild (con simetría) frente al Motor MBL; gana el de
-    menor coste (forma, polos y caras que no son quads, como entre las variantes del núcleo)."""
+    """Automático con el Motor MBL: Maya (con simetría) frente al Motor MBL; gana el de menor coste (forma,
+    polos y caras que no son quads, como entre las variantes del núcleo)."""
     name = short_name(transform)
     lines = []
     classic = _classic_retopo(transform, settings, lambda message, level="info": lines.append((message, level)), tick)
@@ -537,7 +522,7 @@ def _auto_with_mbl(transform, settings, log, tick):
             log(message, level)
         return classic
     cases = [_candidate(transform, classic), _candidate(transform, mbl)]
-    for label, case in zip(("Mejor de Maya y QuadWild", "Motor MBL"), cases):
+    for label, case in zip(("Maya", "Motor MBL"), cases):
         log("{}: {}: {} caras, {} polos, {:.2f}% quads, error medio {:.3f}% (máx. {:.2f}%).".format(
             name, label, case["faces_count"], case["poles"], case["quad_percent"], case["error"], case["error_max"]))
     winner = _core.choose_variant(cases, int(settings["retopo_target_faces"]), require_pure=False)
@@ -553,7 +538,7 @@ def _auto_with_mbl(transform, settings, log, tick):
             pass
     if short_name(keep) != name + "_retopo":
         keep = cmds.ls(cmds.rename(keep, name + "_retopo"), long=True)[0]
-    log("{}: modo automático -> {}.".format(name, "Maya o QuadWild" if winner == 0 else "Motor MBL"))
+    log("{}: modo automático -> {}.".format(name, "Maya" if winner == 0 else "Motor MBL"))
     if winner == 1:
         keep = _present(transform, keep, settings, log, tick)
     return keep
@@ -599,67 +584,6 @@ def _resolve_guides_and_detail(transform, settings, log):
             log("{}: {} guía(s) de flujo; se usa el motor de Maya, que es el que las sigue.".format(name, len(curves)))
             settings["retopo_engine"] = "maya"
     return settings
-
-
-# QuadWild solo gana si deja claramente menos polos por cara sin perder demasiada forma
-# (humano a 8.000 caras: 2,9 frente a 3,7 polos/100 caras, con error 0,061 % frente a 0,038 %)
-AUTO_MIN_POLE_GAIN = 0.05
-AUTO_MAX_ERROR_RATIO = 2.0
-
-
-def _auto_retopo(transform, settings, log, tick):
-    """Modo automático: retopo con Maya y con QuadWild, y se queda el de menos polos por cara sin agujeros."""
-    from . import diagnostics
-    name = short_name(transform)
-    engines = ["maya"]
-    if config.find_quadwild(settings):
-        engines.append("quadwild")
-    else:
-        log("{}: QuadWild no está instalado; modo automático solo con Maya.".format(name), "warning")
-    log("{}: modo automático, probando {}...".format(name, " y ".join(ENGINES[e] for e in engines)))
-
-    candidates, failure = [], None
-    for engine in engines:
-        lines = []
-        run = dict(settings, retopo_engine=engine, _quadwild_no_fallback=True)
-        try:
-            # el anterior candidato ocultó el original: el siguiente parte del mismo estado
-            if cmds.getAttr(transform + ".visibility") is False:
-                cmds.setAttr(transform + ".visibility", 1)
-        except RuntimeError:
-            pass
-        try:
-            new = retopo(transform, run, lambda message, level="info": lines.append((message, level)), tick)
-        except RetopoError as exc:
-            failure = exc
-            log("{}: {} descartado: {}.".format(name, ENGINES[engine], str(exc).strip().rstrip(".")))
-            continue
-        stats = diagnostics.topology_stats(new)
-        error = diagnostics.surface_error(transform, new)["mean_percent"]
-        density = 100.0 * stats["pole_count"] / max(stats["faces"], 1)
-        log("{}: {}: {} caras, {} polos ({:.1f} por cada 100 caras), error medio {:.3f}%.".format(
-            name, ENGINES[engine], stats["faces"], stats["pole_count"], density, error))
-        candidates.append({"engine": engine, "mesh": new, "lines": lines, "density": density, "error": error})
-    if not candidates:
-        raise failure
-
-    best = candidates[0]
-    for other in candidates[1:]:
-        if (other["density"] < best["density"] * (1.0 - AUTO_MIN_POLE_GAIN)
-                and other["error"] <= best["error"] * AUTO_MAX_ERROR_RATIO):
-            best = other
-    for candidate in candidates:
-        if candidate is not best and cmds.objExists(candidate["mesh"]):
-            cmds.delete(candidate["mesh"])
-    # mensajes del ganador (arreglos, limpieza de polos, diagnóstico...)
-    for message, level in best["lines"]:
-        log(message, level)
-    result = best["mesh"]
-    if short_name(result) != name + "_retopo":
-        result = cmds.ls(cmds.rename(result, name + "_retopo"), long=True)[0]
-    log("{}: modo automático -> {} (menos polos por cara).".format(name, ENGINES[best["engine"]])
-        if len(candidates) > 1 else "{}: modo automático -> {}.".format(name, ENGINES[best["engine"]]))
-    return result
 
 
 def _instant_meshes_engine(transform, settings, log, tick):
@@ -768,175 +692,6 @@ def _instant_meshes_engine(transform, settings, log, tick):
         fixes.append("{} restos sueltos borrados".format(repair["pieces"]))
     if repair["holes"]:
         fixes.append("{} agujeros rellenados".format(repair["holes"]))
-    return new, fixes
-
-
-# ---------------------------------------------------------------------------------------------
-# QuadWild (https://github.com/cgg-bern/quadwild-bimdf, GPL-3): retopo por parches.
-#
-# 1) quadwild.exe <malla> 2 <prep.txt>: remallado, campo de cruces y trazado de parches
-#    -> <malla>_rem_p0.obj (+ .patch, .corners, .feature, .c_feature)
-# 2) quad_from_patches.exe <malla>_rem_p0.obj 1 <main.txt>: reparte quads en cada parche resolviendo
-#    un problema de flujo que minimiza los polos -> <malla>_rem_p0_1_quadrangulation_smooth.obj
-# El tamaño de quad es (arista media de _rem_p0) * scaleFact, así que el nº de caras se controla
-# con scaleFact a partir del área de la malla remallada.
-# ---------------------------------------------------------------------------------------------
-
-QUADWILD_PREP = """do_remesh 1
-sharp_feature_thr {sharp:g}
-alpha {alpha:g}
-scaleFact 1
-"""
-
-# copia de config/main_config/flow.txt (el lector es posicional: no cambiar el orden de las líneas)
-QUADWILD_MAIN = """alpha 0.005
-ilpMethod 1
-timeLimit 200
-gapLimit 0.0
-callbackTimeLimit 8 3.00 5.000 10.0 20.0 30.0 60.0 90.0 120.0
-callbackGapLimit 8 0.005 0.02 0.05 0.10 0.15 0.20 0.25 0.3
-minimumGap 0.4
-isometry 1
-regularityQuadrilaterals 1
-regularityNonQuadrilaterals 1
-regularityNonQuadrilateralsWeight 0.9
-alignSingularities {align:d}
-alignSingularitiesWeight 0.1
-repeatLosingConstraintsIterations 1
-repeatLosingConstraintsQuads 0
-repeatLosingConstraintsNonQuads 0
-repeatLosingConstraintsAlign {align:d}
-hardParityConstraint 1
-scaleFact {scale:f}
-fixedChartClusters 0
-useFlowSolver 1
-flow_config_filename "{flow}"
-satsuma_config_filename "{satsuma}"
-"""
-
-
-def quadwild_scale(points, faces, target_faces):
-    """scaleFact para que QuadWild dé unas `target_faces` caras sobre la malla remallada (pura)."""
-    points = np.asarray(points, dtype=float)
-    tris = np.array([f[:3] for f in faces if len(f) >= 3], dtype=int)
-    if not len(tris) or target_faces <= 0:
-        return 1.0
-    a, b, c = points[tris[:, 0]], points[tris[:, 1]], points[tris[:, 2]]
-    area = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1).sum()
-    edges = np.concatenate([np.linalg.norm(b - a, axis=1), np.linalg.norm(c - b, axis=1),
-                            np.linalg.norm(a - c, axis=1)])
-    average = edges.mean()
-    if average <= 0 or area <= 0:
-        return 1.0
-    return float(np.sqrt(area / target_faces) / average)
-
-
-class QuadwildFailed(RetopoError):
-    """QuadWild terminó pero el resultado no sirve: se usa el motor de Maya en su lugar."""
-
-
-QUADWILD_AREA_FACTOR = 1.4
-# humano a ~8000 caras: 292 -> 244 polos con 10 pasadas
-QUADWILD_PRESMOOTH = 10
-
-
-def quadwild_next_scale(tried, target):
-    """Siguiente scaleFact a partir de los intentos [(scale, caras)] (pura).
-
-    Las caras no van con 1/scale² porque la estructura de parches pesa (humano: exponente ~0.8). Con un
-    intento se supone exponente 1; con dos o más se estima con los dos últimos (entre 0.3 y 2.5).
-    """
-    exponent = 1.0
-    if len(tried) >= 2:
-        (s0, n0), (s1, n1) = tried[-2], tried[-1]
-        if s0 > 0 and s1 > 0 and n0 > 0 and n1 > 0 and abs(np.log(s1 / s0)) > 1e-6:
-            exponent = float(np.clip(-np.log(n1 / float(n0)) / np.log(s1 / s0), 0.3, 2.5))
-    scale, faces = tried[-1]
-    if faces <= 0:
-        return scale
-    return scale * (faces / float(target)) ** (1.0 / exponent)
-
-
-def _quadwild_engine(transform, settings, log, tick):
-    """QuadWild por línea de comandos. Devuelve (malla, arreglos)."""
-    name = short_name(transform)
-    tools = config.find_quadwild(settings)
-    if not tools:
-        raise RetopoError("No encuentro QuadWild (quadwild.exe y quad_from_patches.exe en "
-                          "mbl_retopo_uv/bin/quadwild). Usa el motor de Maya o reinstala el plugin.")
-    timeout = settings["retopo_timeout"]
-    temp_dir = tempfile.mkdtemp(prefix="mbl_quadwild_")
-    prepared = None
-    try:
-        source = os.path.join(temp_dir, "input.obj")
-        prepared = _prepared_copy(transform, settings, log, tick)
-        source_holes = len(border_loops(prepared))
-        cmds.polyTriangulate(prepared, constructionHistory=False)
-        if QUADWILD_PRESMOOTH:
-            # el campo sigue la curvatura: el ruido fino crea singularidades (= polos). Con la copia
-            # suavizada salen menos y la forma se recupera al reproyectar sobre el original
-            cmds.polyAverageVertex(prepared, iterations=QUADWILD_PRESMOOTH, constructionHistory=False)
-        _export_obj(prepared, source)
-
-        crease = float(settings["retopo_crease_angle"])
-        prep = os.path.join(temp_dir, "prep.txt")
-        with open(prep, "w") as handle:
-            # sin aristas duras: alpha 0.02 (config "Organic"); con aristas duras: 0.01 ("Mechanical")
-            handle.write(QUADWILD_PREP.format(sharp=crease if crease > 0 else -1,
-                                              alpha=0.01 if crease > 0 else 0.02))
-        log("{}: QuadWild, paso 1/2 (campo y parches)...".format(name))
-        rem = os.path.join(temp_dir, "input_rem_p0.obj")
-        _run_once([tools["quadwild"], source, "2", prep], rem, timeout,
-                  os.path.join(temp_dir, "quadwild.log"), tick, "QuadWild", temp_dir, 120.0)
-
-        target = int(settings["retopo_target_faces"])
-        rem_points, rem_faces = read_obj(rem)
-        # sale ~2 veces lo que daría el área (humano 1.8x, águila 2.4x)
-        scale = quadwild_scale(rem_points, rem_faces, target) * QUADWILD_AREA_FACTOR
-        tried = []
-        for attempt in range(3):
-            main = os.path.join(temp_dir, "main.txt")
-            with open(main, "w") as handle:
-                handle.write(QUADWILD_MAIN.format(
-                    align=1, scale=scale,
-                    flow=os.path.join(tools["config"], "main_config", "flow_virtual_simple.json"),
-                    satsuma=os.path.join(tools["config"], "satsuma", "default.json")))
-            log("{}: QuadWild, paso 2/2 (quads por parche, {} caras objetivo)...".format(name, target))
-            destination = os.path.join(temp_dir, "input_rem_p0_1_quadrangulation_smooth.obj")
-            if os.path.exists(destination):
-                os.remove(destination)
-            _run_once([tools["quad_from_patches"], rem, "1", main], destination, timeout,
-                      os.path.join(temp_dir, "quad_from_patches.log"), tick, "QuadWild", temp_dir, 120.0, True)
-            points, faces = read_obj(destination)
-            tried.append((scale, len(faces), points, faces))
-            if attempt == 2 or not faces or abs(len(faces) - target) <= 0.15 * target:
-                break
-            scale = quadwild_next_scale([(s, n) for s, n, _, _ in tried], target)
-            log("{}: salieron {} caras; se repite ajustando para acercarse a {}.".format(name, len(faces), target))
-        # el intento más cercano al objetivo
-        _, _, points, faces = min(tried, key=lambda item: abs(item[1] - target))
-
-        points, faces, repair = repair_topology(points, faces, 0.01, int(settings["retopo_fill_holes"]))
-        if not faces:
-            raise QuadwildFailed("QuadWild no devolvió ninguna malla")
-        # con mallas sucias (águila de IA) algunos parches no se cuadran y quedan agujeros: el relleno
-        # mete n-gons y polos de 6+ y el error de forma se triplica. Mejor el motor de Maya
-        if repair["holes"] > source_holes:
-            raise QuadwildFailed("QuadWild dejó {} agujeros que el original no tiene".format(
-                repair["holes"] - source_holes))
-        new = meshbuild.create_mesh(points, faces, name + "_retopo")
-    except _process._Stalled:
-        raise RetopoError("QuadWild se ha quedado bloqueado y se ha detenido. Prueba con el motor de Maya.")
-    finally:
-        if prepared and cmds.objExists(prepared):
-            cmds.delete(prepared)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-    fixes = []
-    if repair["holes"]:
-        fixes.append("{} agujeros rellenados".format(repair["holes"]))
-    if repair["pieces"]:
-        fixes.append("{} restos sueltos borrados".format(repair["pieces"]))
     return new, fixes
 
 

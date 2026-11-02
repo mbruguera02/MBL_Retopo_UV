@@ -2,7 +2,7 @@
 """Reparación de topología sin Maya: caras degeneradas, aristas compartidas de más, vértices de 2
 aristas, orientación, pajaritas, restos sueltos y agujeros. Más lectura y escritura de OBJ.
 
-Funciones puras sobre (puntos, caras): las usan los motores de retopo (Instant Meshes, QuadWild,
+Funciones puras sobre (puntos, caras): las usan los motores de retopo (Instant Meshes, QuadriFlow,
 Maya) para dejar su resultado en una malla limpia que Unfold3D acepte.
 """
 

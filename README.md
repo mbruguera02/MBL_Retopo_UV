@@ -72,6 +72,8 @@ Al terminar, el panel **Estado** pone un color a cada paso de cada malla:
 - 🟡 **Amarillo:** se puede usar, pero hay algo mejorable.
 - 🔴 **Rojo:** hay un problema que se notará al texturizar.
 
+En el paso *Retopo*, además de la forma y los polos, el semáforo usa el mismo juez de calidad que las pruebas del motor: avisa de caras dadas la vuelta o dobladas, quads deformados, saltos de tamaño entre caras vecinas y triángulos de más, y nunca sale en verde si el juez lo suspende.
+
 Debajo de cada punto amarillo o rojo sale **→ qué tocar**: el ajuste exacto de la ventana que conviene cambiar, o el botón que hay que pulsar. Doble clic en una malla la selecciona. **Comprobar estado** calcula el semáforo de lo seleccionado cuando quieras, sin cambiar nada.
 
 ## Lo que conviene saber
@@ -136,7 +138,7 @@ docs/                      notas técnicas y diseño del Motor MBL
 
 ## Licencia y créditos
 
-El código de este proyecto es de uso libre bajo licencia MIT ([`LICENSE`](LICENSE)). El plugin se apoya en trabajo de otras personas (Instant Meshes, QuadriFlow, QuadWild y más), con sus licencias, en [`CREDITS.md`](CREDITS.md). Las herramientas de Maya que usa (polyRetopo, Unfold3D) son de Autodesk y vienen con Maya.
+El código de este proyecto es de uso libre bajo licencia MIT ([`LICENSE`](LICENSE)). El plugin se apoya en trabajo de otras personas (Instant Meshes, QuadriFlow y más), con sus licencias, en [`CREDITS.md`](CREDITS.md). Las herramientas de Maya que usa (polyRetopo, Unfold3D) son de Autodesk y vienen con Maya.
 
 ---
 

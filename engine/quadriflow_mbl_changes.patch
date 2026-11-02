@@ -1,0 +1,164 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4b91ce0..e9b2ae7 100755
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -48,7 +48,9 @@ set(CMAKE_CXX_STANDARD 14)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+-set(CMAKE_CXX_FLAGS_RELEASE "-O3")  # enable assert
++if(NOT MSVC)  # MBL: en Visual Studio pisaba /MD y el enlace fallaba
++    set(CMAKE_CXX_FLAGS_RELEASE "-O3")  # enable assert
++endif()
+ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g")  # enable assert
+ set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS}")
+ set(CMAKE_LINKER_FLAGS_DEBUG "${CMAKE_LINKER_FLAGS_DEBUG}")
+diff --git a/src/main.cpp b/src/main.cpp
+index 18bc406..5ff3060 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
+     int t1, t2;
+     std::string input_obj, output_obj;
+     int faces = -1;
++    std::string density_file;  // MBL: un valor por vértice de entrada (1 = normal, 4 = 4x caras por área)
+     for (int i = 0; i < argc; ++i) {
+         if (strcmp(argv[i], "-f") == 0) {
+             sscanf(argv[i + 1], "%d", &faces);
+@@ -38,6 +39,8 @@ int main(int argc, char** argv) {
+             field.flag_minimum_cost_flow = 1;
+         } else if (strcmp(argv[i], "-sat") == 0) {
+             field.flag_aggresive_sat = 1;
++        } else if (strcmp(argv[i], "-density") == 0) {
++            density_file = argv[i + 1];
+         } else if (strcmp(argv[i], "-seed") == 0) {
+             field.hierarchy.rng_seed = atoi(argv[i + 1]);
+         }
+@@ -45,6 +48,21 @@ int main(int argc, char** argv) {
+     printf("%d %s %s\n", faces, input_obj.c_str(), output_obj.c_str());
+     if (input_obj.size() >= 1) {
+         field.Load(input_obj.c_str());
++        if (!density_file.empty()) {
++            FILE* fp = fopen(density_file.c_str(), "r");
++            if (!fp) {
++                printf("Could not open density file %s\n", density_file.c_str());
++                return -1;
++            }
++            double value;
++            while (fscanf(fp, "%lf", &value) == 1)
++                field.input_edge_scale.push_back(1.0 / std::sqrt(std::max(value, 1e-3)));
++            fclose(fp);
++            if ((int)field.input_edge_scale.size() != (int)field.V.cols()) {
++                printf("Density file has %d values, expected %d\n", (int)field.input_edge_scale.size(), (int)field.V.cols());
++                return -1;
++            }
++        }
+     } else {
+         assert(0);
+         // field.Load((std::string(DATA_PATH) + "/fertility.obj").c_str());
+@@ -97,6 +115,8 @@ int main(int argc, char** argv) {
+     printf("Solve for scale...\n");
+     t1 = GetCurrentTime64();
+     Optimizer::optimize_scale(field.hierarchy, field.rho, field.flag_adaptive_scale);
++    if (!density_file.empty())
++        Optimizer::apply_scale_field(field.hierarchy, field.rho);  // MBL
+     field.flag_adaptive_scale = 1;
+     t2 = GetCurrentTime64();
+     printf("Use %lf seconds\n", (t2 - t1) * 1e-3);
+diff --git a/src/optimizer.cpp b/src/optimizer.cpp
+index 1c59ad0..acb6a4c 100644
+--- a/src/optimizer.cpp
++++ b/src/optimizer.cpp
+@@ -265,6 +265,26 @@ void Optimizer::optimize_scale(Hierarchy& mRes, VectorXd& rho, int adaptive) {
+     }
+ }
+ 
++void Optimizer::apply_scale_field(Hierarchy& mRes, const VectorXd& rho) {
++    MatrixXd& S0 = mRes.mS[0];
++    for (int i = 0; i < S0.cols(); ++i) {
++        S0(0, i) = rho[i];
++        S0(1, i) = rho[i];
++    }
++    for (int l = 0; l < (int)mRes.mS.size() - 1; ++l) {
++        const MatrixXd& S = mRes.mS[l];
++        MatrixXd& S_next = mRes.mS[l + 1];
++        auto& toUpper = mRes.mToUpper[l];
++        for (int i = 0; i < toUpper.cols(); ++i) {
++            Vector2i upper = toUpper.col(i);
++            Vector2d q0 = S.col(upper[0]);
++            if (upper[1] != -1)
++                q0 = (q0 + S.col(upper[1])) * 0.5;
++            S_next.col(i) = q0;
++        }
++    }
++}
++
+ void Optimizer::optimize_positions(Hierarchy& mRes, int with_scale) {
+     int levelIterations = 6;
+ #ifdef WITH_CUDA
+diff --git a/src/optimizer.hpp b/src/optimizer.hpp
+index ad6fa72..d4f4a1d 100644
+--- a/src/optimizer.hpp
++++ b/src/optimizer.hpp
+@@ -11,6 +11,8 @@ class Optimizer {
+     Optimizer();
+     static void optimize_orientations(Hierarchy& mRes);
+     static void optimize_scale(Hierarchy& mRes, VectorXd& rho, int adaptive);
++    // MBL: fija el tamaño de arista relativo de cada vértice (rho) y lo propaga a los niveles gruesos
++    static void apply_scale_field(Hierarchy& mRes, const VectorXd& rho);
+     static void optimize_positions(Hierarchy& mRes, int with_scale = 0);
+     static void optimize_integer_constraints(Hierarchy& mRes, std::map<int, int>& singularities,
+                                              bool use_minimum_cost_flow);
+diff --git a/src/parametrizer-mesh.cpp b/src/parametrizer-mesh.cpp
+index 19effe9..f34d677 100644
+--- a/src/parametrizer-mesh.cpp
++++ b/src/parametrizer-mesh.cpp
+@@ -51,6 +51,12 @@ void Parametrizer::Initialize(int faces) {
+     for (int i = 0; i < V.cols(); ++i) {
+         rho[i] = 1;
+     }
++    // MBL: densidad pintada o calculada por el plugin; 'subdivide' interpola rho en los vértices nuevos
++    const bool has_edge_scale = (int)input_edge_scale.size() == V.cols();
++    if (has_edge_scale) {
++        for (int i = 0; i < V.cols(); ++i)
++            rho[i] = input_edge_scale[i];
++    }
+ #ifdef PERFORMANCE_TEST
+     scale = sqrt(surface_area / (V.cols() * 10));
+ #else
+@@ -75,7 +81,8 @@ void Parametrizer::Initialize(int faces) {
+         ;
+     generate_adjacency_matrix_uniform(F, V2E, E2E, nonManifold, adj);
+ 
+-    for (int iter = 0; iter < 5; ++iter) {
++    // MBL: con campo de tamaño propio no se mezcla con los vecinos (ya llega recortado por gradación)
++    for (int iter = 0; iter < (has_edge_scale ? 0 : 5); ++iter) {
+         VectorXd r(rho.size());
+         for (int i = 0; i < rho.size(); ++i) {
+             r[i] = rho[i];
+diff --git a/src/parametrizer.hpp b/src/parametrizer.hpp
+index 1f4a02b..81f2071 100644
+--- a/src/parametrizer.hpp
++++ b/src/parametrizer.hpp
+@@ -96,6 +96,8 @@ class Parametrizer {
+ 
+     // data structures
+     VectorXd rho;
++    // MBL: tamaño de arista relativo por vértice de entrada (1 / sqrt(densidad)); vacío = uniforme
++    std::vector<double> input_edge_scale;
+     VectorXi V2E;
+     VectorXi E2E;
+     VectorXi boundary;
+diff --git a/src/subdivide.cpp b/src/subdivide.cpp
+index c408bbc..38203ce 100644
+--- a/src/subdivide.cpp
++++ b/src/subdivide.cpp
+@@ -71,7 +71,7 @@ void subdivide(MatrixXi &F, MatrixXd &V, VectorXd& rho, VectorXi &V2E, VectorXi
+ 
+         /* Update V */
+         V.col(vn) = (V.col(v0) + V.col(v1)) * 0.5f;
+-        rho[vn] = 0.5f * (rho[v0], rho[v1]);
++        rho[vn] = 0.5f * (rho[v0] + rho[v1]);  // MBL: era un operador coma (0,5 * rho[v1])
+         nonmanifold[vn] = false;
+         boundary[vn] = is_boundary;
+ 

@@ -1,0 +1,732 @@
+Submodule ext/nanogui contains modified content
+Submodule ext/glfw contains modified content
+diff --git a/ext/nanogui/ext/glfw/CMakeLists.txt b/ext/nanogui/ext/glfw/CMakeLists.txt
+index 8b861820..51525c1c 100644
+--- a/ext/nanogui/ext/glfw/CMakeLists.txt
++++ b/ext/nanogui/ext/glfw/CMakeLists.txt
+@@ -4,11 +4,7 @@ project(GLFW C)
+ 
+ cmake_minimum_required(VERSION 2.8.11.2)
+ 
+-if (NOT CMAKE_VERSION VERSION_LESS "3.0")
+-    # Until all major package systems have moved to CMake 3,
+-    # we stick with the older INSTALL_NAME_DIR mechanism
+-    cmake_policy(SET CMP0042 OLD)
+-endif()
++# MBL: cmake_policy(SET CMP0042 OLD) eliminado; CMake 4 ya no lo admite (solo afectaba a macOS)
+ 
+ if(POLICY CMP0022)
+   cmake_policy(SET CMP0022 NEW)
+diff --git a/src/batch.cpp b/src/batch.cpp
+index b35769d..7f1ef30 100644
+--- a/src/batch.cpp
++++ b/src/batch.cpp
+@@ -21,12 +21,194 @@
+ #include "normal.h"
+ #include "extract.h"
+ #include "bvh.h"
++#include <algorithm>
++#include <fstream>  /* MBL: archivo de densidad */
++
++/* MBL: densidad adaptativa por curvatura.
++   Devuelve el tamaño de arista objetivo de cada vértice de entrada: caras grandes en zonas planas y
++   pequeñas en zonas curvas. Se normaliza para que el número total de caras sea el mismo que con la
++   escala uniforme 'base_scale'. */
++static VectorXf mbl_adaptive_scale(const MatrixXf &V, const MatrixXf &N, const VectorXf &A,
++                                   const AdjacencyMatrix &adj, Float base_scale,
++                                   Float strength, Float ratio) {
++    const uint32_t n = (uint32_t) V.cols();
++    VectorXf k(n), tmp(n);
++
++    /* 1. curvatura aproximada: ángulo entre normales vecinas / distancia */
++    double len_sum = 0; size_t len_count = 0;
++    for (uint32_t i = 0; i < n; ++i) {
++        Float sum = 0; uint32_t count = 0;
++        for (Link *link = adj[i]; link != adj[i+1]; ++link) {
++            const uint32_t j = link->id;
++            const Float d = (V.col(i) - V.col(j)).norm();
++            if (d <= 0)
++                continue;
++            const Float c = std::max((Float) -1, std::min((Float) 1, N.col(i).dot(N.col(j))));
++            sum += std::acos(c) / d;
++            len_sum += d; ++len_count;
++            ++count;
++        }
++        k[i] = count ? sum / count : 0;
++    }
++    const Float avg_len = len_count ? (Float) (len_sum / len_count) : base_scale;
++
++    /* suavizado por difusión: el radio crece ~ longitud * sqrt(iteraciones) */
++    auto smooth = [&](VectorXf &f, int iterations) {
++        for (int it = 0; it < iterations; ++it) {
++            for (uint32_t i = 0; i < n; ++i) {
++                Float sum = 0; uint32_t count = 0;
++                for (Link *link = adj[i]; link != adj[i+1]; ++link) {
++                    sum += f[link->id]; ++count;
++                }
++                tmp[i] = count ? 0.5f * f[i] + 0.5f * sum / count : f[i];
++            }
++            f.swap(tmp);
++        }
++    };
++    const Float radius_ratio = base_scale / std::max(avg_len, (Float) 1e-12);
++    const int iterations = (int) std::max(4.0f, std::min(300.0f, radius_ratio * radius_ratio));
++    smooth(k, iterations);
++
++    auto median = [&](const VectorXf &f) -> Float {
++        std::vector<Float> values(f.data(), f.data() + f.size());
++        std::nth_element(values.begin(), values.begin() + values.size() / 2, values.end());
++        return values[values.size() / 2];
++    };
++
++    /* 2. tamaño ~ 1/sqrt(curvatura) (error de cuerda constante), mezclado con uniforme según 'strength' */
++    const Float k_ref = std::max(median(k), (Float) 1e-12);
++    VectorXf f(n);
++    for (uint32_t i = 0; i < n; ++i)
++        f[i] = std::pow((k[i] + k_ref) / (2 * k_ref), -0.5f * strength);
++
++    /* 3. limitar la relación entre caras grandes y pequeñas y volver a suavizar */
++    const Float f_med = median(f);
++    for (uint32_t i = 0; i < n; ++i)
++        f[i] = std::max(f_med / ratio, std::min(f_med * ratio, f[i]));
++    smooth(f, std::max(4, iterations / 2));
++
++    /* 4. normalizar: mismo número de caras que con la escala uniforme */
++    double area = 0, weighted = 0;
++    for (uint32_t i = 0; i < n; ++i) {
++        area += A[i];
++        weighted += A[i] / (double) (f[i] * f[i]);
++    }
++    const Float c = base_scale * (Float) std::sqrt(weighted / std::max(area, 1e-30));
++    VectorXf S = f * c;
++
++    cout << "Adaptive density (strength " << strength << ", ratio " << ratio << ", "
++         << iterations << " smoothing steps): edge length min " << S.minCoeff()
++         << ", median " << median(S) << ", max " << S.maxCoeff() << endl;
++    return S;
++}
++
++/* MBL: densidad pintada por el usuario.
++   'density_file' tiene un valor por vértice de entrada (en el orden del PLY): 1 = normal, m = m veces
++   más caras por unidad de área. El tamaño de arista va con 1/sqrt(m). Los vértices que añade la
++   subdivisión (al final) toman el valor de sus vecinos. Se normaliza para mantener el nº de caras. */
++static VectorXf mbl_density_scale(const MatrixXf &V, const VectorXf &A, const AdjacencyMatrix &adj,
++                                  Float base_scale, uint32_t input_vertices,
++                                  const std::string &density_file) {
++    const uint32_t n = (uint32_t) V.cols();
++    VectorXf f(n), tmp(n);
++    std::vector<char> known(n, 0);
++    std::ifstream is(density_file);
++    if (!is.good())
++        throw std::runtime_error("Could not open density file \"" + density_file + "\"");
++    uint32_t read = 0;
++    Float value;
++    while (read < input_vertices && read < n && (is >> value)) {
++        f[read] = 1.0f / std::sqrt(std::max(value, (Float) 1e-3));
++        known[read] = 1;
++        ++read;
++    }
++    if (read != input_vertices)
++        throw std::runtime_error("Density file has " + std::to_string(read) + " values, expected " +
++                                 std::to_string(input_vertices));
++
++    /* vértices nuevos: media de los vecinos conocidos, por capas hasta rellenarlos todos */
++    for (bool pending = true; pending; ) {
++        pending = false;
++        bool progress = false;
++        for (uint32_t i = 0; i < n; ++i) {
++            if (known[i])
++                continue;
++            Float sum = 0; uint32_t count = 0;
++            for (Link *link = adj[i]; link != adj[i+1]; ++link)
++                if (known[link->id] == 1) { sum += f[link->id]; ++count; }
++            if (count) { f[i] = sum / count; known[i] = 2; progress = true; } else pending = true;
++        }
++        for (uint32_t i = 0; i < n; ++i)
++            if (known[i] == 2) known[i] = 1;
++        if (!progress)
++            break;
++    }
++    for (uint32_t i = 0; i < n; ++i)
++        if (!known[i]) f[i] = 1;
++
++    /* suavizado ligero: la transición entre zonas no debe ser un escalón */
++    for (int it = 0; it < 8; ++it) {
++        for (uint32_t i = 0; i < n; ++i) {
++            Float sum = 0; uint32_t count = 0;
++            for (Link *link = adj[i]; link != adj[i+1]; ++link) { sum += f[link->id]; ++count; }
++            tmp[i] = count ? 0.5f * f[i] + 0.5f * sum / count : f[i];
++        }
++        f.swap(tmp);
++    }
++
++    /* normalizar: mismo número de caras que con la escala uniforme */
++    double area = 0, weighted = 0;
++    for (uint32_t i = 0; i < n; ++i) {
++        area += A[i];
++        weighted += A[i] / (double) (f[i] * f[i]);
++    }
++    const Float c = base_scale * (Float) std::sqrt(weighted / std::max(area, 1e-30));
++    VectorXf S = f * c;
++    cout << "Painted density: " << read << " values, edge length min " << S.minCoeff()
++         << ", max " << S.maxCoeff() << endl;
++    return S;
++}
++
++/* MBL: direcciones guía para el campo de orientación.
++   'orient_file' tiene una línea "dx dy dz peso" por vértice de entrada (orden del PLY). La dirección
++   se proyecta al plano tangente; el peso (0..1) es cuánto tira de la orientación en cada iteración.
++   Las calcula el plugin (curvatura principal, anillos de tubos, guías del usuario). Los vértices
++   que añade la subdivisión quedan libres y siguen a sus vecinos. Los bordes (-b) tienen prioridad. */
++static void mbl_read_orientation(MultiResolutionHierarchy &mRes, uint32_t input_vertices,
++                                 const std::string &orient_file) {
++    std::ifstream is(orient_file);
++    if (!is.good())
++        throw std::runtime_error("Could not open orientation file \"" + orient_file + "\"");
++    const MatrixXf &N = mRes.N();
++    uint32_t read = 0, used = 0;
++    Float dx, dy, dz, w;
++    while (read < input_vertices && (is >> dx >> dy >> dz >> w)) {
++        const uint32_t i = read++;
++        if (w <= 0 || mRes.CQw()[i] != 0)
++            continue;
++        Vector3f d(dx, dy, dz), n = N.col(i);
++        d -= n * n.dot(d);
++        if (d.squaredNorm() < 1e-12f)
++            continue;
++        mRes.CQ().col(i) = d.normalized();
++        mRes.CQw()[i] = std::min(w, (Float) 1);
++        ++used;
++    }
++    if (read != input_vertices)
++        throw std::runtime_error("Orientation file has " + std::to_string(read) + " rows, expected " +
++                                 std::to_string(input_vertices));
++    mRes.mSoftConstraints = true;
++    cout << "Orientation guides: " << used << " of " << read << " vertices" << endl;
++}
+ 
+ void batch_process(const std::string &input, const std::string &output,
+                    int rosy, int posy, Float scale, int face_count,
+                    int vertex_count, Float creaseAngle, bool extrinsic,
+                    bool align_to_boundaries, int smooth_iter, int knn_points,
+-                   bool pure_quad, bool deterministic) {
++                   bool pure_quad, bool deterministic,
++                   Float adaptive, Float adaptive_ratio,
++                   const std::string &density_file,
++                   const std::string &orient_file) {
+     cout << endl;
+     cout << "Running in batch mode:" << endl;
+     cout << "   Input file             = " << input << endl;
+@@ -95,6 +277,8 @@ void batch_process(const std::string &input, const std::string &output,
+     cout << "   Edge length            = " << scale << endl;
+ 
+     MultiResolutionHierarchy mRes;
++    VectorXf adaptive_S;
++    const uint32_t input_vertices = (uint32_t) V.cols();  /* MBL: la subdivisión añade vértices detrás */
+ 
+     if (!pointcloud) {
+         /* Subdivide the mesh if necessary */
+@@ -123,6 +307,11 @@ void batch_process(const std::string &input, const std::string &output,
+         /* Compute dual vertex areas */
+         compute_dual_vertex_areas(F, V, V2E, E2E, nonManifold, A);
+ 
++        if (!density_file.empty())
++            adaptive_S = mbl_density_scale(V, A, adj, scale, input_vertices, density_file);
++        else if (adaptive > 0)
++            adaptive_S = mbl_adaptive_scale(V, N, A, adj, scale, adaptive, adaptive_ratio);
++
+         mRes.setE2E(std::move(E2E));
+     }
+ 
+@@ -133,11 +322,15 @@ void batch_process(const std::string &input, const std::string &output,
+     mRes.setA(std::move(A));
+     mRes.setN(std::move(N));
+     mRes.setScale(scale);
++    if (adaptive_S.size() > 0)
++        mRes.setScaleField(std::move(adaptive_S));
+     mRes.build(deterministic);
+     mRes.resetSolution();
+ 
+-    if (align_to_boundaries && !pointcloud) {
++    const bool orient = !orient_file.empty() && !pointcloud;  /* MBL */
++    if ((align_to_boundaries && !pointcloud) || orient)
+         mRes.clearConstraints();
++    if (align_to_boundaries && !pointcloud) {
+         for (uint32_t i=0; i<3*mRes.F().cols(); ++i) {
+             if (mRes.E2E()[i] == INVALID) {
+                 uint32_t i0 = mRes.F()(i%3, i/3);
+@@ -154,8 +347,11 @@ void batch_process(const std::string &input, const std::string &output,
+                 }
+             }
+         }
+-        mRes.propagateConstraints(rosy, posy);
+     }
++    if (orient)
++        mbl_read_orientation(mRes, input_vertices, orient_file);
++    if ((align_to_boundaries && !pointcloud) || orient)
++        mRes.propagateConstraints(rosy, posy);
+ 
+     if (bvh) {
+         bvh->setData(&mRes.F(), &mRes.V(), &mRes.N());
+diff --git a/src/batch.h b/src/batch.h
+index e9d7baa..fe8f29c 100644
+--- a/src/batch.h
++++ b/src/batch.h
+@@ -19,4 +19,7 @@ extern void batch_process(const std::string &input, const std::string &output,
+                           int rosy, int posy, Float scale, int face_count,
+                           int vertex_count, Float creaseAngle, bool extrinsic,
+                           bool align_to_boundaries, int smooth_iter,
+-                          int knn_points, bool dominant, bool deterministic);
++                          int knn_points, bool dominant, bool deterministic,
++                          Float adaptive = 0, Float adaptive_ratio = 3,
++                          const std::string &density_file = "",
++                          const std::string &orient_file = "");
+diff --git a/src/extract.cpp b/src/extract.cpp
+index 5a38653..0bf3f99 100644
+--- a/src/extract.cpp
++++ b/src/extract.cpp
+@@ -36,7 +36,10 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+               bool remove_unnecessary_edges,
+               bool snap_vertices) {
+ 
+-    Float scale = mRes.scale(), inv_scale = 1 / scale;
++    Float scale = mRes.scale();
++    /* MBL: tamaño de arista por vértice de entrada (igual a 'scale' si no hay densidad adaptativa) */
++    const bool adaptive = mRes.hasScaleField();
++    VectorXf S_new;
+ 
+     auto compat_orientation = rosy == 2 ? compat_orientation_extrinsic_2 :
+         (rosy == 4 ? compat_orientation_extrinsic_4 : compat_orientation_extrinsic_6);
+@@ -72,10 +75,11 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+                             Q.col(i), N.col(i), Q.col(j), N.col(j));
+ 
+                     Float error = 0;
++                    const Float s_ij = 0.5f * (mRes.scaleAt(0, i) + mRes.scaleAt(0, j));
+                     std::pair<Vector2i, Vector2i> shift = compat_position(
+                             V.col(i), N.col(i), Q_rot.first, O.col(i),
+                             V.col(j), N.col(j), Q_rot.second, O.col(j),
+-                            scale, inv_scale, &error);
++                            s_ij, 1 / s_ij, &error);
+ 
+                     Vector2i absDiff = (shift.first-shift.second).cwiseAbs();
+ 
+@@ -198,14 +202,26 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+         uint32_t nVertices = 0;
+         std::map<uint32_t, uint32_t> vertex_map;
+         Float avg_collapses = 0;
++        /* MBL: con densidad adaptativa un vértice agrupa ~ s^2 vértices de entrada; para detectar
++           vértices espurios se compara nCollapses / s^2 en lugar de nCollapses (si no, se borrarían
++           los vértices de las zonas densas) */
++        std::vector<Float> collapse_norm(adj_new.size(), 1.0f);
++        if (adaptive) {
++            Float s0 = mRes.scale();
++            for (uint32_t i=0; i<adj_new.size(); ++i) {
++                Float s = mRes.scaleAt(0, i) / s0;
++                collapse_norm[i] = 1.0f / (s * s);
++            }
++        }
+         for (uint32_t i=0; i<adj_new.size(); ++i) {
+             if (adj_new[i].empty())
+                 continue;
+             if (i != nVertices) {
+                 adj_new[nVertices].swap(adj_new[i]);
+                 std::swap(nCollapses[nVertices], nCollapses[i]);
++                std::swap(collapse_norm[nVertices], collapse_norm[i]);
+             }
+-            avg_collapses += nCollapses[nVertices];
++            avg_collapses += nCollapses[nVertices] * collapse_norm[nVertices];
+             vertex_map[i] = nVertices++;
+         }
+         adj_new.resize(nVertices);
+@@ -236,7 +252,7 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+             cout.flush();
+             uint32_t removed = 0;
+             for (uint32_t i=0; i<adj_new.size(); ++i) {
+-                if (nCollapses[i] > avg_collapses/10)
++                if (nCollapses[i] * collapse_norm[i] > avg_collapses/10)
+                     continue;
+ 
+                 for (auto neighbor : adj_new[i]) {
+@@ -269,6 +285,8 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+         {
+             Eigen::VectorXf cluster_weight(nVertices);
+             cluster_weight.setZero();
++            S_new.resize(nVertices);
++            S_new.setZero();
+ 
+             tbb::blocked_range<uint32_t> range(0u, V.cols(), GRAIN_SIZE);
+             tbb::spin_mutex mutex;
+@@ -280,7 +298,8 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+                         continue;
+                     uint32_t j = it->second;
+ 
+-                    Float weight = std::exp(-(O.col(i)-V.col(i)).squaredNorm() * inv_scale * inv_scale * 9);
++                    const Float s_i = mRes.scaleAt(0, i), inv_s = 1 / s_i;
++                    Float weight = std::exp(-(O.col(i)-V.col(i)).squaredNorm() * inv_s * inv_s * 9);
+                     if (COw.size() != 0 && COw[i] != 0) {
+                         tbb::spin_mutex::scoped_lock lock(mutex);
+                         crease_out.insert(j);
+@@ -291,6 +310,7 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+                         atomicAdd(&N_new.coeffRef(k, j), N(k, i)*weight);
+                     }
+                     atomicAdd(&cluster_weight[j], weight);
++                    atomicAdd(&S_new[j], s_i * weight);
+                 }
+             };
+ 
+@@ -305,6 +325,7 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+                     continue;
+                 }
+                 O_new.col(i) /= cluster_weight[i];
++                S_new[i] /= cluster_weight[i];
+                 N_new.col(i).normalize();
+             }
+ 
+@@ -325,7 +346,10 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+             bool changed_inner;
+             do {
+                 changed_inner = false;
+-                Float thresh = 0.3f * scale;
++                /* MBL: umbral relativo al tamaño local de las caras */
++                auto thresh_at = [&](uint32_t id) -> Float {
++                    return 0.3f * (adaptive ? S_new[id] : scale);
++                };
+ 
+                 std::vector<std::tuple<Float, uint32_t, uint32_t, uint32_t>> candidates;
+                 for (uint32_t i_id=0; i_id<adj_new.size(); ++i_id) {
+@@ -345,7 +369,7 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+                             if (a > std::max(b, c)) {
+                                 Float s = 0.5f * (a+b+c);
+                                 Float height = 2*std::sqrt(s*(s-a)*(s-b)*(s-c))/a;
+-                                if (height < thresh)
++                                if (height < thresh_at(i_id))
+                                     candidates.push_back(std::make_tuple(height, i_id, j_id, k_id));
+                             }
+                         }
+@@ -375,10 +399,12 @@ extract_graph(const MultiResolutionHierarchy &mRes, bool extrinsic, int rosy, in
+                     Float height = 2*std::sqrt(s*(s-a)*(s-b)*(s-c))/a;
+                     if (height != std::get<0>(t))
+                         continue;
++                    const Float thresh = thresh_at(i);
+                     if ((p_i-p_j).norm() < thresh || (p_i-p_k).norm() < thresh) {
+                         uint32_t merge_id = (p_i-p_j).norm() < thresh ? j : k;
+                         O_new.col(i) = (O_new.col(i) + O_new.col(merge_id)) * 0.5f;
+                         N_new.col(i) = (N_new.col(i) + N_new.col(merge_id)) * 0.5f;
++                        S_new[i] = (S_new[i] + S_new[merge_id]) * 0.5f;
+                         std::set<uint32_t> adj_updated;
+                         for (auto const &n : adj_new[merge_id]) {
+                             if (n.id == i)
+diff --git a/src/field.cpp b/src/field.cpp
+index 4d986aa..943bc80 100644
+--- a/src/field.cpp
++++ b/src/field.cpp
+@@ -900,7 +900,6 @@ template <typename CompatFunctor, typename RoundFunctor> static inline Float opt
+     const std::vector<std::vector<uint32_t>> &phases = mRes.phases(level);
+     const AdjacencyMatrix &adj = mRes.adj(level);
+     const MatrixXf &N = mRes.N(level), &Q = mRes.Q(level), &V = mRes.V(level);
+-    const Float scale = mRes.scale(), inv_scale = 1.0f / scale;
+     const std::vector<uint32_t> *phase = nullptr;
+     const MatrixXf &CQ = mRes.CQ(level);
+     const MatrixXf &CO = mRes.CO(level);
+@@ -912,6 +911,8 @@ template <typename CompatFunctor, typename RoundFunctor> static inline Float opt
+             const uint32_t i = (*phase)[phaseIdx];
+             const Vector3f n_i = N.col(i), v_i = V.col(i);
+             Vector3f q_i = Q.col(i);
++            /* MBL: tamaño de arista local (igual a la escala global si no hay densidad adaptativa) */
++            const Float s_i = mRes.scaleAt(level, i);
+ 
+             Vector3f sum = O.col(i);
+             Float weight_sum = 0.0f;
+@@ -933,8 +934,9 @@ template <typename CompatFunctor, typename RoundFunctor> static inline Float opt
+                     q_j.normalize();
+                 #endif
+ 
++                const Float s_ij = 0.5f * (s_i + mRes.scaleAt(level, j));
+                 std::pair<Vector3f, Vector3f> value = compat_functor(
+-                    v_i, n_i, q_i, sum, v_j, n_j, q_j, o_j, scale, inv_scale);
++                    v_i, n_i, q_i, sum, v_j, n_j, q_j, o_j, s_ij, 1.0f / s_ij);
+ 
+                 sum = value.first*weight_sum + value.second*weight;
+                 weight_sum += weight;
+@@ -955,7 +957,7 @@ template <typename CompatFunctor, typename RoundFunctor> static inline Float opt
+             }
+ 
+             if (weight_sum > 0)
+-                O.col(i) = round_functor(sum, q_i, n_i, v_i, scale, inv_scale);
++                O.col(i) = round_functor(sum, q_i, n_i, v_i, s_i, 1.0f / s_i);
+         }
+     };
+ 
+@@ -985,8 +987,9 @@ template <typename CompatFunctor, typename RoundFunctor> static inline Float opt
+                     q_j.normalize();
+                 #endif
+                 const Vector3f t_j = n_j.cross(q_j);
++                const Float s_ij = 0.5f * (mRes.scaleAt(level, i) + mRes.scaleAt(level, j));
+ 
+-                sum += o_j + scale * (
++                sum += o_j + s_ij * (
+                       q_j * link->ivar[1].translate_u
+                     + t_j * link->ivar[1].translate_v
+                     - q_i * link->ivar[0].translate_u
+@@ -1022,7 +1025,6 @@ static inline Float error_positions_impl(const MultiResolutionHierarchy &mRes,
+     const AdjacencyMatrix &adj = mRes.adj(level);
+     const MatrixXf &N = mRes.N(level), &Q = mRes.Q(level);
+     const MatrixXf &O = mRes.O(level), &V = mRes.V(level);
+-    const Float scale = mRes.scale(), inv_scale = 1.0f / scale;
+ 
+     auto map = [&](const tbb::blocked_range<uint32_t> &range, Float error) -> Float {
+         for (uint32_t i = range.begin(); i<range.end(); ++i) {
+@@ -1040,8 +1042,9 @@ static inline Float error_positions_impl(const MultiResolutionHierarchy &mRes,
+                     q_j.normalize();
+                 #endif
+ 
++                const Float s_ij = 0.5f * (mRes.scaleAt(level, i) + mRes.scaleAt(level, j));
+                 std::pair<Vector3f, Vector3f> value = functor(
+-                    v_i, n_i, q_i, o_i, v_j, n_j, q_j, o_j, scale, inv_scale);
++                    v_i, n_i, q_i, o_i, v_j, n_j, q_j, o_j, s_ij, 1.0f / s_ij);
+ 
+                 error += (value.first-value.second).cast<double>().squaredNorm();
+             }
+@@ -1109,8 +1112,6 @@ void compute_position_singularities(
+     tbb::spin_mutex mutex;
+     pos_sing.clear();
+ 
+-    const Float scale = mRes.scale(), inv_scale = 1.0f / scale;
+-
+     tbb::parallel_for(
+         tbb::blocked_range<uint32_t>(0u, (uint32_t) F.cols(), GRAIN_SIZE),
+         [&](const tbb::blocked_range<uint32_t> &range) {
+@@ -1144,14 +1145,16 @@ void compute_position_singularities(
+                 for (int k=0; k<3; ++k)
+                     q[k] = rotateFunctor_rosy(q[k], n[k], best[k]);
+ 
++                const uint32_t ids[3] = { i0, i1, i2 };
+                 for (int k=0; k<3; ++k) {
+                     int kn = k == 2 ? 0 : (k+1);
++                    const Float s = 0.5f * (mRes.scaleAt(0, ids[k]) + mRes.scaleAt(0, ids[kn]));
+ 
+                     std::pair<Vector2i, Vector2i> value =
+                         compatPositionIndex(
+                             v[k],  n[k],  q[k],  o[k],
+                             v[kn], n[kn], q[kn], o[kn],
+-                            scale, inv_scale, nullptr);
++                            s, 1.0f / s, nullptr);
+ 
+                     index += value.first - value.second;
+                 }
+@@ -1170,7 +1173,6 @@ static inline void freeze_ivars_positions_impl(MultiResolutionHierarchy &mRes,
+                                                int level, Functor functor) {
+     const AdjacencyMatrix &adj = mRes.adj(level);
+     const MatrixXf &N = mRes.N(level), &Q = mRes.Q(level), &V = mRes.V(level), &O = mRes.O(level);
+-    const Float scale = mRes.scale(), inv_scale = 1.0f / scale;
+ 
+     auto map = [&](const tbb::blocked_range<uint32_t> &range) {
+         for (uint32_t i = range.begin(); i<range.end(); ++i) {
+@@ -1189,10 +1191,11 @@ static inline void freeze_ivars_positions_impl(MultiResolutionHierarchy &mRes,
+                     q_j.normalize();
+                 #endif
+ 
++                const Float s_ij = 0.5f * (mRes.scaleAt(level, i) + mRes.scaleAt(level, j));
+                 std::pair<Vector2i, Vector2i> value = functor(
+                     v_i, n_i, q_i, o_i,
+                     v_j, n_j, q_j, o_j,
+-                    scale, inv_scale, nullptr);
++                    s_ij, 1.0f / s_ij, nullptr);
+ 
+                 link->ivar[0].translate_u = value.first.x();
+                 link->ivar[0].translate_v = value.first.y();
+diff --git a/src/hierarchy.cpp b/src/hierarchy.cpp
+index 2882a67..5bc97a7 100644
+--- a/src/hierarchy.cpp
++++ b/src/hierarchy.cpp
+@@ -438,6 +438,22 @@ void MultiResolutionHierarchy::build(bool deterministic, const ProgressCallback
+             downsample_graph(mAdj[i], mV[i], mN[i], mA[i], V_p, N_p, A_p,
+                              toUpper, toLower, deterministic, progress);
+ 
++        /* MBL: el tamaño por vértice del nivel grueso es la media (por área) de sus dos vértices finos */
++        if (hasScaleField()) {
++            VectorXf S_p(V_p.cols());
++            for (uint32_t k = 0; k < (uint32_t) V_p.cols(); ++k) {
++                uint32_t a = toUpper(0, k), b = toUpper(1, k);
++                if (b == INVALID) {
++                    S_p[k] = mS[i][a];
++                } else {
++                    Float wa = mA[i][a], wb = mA[i][b];
++                    S_p[k] = (wa + wb) > 0 ? (mS[i][a] * wa + mS[i][b] * wb) / (wa + wb)
++                                           : 0.5f * (mS[i][a] + mS[i][b]);
++                }
++            }
++            mS.push_back(std::move(S_p));
++        }
++
+         if (deterministic)
+             generate_graph_coloring_deterministic(adj_p, V_p.cols(), phases_p, progress);
+         else
+@@ -479,7 +495,8 @@ void init_random_tangent(const MatrixXf &N, MatrixXf &Q) {
+     );
+ }
+ 
+-void init_random_position(const MatrixXf &P, const MatrixXf &N, MatrixXf &O, Float scale) {
++void init_random_position(const MatrixXf &P, const MatrixXf &N, MatrixXf &O, Float scale,
++                          const VectorXf *S = nullptr) {
+     O.resize(N.rows(), N.cols());
+     tbb::parallel_for(tbb::blocked_range<uint32_t>(0u, (uint32_t) N.cols()),
+             [&](const tbb::blocked_range<uint32_t> &range) {
+@@ -490,7 +507,7 @@ void init_random_position(const MatrixXf &P, const MatrixXf &N, MatrixXf &O, Flo
+                 coordinate_system(N.col(i), s, t);
+                 float x = rng.nextFloat() * 2.f - 1.f,
+                       y = rng.nextFloat() * 2.f - 1.f;
+-                O.col(i) = P.col(i) + (s*x + t*y)*scale;
++                O.col(i) = P.col(i) + (s*x + t*y)*(S ? (*S)[i] : scale);
+             }
+         }
+     );
+@@ -506,7 +523,7 @@ void MultiResolutionHierarchy::resetSolution() {
+     }
+     for (size_t i=0; i<mV.size(); ++i) {
+         init_random_tangent(mN[i], mQ[i]);
+-        init_random_position(mV[i], mN[i], mO[i], mScale);
++        init_random_position(mV[i], mN[i], mO[i], mScale, hasScaleField() ? &mS[i] : nullptr);
+     }
+     mFrozenO = mFrozenQ = false;
+     cout << "done. (took " << timeString(timer.value()) << ")" << endl;
+@@ -520,7 +537,7 @@ void MultiResolutionHierarchy::free() {
+     mAdj.clear(); mV.clear(); mQ.clear();
+     mO.clear(); mN.clear(); mA.clear();
+     mCQ.clear(); mCO.clear();
+-    mCQw.clear(); mCOw.clear();
++    mCQw.clear(); mCOw.clear(); mS.clear();
+     mToUpper.clear(); mToLower.clear();
+     mPhases.clear();
+     mF.resize(0, 0);
+@@ -749,8 +766,6 @@ void MultiResolutionHierarchy::propagateConstraints(int rosy, int posy) {
+     else
+         throw std::runtime_error("Unsupported symmetry!");
+ 
+-    Float scale = mScale, inv_scale = 1/mScale;
+-
+     for (int l=0; l<levels()-1; ++l)  {
+         const MatrixXf &N = mN[l];
+         const MatrixXf &N_next = mN[l+1];
+@@ -803,10 +818,12 @@ void MultiResolutionHierarchy::propagateConstraints(int rosy, int posy) {
+                         co = CO.col(upper[1]);
+                         cow = COw[upper[1]];
+                     } else if (has_co1 && has_co0) {
++                        /* MBL: con densidad adaptativa, escala media de los dos vértices */
++                        Float s = 0.5f * (scaleAt(l, upper[0]) + scaleAt(l, upper[1]));
+                         auto result = compat_pos(
+-                            V.col(upper[0]), N.col(upper[0]), CQ.col(upper[0]), CO.col(upper[0]), 
++                            V.col(upper[0]), N.col(upper[0]), CQ.col(upper[0]), CO.col(upper[0]),
+                             V.col(upper[1]), N.col(upper[1]), CQ.col(upper[1]), CO.col(upper[1]),
+-                            scale, inv_scale
++                            s, 1 / s
+                         );
+                         cow = COw[upper[0]] + COw[upper[1]];
+                         co = (result.first * COw[upper[0]] + result.second * COw[upper[1]]) / cow;
+@@ -819,7 +836,11 @@ void MultiResolutionHierarchy::propagateConstraints(int rosy, int posy) {
+                         cqw *= 0.5f;
+                         cow *= 0.5f;
+                     #else
+-                        if (cqw > 0)
++                        /* MBL: con direcciones suaves (--orient) el nivel grueso hereda el peso medio;
++                           con peso 1 el campo quedaría clavado a direcciones con ruido */
++                        if (mSoftConstraints)
++                            cqw = (has_cq0 && has_cq1) ? 0.5f * cqw : cqw;
++                        else if (cqw > 0)
+                             cqw = 1;
+                         if (cow > 0)
+                             cow = 1;
+diff --git a/src/hierarchy.h b/src/hierarchy.h
+index 2b3c337..14a1892 100644
+--- a/src/hierarchy.h
++++ b/src/hierarchy.h
+@@ -77,6 +77,12 @@ public:
+ 
+     inline Float scale() const { return mScale; }
+     inline void setScale(Float scale) { mScale = scale; }
++
++    /* MBL: tamaño de arista objetivo por vértice (densidad adaptativa). Vacío = escala uniforme */
++    inline bool hasScaleField() const { return !mS.empty() && mS[0].size() > 0; }
++    inline const VectorXf &S(int level = 0) const { return mS[level]; }
++    inline Float scaleAt(int level, uint32_t i) const { return hasScaleField() ? mS[level][i] : mScale; }
++    inline void setScaleField(VectorXf &&S) { mS.clear(); mS.push_back(std::move(S)); }
+     inline int iterationsQ() const { return mIterationsQ; }
+     inline void setIterationsQ(int iterationsQ) { mIterationsQ = iterationsQ; }
+     inline int iterationsO() const { return mIterationsO; }
+@@ -122,7 +128,10 @@ public:
+     std::vector<MatrixXf> mCO;
+     std::vector<VectorXf> mCQw;
+     std::vector<VectorXf> mCOw;
++    std::vector<VectorXf> mS;
+     bool mFrozenQ, mFrozenO;
++    /* MBL: restricciones de orientación suaves (peso medio en los niveles gruesos en vez de 1) */
++    bool mSoftConstraints = false;
+     ordered_lock mMutex;
+     Float mScale;
+     int mIterationsQ;
+diff --git a/src/main.cpp b/src/main.cpp
+index a2f6f11..4230b9e 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -29,6 +29,9 @@ int main(int argc, char **argv) {
+     int rosy = 4, posy = 4, face_count = -1, vertex_count = -1;
+     uint32_t knn_points = 10, smooth_iter = 2;
+     Float crease_angle = -1, scale = -1;
++    Float adaptive = 0, adaptive_ratio = 3;  /* MBL: densidad adaptativa */
++    std::string density_file;                /* MBL: densidad pintada */
++    std::string orient_file;                 /* MBL: direcciones guía del campo */
+     std::string batchOutput;
+     #if defined(__APPLE__)
+         bool launched_from_finder = false;
+@@ -108,6 +111,30 @@ int main(int argc, char **argv) {
+                     return -1;
+                 }
+                 batchOutput = argv[i];
++            } else if (strcmp("--adaptive", argv[i]) == 0 || strcmp("-A", argv[i]) == 0) {
++                if (++i >= argc) {
++                    cerr << "Missing adaptive density strength argument!" << endl;
++                    return -1;
++                }
++                adaptive = str_to_float(argv[i]);
++            } else if (strcmp("--adaptive-ratio", argv[i]) == 0) {
++                if (++i >= argc) {
++                    cerr << "Missing adaptive ratio argument!" << endl;
++                    return -1;
++                }
++                adaptive_ratio = std::max((Float) 1, str_to_float(argv[i]));
++            } else if (strcmp("--density", argv[i]) == 0) {
++                if (++i >= argc) {
++                    cerr << "Missing density file argument!" << endl;
++                    return -1;
++                }
++                density_file = argv[i];
++            } else if (strcmp("--orient", argv[i]) == 0) {
++                if (++i >= argc) {
++                    cerr << "Missing orientation file argument!" << endl;
++                    return -1;
++                }
++                orient_file = argv[i];
+             } else if (strcmp("--dominant", argv[i]) == 0 || strcmp("-D", argv[i]) == 0) {
+                 dominant = true;
+             } else if (strcmp("--compat", argv[i]) == 0 || strcmp("-C", argv[i]) == 0) {
+@@ -160,6 +187,11 @@ int main(int argc, char **argv) {
+         cout << "   -s, --scale <scale>       Desired world space length of edges in the output" << endl;
+         cout << "   -f, --faces <count>       Desired face count of the output mesh" << endl;
+         cout << "   -v, --vertices <count>    Desired vertex count of the output mesh" << endl;
++        cout << "   -A, --adaptive <0..1>     [MBL] Curvature-adaptive density strength (0 = uniform, default)" << endl;
++        cout << "   --adaptive-ratio <r>      [MBL] Max edge length ratio vs. the median (default: 3)" << endl;
++        cout << "   --density <file>          [MBL] Painted density: one value per input vertex (PLY order), " << endl;
++        cout << "                             1 = normal, 4 = four times more faces per area" << endl;
++        cout << "   --orient <file>           [MBL] Guide directions: one 'dx dy dz weight' row per input vertex" << endl;
+         cout << "   -C, --compat              Compatibility mode to load snapshots from old software versions" << endl;
+         cout << "   -k, --knn <count>         Point cloud mode: number of adjacent points to consider" << endl;
+         cout << "   -F, --fullscreen          Open a full-screen window" << endl;
+@@ -177,7 +209,7 @@ int main(int argc, char **argv) {
+             batch_process(args[0], batchOutput, rosy, posy, scale, face_count,
+                           vertex_count, crease_angle, extrinsic,
+                           align_to_boundaries, smooth_iter, knn_points,
+-                          !dominant, deterministic);
++                          !dominant, deterministic, adaptive, adaptive_ratio, density_file, orient_file);
+             return 0;
+         } catch (const std::exception &e) {
+             cerr << "Caught runtime error : " << e.what() << endl;

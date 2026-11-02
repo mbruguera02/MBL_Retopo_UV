@@ -346,7 +346,7 @@ centro si las dos lo son o la cara tiene más de 4 lados). Si no hay nada devuel
 núcleo (todas las variantes del Motor MBL, también tras soldar la simetría) y en `_finish` / `_symmetric_retopo` del adaptador (después
 de `optimize_quads`, antes de reproyectar). Cuesta 2 triángulos por quad partido.
 
-Resultado con el banco: `midnight` y `criatura` con Maya completan Limpiar + Retopo + UVs; `human`, `prop` y `hardsurface` con Maya dan las
+Resultado con el banco: `midnight` con Maya (5.355 caras, 258 polos, error medio 0,138 %) y con el Motor MBL (5.004 caras, 368 polos, 0,101 %) y `criatura` con Maya (5.721 caras, 363 polos, 0,129 %) completan Limpiar + Retopo + UVs; `human`, `prop` y `hardsurface` con Maya dan las
 mismas caras, polos, fealdad y error que la línea base. Pendiente: una comprobación previa en `uv.unwrap` que explique este fallo en mallas
 del usuario que no pasan por el retopo (hoy sale el mensaje de Unfold3D tal cual).
 

@@ -772,11 +772,19 @@ def test_best_retopo_shares_the_first_request_with_the_other_variants():
         retopo.ENGINES["quadriflow"] = stub
         try:
             retopo.best_retopo(sphere.points, sphere.faces(), 500, "quadriflow", "x", variants=3, workers=workers,
-                               symmetric=False)
+                               symmetric=False, options={"learn_request": True})
         finally:
             retopo.ENGINES["quadriflow"] = original
         assert seen[0] == (None, True), seen
         assert seen[1] == (factor, False) and seen[2] == (factor, False), (workers, factor, seen)
+    # apagado (por defecto) nadie recibe nada ni avisa
+    seen.clear()
+    retopo.ENGINES["quadriflow"] = stub
+    try:
+        retopo.best_retopo(sphere.points, sphere.faces(), 500, "quadriflow", "x", variants=3, workers=1, symmetric=False)
+    finally:
+        retopo.ENGINES["quadriflow"] = original
+    assert all(value == (None, False) for value in seen.values()) and not retopo.LEARN_QUADRIFLOW_REQUEST, seen
 
 
 @test

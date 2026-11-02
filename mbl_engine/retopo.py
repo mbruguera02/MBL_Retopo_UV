@@ -38,9 +38,14 @@ QUADRIFLOW_MAX_REQUEST = 1.5
 QUADRIFLOW_MAX_DEVIATION = 3.0
 # Cuánto da QuadriFlow por cada cara pedida depende de la malla: 0,75 en el humano, 0,98 en un objeto de bordes duros, 0,87 en
 # la criatura. Con QUADRIFLOW_FACTOR (pensado para 0,77) la primera pasada se sale de la tolerancia en tres de esos cuatro
-# modelos y cada variante gasta dos ejecuciones del motor (~4 s cada una). La primera variante cuenta lo que le hizo falta y las
-# demás empiezan ya con esa petición (best_retopo, opción "factor_hint"); si la primera pasada de la primera variante acierta,
-# nadie cambia nada.
+# modelos y cada variante gasta dos ejecuciones del motor (~4 s cada una; en el objeto de bordes duros el 80 % del retopo).
+# Con LEARN_QUADRIFLOW_REQUEST la primera variante cuenta lo que le hizo falta y las demás empiezan ya con esa petición
+# (best_retopo, opción "factor_hint"); si la primera pasada de la primera variante acierta, nadie cambia nada, y la primera
+# variante nunca cambia. Pero la petición no es la misma que habrían hecho al corregir ellas, así que sus mallas son otra muestra
+# del motor caótico: el retopo sale entre un 35 y un 40 % más rápido en tres de los cuatro modelos de prueba, pero cambia lo
+# que se entrega (en el prop ganó una variante con un error de forma medio 1,4 veces mayor y menos polos y fallos visibles).
+# Desactivado por defecto para no cambiar resultados; options["learn_request"] lo cambia en una llamada.
+LEARN_QUADRIFLOW_REQUEST = False
 # puntos del original con los que se mide lo que el retopo no cubre (también es el tamaño de SurfaceReference)
 FIT_SAMPLES = 40000
 
@@ -650,7 +655,7 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
                 raise MemoryLow("No hay memoria libre para otra variante ({:.1f} GB libres, hacen falta {:.1f} GB más el "
                                 "margen).".format((resources.available_memory() or 0) / 1024 ** 3, job_bytes / 1024 ** 3))
             hints = {}
-            if engine == "quadriflow":
+            if engine == "quadriflow" and base_options.get("learn_request", LEARN_QUADRIFLOW_REQUEST):
                 if index == 0:
                     hints["first_attempt"] = publish
                 else:

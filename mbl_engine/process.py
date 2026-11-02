@@ -126,7 +126,10 @@ def _run_once(command, destination, timeout, log_path, tick=None, label="Instant
                         last_cpu, last_change = cpu, now
                     elif now - last_change > stall_seconds:
                         raise _Stalled()
-                time.sleep(0.1)
+                try:
+                    process.wait(timeout=0.1)       # vuelve en cuanto el motor termina, en vez de dormir hasta 0,1 s de más
+                except subprocess.TimeoutExpired:
+                    pass
         except BaseException:
             # cancelado, timeout o error: no dejamos el proceso vivo
             process.kill()

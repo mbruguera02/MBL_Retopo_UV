@@ -43,7 +43,8 @@ plan = core.variant_plan(3, "quadriflow")
 t0 = time.time()
 pr = cProfile.Profile()
 pr.enable()
-shared = core.prepare(points, mesh_faces, faces, "quadriflow", None, 600, None, 0.01,
+# el plugin hace el modelo entero por defecto (retopo_symmetry "off"): con None un modelo simétrico se perfilaba por la mitad
+shared = core.prepare(points, mesh_faces, faces, "quadriflow", False, 600, None, 0.01,
                       {"inflate": any(extra.get("inflate") for _, extra in plan)}, print)
 pr.disable()
 print("prepare: {:.1f} s".format(time.time() - t0))
@@ -55,7 +56,7 @@ factor, extra = plan[0]
 t1 = time.time()
 pr = cProfile.Profile()
 pr.enable()
-p, f, report = core.retopo(points, mesh_faces, int(round(faces * factor)), "quadriflow", executable,
+p, f, report = core.retopo(points, mesh_faces, int(round(faces * factor)), "quadriflow", executable, symmetric=False,
                            options=dict(prepared=shared, **extra), log=print)
 pr.disable()
 print("variante 1: {:.1f} s, {} caras".format(time.time() - t1, len(f)))

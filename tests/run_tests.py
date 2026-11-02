@@ -971,6 +971,37 @@ def test_retopo_result_is_manifold():
 
 
 @test
+def test_make_unfoldable_fixes_what_maya_does_not_flag():
+    """Una aleta pegada a una arista (criatura y midnight con polyRetopo) y un quad con la diagonal repetida (midnight
+    con Maya y con el Motor MBL) los rechaza Unfold3D; make_unfoldable los deja arreglados y las UVs salen."""
+    from mbl_retopo_uv import meshbuild
+    from mbl_retopo_uv.common import MBLError
+    # aleta: dos triángulos con los mismos vértices y la orientación contraria sobre la arista de un quad de una esfera
+    sphere = cmds.polySphere(subdivisionsX=12, subdivisionsY=8, constructionHistory=False)[0]
+    points, faces = retopo.mesh_arrays(sphere)
+    quad = next(f for f in faces if len(f) == 4)
+    tip = 1.1 * (points[quad[0]] + points[quad[1]]) / 2
+    finned = meshbuild.create_mesh(np.vstack([points, tip]), faces + [[quad[0], quad[1], len(points)],
+                                                                      [quad[1], quad[0], len(points)]], "conAleta")
+    assert sum(cleanup.nonmanifold_counts(finned)) > 0
+    fixed = retopo.make_unfoldable(finned)
+    assert cleanup.nonmanifold_counts(fixed) == (0, 0) and cmds.polyEvaluate(fixed, face=True) == len(faces)
+    # quad con la diagonal repetida: maya no lo marca y Unfold3D falla con "Mesh has non-manifold UVs"
+    corners = [(-6.852, -3.066, -5.872), (-7.089, -2.727, -4.985), (-5.174, -1.223, -5.69), (-5.343, -2.697, -7.536),
+               (-5.872, -2.266, -8.828), (-6.634, -3.769, -7.311), (-7.906, -4.691, -6.327), (-8.574, -3.001, -6.942)]
+    patch = meshbuild.create_mesh(corners, [[0, 1, 2, 3], [3, 5, 6, 0], [0, 5, 7, 1], [3, 4, 7, 5]], "conDiagonal")
+    assert cleanup.nonmanifold_counts(patch) == (0, 0)
+    try:
+        uv.unwrap(patch, base_settings(), quiet_log)
+        raise AssertionError("Unfold3D debía rechazar el quad con la diagonal repetida")
+    except MBLError as exc:
+        assert "non-manifold UVs" in str(exc), exc
+    patch = retopo.make_unfoldable(patch)
+    assert cmds.polyEvaluate(patch, face=True) == 5
+    uv.unwrap(patch, base_settings(), quiet_log)
+
+
+@test
 def test_diagnostics():
     plane = cmds.polyPlane(subdivisionsX=4, subdivisionsY=4, constructionHistory=False)[0]
     stats = diagnostics.topology_stats(plane)

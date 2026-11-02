@@ -17,8 +17,8 @@ from . import decimate, fit, metrics, orient, quality, quadopt, sizefield, symme
 from .closest import find_native, make_grid
 from .mesh import Mesh
 from .process import EngineError, MemoryLow, _run_once, run_instant_meshes
-from .repair import (_dissolve_doublets, _remove_small_pieces, fill_new_holes, read_obj, repair_topology,
-                     write_obj, write_ply, vertex_areas)
+from .repair import (_dissolve_doublets, _remove_small_pieces, fill_new_holes, make_manifold, read_obj,
+                     repair_topology, write_obj, write_ply, vertex_areas)
 
 
 # Instant Meshes en modo solo quads subdivide al final: da ~3,15 veces las caras pedidas
@@ -398,6 +398,9 @@ def retopo(points, faces, target_faces, engine, executable, symmetric=None, time
         new_points, new_faces, report["welded"] = symmetry.mirror_mesh(
             new_points, new_faces, center, symmetry.WELD_EDGE_FRACTION * edge)
         new_faces = _dissolve_doublets(new_faces)
+    # lo último: lo que Maya no marca pero Unfold3D rechaza (aletas, quads con la diagonal repetida...). El relajado
+    # y el ajuste pueden dejarlo y el motor ya lo trae a veces; si no hay nada, la malla sale tal cual
+    new_points, new_faces, report["manifold"] = make_manifold(new_points, new_faces)
     new_points, new_faces = compact(new_points, new_faces)
     return new_points, new_faces, report
 

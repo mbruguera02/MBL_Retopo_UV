@@ -36,6 +36,11 @@ QUADRIFLOW_ATTEMPTS = 3
 QUADRIFLOW_MAX_STEP = 2.0
 QUADRIFLOW_MAX_REQUEST = 1.5
 QUADRIFLOW_MAX_DEVIATION = 3.0
+# Cuánto da QuadriFlow por cada cara pedida depende de la malla: 0,75 en el humano, 0,98 en un objeto de bordes duros, 0,87 en
+# la criatura. Con QUADRIFLOW_FACTOR (pensado para 0,77) la primera pasada se sale de la tolerancia en tres de esos cuatro
+# modelos y cada variante gasta dos ejecuciones del motor (~4 s cada una). La primera variante cuenta lo que le hizo falta y las
+# demás empiezan ya con esa petición (best_retopo, opción "factor_hint"); si la primera pasada de la primera variante acierta,
+# nadie cambia nada.
 # puntos del original con los que se mide lo que el retopo no cubre (también es el tamaño de SurfaceReference)
 FIT_SAMPLES = 40000
 
@@ -128,7 +133,8 @@ def _quadriflow(executable, points, faces, target, work, timeout, tick, options)
     source = os.path.join(work, "input.obj")
     destination = os.path.join(work, "output.obj")
     density = options.get("density")
-    asked = target * QUADRIFLOW_FACTOR
+    asked = target * (options.get("factor_hint") or QUADRIFLOW_FACTOR)
+    density_scale = 1.0
     density_file = None
     if density is not None:
         # nuestra versión de QuadriFlow (-density): el valor de cada vértice va en el mismo orden
@@ -139,7 +145,8 @@ def _quadriflow(executable, points, faces, target, work, timeout, tick, options)
         # aristas donde hay densidad, así que el total sube por la densidad media (por área). Se piden
         # menos caras de base para que el total siga siendo el objetivo.
         areas = vertex_areas(points, faces)
-        asked /= float(np.sum(areas * density) / max(np.sum(areas), 1e-30))
+        density_scale = float(np.sum(areas * density) / max(np.sum(areas), 1e-30))
+        asked /= density_scale
     else:
         write_obj(source, points, faces)
     result, tried = None, []
@@ -160,6 +167,11 @@ def _quadriflow(executable, points, faces, target, work, timeout, tick, options)
         tried.append((asked, got, mesh))
         if options.get("attempts") is not None:
             options["attempts"].append((int(asked), got))
+        if attempt == 0 and options.get("first_attempt"):
+            # la petición que habría acertado a la primera (None si esta ya cayó dentro de la tolerancia)
+            accepted = not got or abs(got - target) <= QUADRIFLOW_TOLERANCE * target
+            options["first_attempt"](None if accepted else min(_next_request(tried, target) * density_scale / target,
+                                                                QUADRIFLOW_MAX_REQUEST))
         # con densidad variable el total se desvía: se corrige con la pendiente medida (caras / pedido)
         # y se repite hasta quedar dentro de la tolerancia
         if not got or abs(got - target) <= QUADRIFLOW_TOLERANCE * target:
@@ -621,20 +633,41 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
     engine_kwargs = {k: kwargs[k] for k in ("symmetric", "timeout", "min_piece") if k in kwargs}
     finish_kwargs = {k: kwargs[k] for k in ("relax", "pole_cleanup", "fill_holes") if k in kwargs}
 
+    # lo que la primera variante aprende de QuadriFlow (ver QUADRIFLOW_MAX_REQUEST): {"factor": caras a pedir / objetivo}.
+    # Las demás esperan a su primera pasada, así el resultado no depende de cuántas variantes corran a la vez.
+    learned = {"factor": None, "ready": threading.Event()}
+
+    def publish(factor):
+        learned["factor"] = factor
+        learned["ready"].set()
+
     def run_engine_stage(index):
-        # sin ninguna variante terminada se estima lo que tardará con lo que ha tardado el motor (y ~50 % más de Python)
-        if not can_start_variant(time.time() - start, durations or [1.5 * d for d in engine_durations], time_budget):
-            raise _OutOfTime("sin tiempo")
-        if not resources.wait_for_memory(job_bytes, _process_module.active_jobs, cancel):
-            raise MemoryLow("No hay memoria libre para otra variante ({:.1f} GB libres, hacen falta {:.1f} GB más el "
-                            "margen).".format((resources.available_memory() or 0) / 1024 ** 3, job_bytes / 1024 ** 3))
-        began = time.time()
-        factor, extra = plan[index]
-        prepared = shared_plain if index in plain_variants else shared
-        raw = run_engine(points, faces, int(round(target_faces * factor)), engine, executable, tick=worker_tick,
-                         options=dict(base_options, prepared=prepared, **extra), **engine_kwargs)
-        engine_durations.append(time.time() - began)
-        return index, began, raw
+        try:
+            # sin ninguna variante terminada se estima lo que tardará con lo que ha tardado el motor (y ~50 % más de Python)
+            if not can_start_variant(time.time() - start, durations or [1.5 * d for d in engine_durations], time_budget):
+                raise _OutOfTime("sin tiempo")
+            if not resources.wait_for_memory(job_bytes, _process_module.active_jobs, cancel):
+                raise MemoryLow("No hay memoria libre para otra variante ({:.1f} GB libres, hacen falta {:.1f} GB más el "
+                                "margen).".format((resources.available_memory() or 0) / 1024 ** 3, job_bytes / 1024 ** 3))
+            hints = {}
+            if engine == "quadriflow":
+                if index == 0:
+                    hints["first_attempt"] = publish
+                else:
+                    while not learned["ready"].wait(0.1):
+                        worker_tick()
+                    if learned["factor"]:
+                        hints["factor_hint"] = learned["factor"]
+            began = time.time()
+            factor, extra = plan[index]
+            prepared = shared_plain if index in plain_variants else shared
+            raw = run_engine(points, faces, int(round(target_faces * factor)), engine, executable, tick=worker_tick,
+                             options=dict(base_options, prepared=prepared, **dict(extra, **hints)), **engine_kwargs)
+            engine_durations.append(time.time() - began)
+            return index, began, raw
+        finally:
+            if index == 0:
+                learned["ready"].set()
 
     def run(index, began, raw):
         factor, extra = plan[index]

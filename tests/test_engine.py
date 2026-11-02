@@ -8,6 +8,7 @@ Sirve cualquier Python 3 con numpy (no se importa nada de Maya).
 
 import os
 import sys
+import tempfile
 import time
 import traceback
 
@@ -717,6 +718,65 @@ def test_with_plain_variants():
         assert min(plain) == 1 and (len(plain) < 2 or sorted(plain)[1] == 3)             # alternadas: simétrica, sin, simétrica, sin...
         sym_options = [full[i] for i in range(len(full)) if i not in plain]
         assert sym_options == plan                                                       # las simétricas, tal cual el plan
+
+
+@test
+def test_quadriflow_first_attempt_hint():
+    """QuadriFlow con un motor simulado que da 0,98 caras por cara pedida: la primera pasada con el factor de siempre se sale
+    de la tolerancia y avisa de lo que habría acertado; con esa petición como "factor_hint" basta una ejecución."""
+    sphere = uv_sphere(1.0, 12, 16)
+    points, faces = sphere.points, sphere.faces()
+    asked, ratio = [], [0.98]
+    original = (retopo._run_once, retopo.read_obj)
+
+    def fake_run(command, destination, *args, **kwargs):
+        asked.append(int(command[command.index("-f") + 1]))
+
+    def fake_read(path):
+        count = int(ratio[0] * asked[-1])
+        return [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)], [[0, 1, 2, 3]] * count
+    retopo._run_once, retopo.read_obj = fake_run, fake_read
+    try:
+        learned = []
+        retopo._quadriflow("x", points, faces, 5000, tempfile.mkdtemp(), 10, None, {"first_attempt": learned.append})
+        assert asked[0] == int(5000 * retopo.QUADRIFLOW_FACTOR) and len(asked) == 2, asked
+        assert len(learned) == 1 and abs(learned[0] - asked[1] / 5000.0) < 1e-3, (learned, asked)
+        del asked[:]
+        retopo._quadriflow("x", points, faces, 5000, tempfile.mkdtemp(), 10, None, {"factor_hint": learned[0]})
+        assert len(asked) == 1 and abs(asked[0] - 5000 * learned[0]) < 1, asked
+        # una primera pasada que ya acierta no cambia nada para las demás variantes
+        del asked[:]
+        learned2, ratio[0] = [], 0.77
+        retopo._quadriflow("x", points, faces, 5000, tempfile.mkdtemp(), 10, None, {"first_attempt": learned2.append})
+        assert learned2 == [None] and len(asked) == 1, (learned2, asked)
+    finally:
+        retopo._run_once, retopo.read_obj = original
+
+
+@test
+def test_best_retopo_shares_the_first_request_with_the_other_variants():
+    """La primera variante cuenta lo que pidió QuadriFlow para acertar y las demás lo reciben (también con varias a la vez);
+    si no hizo falta corregir, no reciben nada."""
+    sphere = uv_sphere(2.0, 30, 40, triangulate=False)
+    quads = uv_sphere(2.0, 30, 40, triangulate=False)
+    for workers, factor in ((1, 1.05), (3, 1.05), (3, None)):
+        seen = {}
+        original = retopo.ENGINES["quadriflow"]
+
+        def stub(executable, points, faces, target, work, timeout, tick, options):
+            key = options["seed"]
+            seen[key] = (options.get("factor_hint"), "first_attempt" in options)
+            if "first_attempt" in options:
+                options["first_attempt"](factor)
+            return quads.points, quads.faces()
+        retopo.ENGINES["quadriflow"] = stub
+        try:
+            retopo.best_retopo(sphere.points, sphere.faces(), 500, "quadriflow", "x", variants=3, workers=workers,
+                               symmetric=False)
+        finally:
+            retopo.ENGINES["quadriflow"] = original
+        assert seen[0] == (None, True), seen
+        assert seen[1] == (factor, False) and seen[2] == (factor, False), (workers, factor, seen)
 
 
 @test

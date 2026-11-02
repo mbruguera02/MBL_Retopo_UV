@@ -1,10 +1,9 @@
 {
  "meta": {
-  "commit": "7f1fc8b",
-  "date": "2026-11-02 17:41",
+  "commit": "07eb504",
+  "date": "2026-11-02 23:25",
   "engines": [
-   "maya",
-   "mbl"
+   "maya"
   ],
   "faces": 5000
  },
@@ -13,10 +12,56 @@
    "maya": {
     "engine": "maya",
     "faces_target": 5000,
-    "failure": "Mesh_0_retopo: tiene 1 aristas y 2 vértices no-manifold y Unfold3D no puede trabajar así. Pulsa 'Limpiar' con 'Reparar no-manifold' activado (o haz el retopo) y repite.",
     "input_tris": 528554,
-    "memory_peak_mb": 3905,
-    "wall_seconds": 32.4
+    "memory_peak_mb": 3935,
+    "quality": {
+     "bad_shape_percent": 4.954,
+     "defect_score": 3.901,
+     "flipped_percent": 1.1187,
+     "folded_percent": 1.3459,
+     "grade": 2,
+     "loop_mean": 30.07,
+     "loops_closed_percent": 15.54,
+     "new_holes": 0,
+     "reasons": [
+      "quads deformados: 4.95%",
+      "caras dadas la vuelta: 1.12%",
+      "caras dobladas: 1.35%"
+     ],
+     "size_jump_percent": 1.338
+    },
+    "retopo": {
+     "faces": 5721,
+     "ngons": 0,
+     "poles": 363,
+     "quad_percent": 99.86,
+     "tris": 8
+    },
+    "shape_error": {
+     "max_percent": 2.3035,
+     "mean_percent": 0.1289
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 2,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 1.1,
+     "retopo": 19.3,
+     "total": 63.6,
+     "uv": 43.2
+    },
+    "uv": {
+     "islands": 68,
+     "over_1_5_percent": 7.41,
+     "racord_rot_lt_15": 23.11,
+     "racord_scale_lt_10": 48.34,
+     "seam_percent": 10.84,
+     "stretch_mean": 1.12,
+     "used_percent": 64.59
+    },
+    "wall_seconds": 75.0
    },
    "mbl": {
     "engine": "mbl",
@@ -290,18 +335,109 @@
    "maya": {
     "engine": "maya",
     "faces_target": 5000,
-    "failure": "output_unwrapped_retopo: tiene 1 aristas y 2 vértices no-manifold y Unfold3D no puede trabajar así. Pulsa 'Limpiar' con 'Reparar no-manifold' activado (o haz el retopo) y repite.",
     "input_tris": 41724,
-    "memory_peak_mb": 1329,
-    "wall_seconds": 13.7
+    "memory_peak_mb": 1536,
+    "quality": {
+     "bad_shape_percent": 2.076,
+     "defect_score": 3.148,
+     "flipped_percent": 1.8487,
+     "folded_percent": 0.7656,
+     "grade": 2,
+     "loop_mean": 40.46,
+     "loops_closed_percent": 13.1,
+     "new_holes": 0,
+     "reasons": [
+      "caras dadas la vuelta: 1.85%",
+      "caras dobladas: 0.77%"
+     ],
+     "size_jump_percent": 0.355
+    },
+    "retopo": {
+     "faces": 5355,
+     "ngons": 0,
+     "poles": 258,
+     "quad_percent": 99.851,
+     "tris": 8
+    },
+    "shape_error": {
+     "max_percent": 3.1745,
+     "mean_percent": 0.138
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 2,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.1,
+     "retopo": 8.1,
+     "total": 45.6,
+     "uv": 37.4
+    },
+    "uv": {
+     "islands": 43,
+     "over_1_5_percent": 6.52,
+     "racord_rot_lt_15": 15.53,
+     "racord_scale_lt_10": 47.61,
+     "seam_percent": 9.6,
+     "stretch_mean": 1.14,
+     "used_percent": 56.07
+    },
+    "wall_seconds": 51.5
    },
    "mbl": {
     "engine": "mbl",
     "faces_target": 5000,
-    "failure": "output_unwrapped_retopo: Unfold3D falló: Mesh has non-manifold UVs. Clean up the mesh before using auto seam.\nMesh has non-manifold UVs. Clean up the mesh before using auto seam.",
     "input_tris": 41724,
     "memory_peak_mb": 1557,
-    "wall_seconds": 53.4
+    "quality": {
+     "bad_shape_percent": 5.718,
+     "defect_score": 5.791,
+     "flipped_percent": 2.8777,
+     "folded_percent": 1.219,
+     "grade": 2,
+     "loop_mean": 31.43,
+     "loops_closed_percent": 5.83,
+     "new_holes": 0,
+     "reasons": [
+      "quads deformados: 5.72%",
+      "caras dadas la vuelta: 2.88%",
+      "caras dobladas: 1.22%"
+     ],
+     "size_jump_percent": 1.651
+    },
+    "retopo": {
+     "faces": 5004,
+     "ngons": 0,
+     "poles": 368,
+     "quad_percent": 99.6,
+     "tris": 20
+    },
+    "shape_error": {
+     "max_percent": 2.848,
+     "mean_percent": 0.1005
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 2,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.1,
+     "retopo": 38.5,
+     "total": 65.9,
+     "uv": 27.2
+    },
+    "uv": {
+     "islands": 44,
+     "over_1_5_percent": 6.61,
+     "racord_rot_lt_15": 27.78,
+     "racord_scale_lt_10": 56.67,
+     "seam_percent": 10.55,
+     "stretch_mean": 1.128,
+     "used_percent": 58.85
+    },
+    "wall_seconds": 71.7
    }
   },
   "prop": {

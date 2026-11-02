@@ -1,0 +1,8 @@
+{
+ "_comentario": "Copia este archivo como bench_models.json (no se sube a git) y pon la ruta de cada modelo. Las rutas relativas cuentan desde esta carpeta.",
+ "human": "C:/modelos/human.obj",
+ "prop": "C:/modelos/prop.obj",
+ "hardsurface": "C:/modelos/hardsurface.fbx",
+ "criatura": "C:/modelos/criatura.fbx",
+ "midnight": "C:/modelos/personaje_dedos_juntos.fbx"
+}

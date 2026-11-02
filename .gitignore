@@ -31,3 +31,10 @@ engine/build-geom/
 # estado de las herramientas de trabajo y paquetes generados
 .superpowers/
 *.zip
+
+# banco de pruebas: modelos propios de cada persona y registros de las mediciones
+tests/bench_models.json
+tests/*_logs/
+
+# AutoRemesher (MIT): solo para medirlo en el banco, no va en el repositorio ni en el plugin
+engine/autoremesher-bin/

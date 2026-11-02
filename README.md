@@ -35,6 +35,8 @@ import runpy; runpy.run_path(r"C:\Users\tu_usuario\Downloads\MBL_Retopo_UV\insta
 
 ## Usar
 
+> ¿Primera vez? Hay un [tutorial paso a paso](docs/tutorial.md) con un ejemplo rápido de cada apartado, las guías de flujo y el pincel de detalle.
+
 1. **Guarda tu escena** y selecciona la malla (puedes elegir varias; se procesan una a una).
 2. Abre **MBL > MBL Retopo UV**.
 3. Pulsa **Todo: limpiar → retopo → UVs**.
@@ -60,7 +62,7 @@ Con los valores que trae la ventana, la mayoría de modelos salen bien. Estos so
 
 El resto (los grupos *Limpieza*, *Más opciones*, *Guías de flujo*, *Pincel de detalle* y el detalle de las UVs) está explicado al pasar el ratón por encima de cada casilla. Si no sabes qué hace algo, déjalo como está.
 
-> El recuadro **Instant Meshes** de arriba de la ventana no hace falta tocarlo: el programa ya viene incluido y se encuentra solo.
+> Si eliges el motor **Instant Meshes**, arriba aparece un recuadro con la ruta del programa: no hace falta tocarlo, el programa ya viene incluido y se encuentra solo.
 
 ### El semáforo
 
@@ -74,9 +76,9 @@ Debajo de cada punto amarillo o rojo sale **→ qué tocar**: el ajuste exacto d
 
 ## Lo que conviene saber
 
-- **Está pensado para texturizar**, no para animar. Los anillos de la malla (los *edge loops*) no siguen la forma como lo haría un modelador a mano, así que para deformaciones finas (caras, hombros) revísalos.
+- **Los anillos de la malla (los *edge loops*) no siguen la forma como lo haría un modelador a mano**, así que para animar o simular, y sobre todo para deformaciones finas (caras, hombros, codos), revísalos antes del rig y usa las guías de flujo (más abajo).
 - **Las piezas más finas que una arista** (plumas, membranas, telas sueltas) pueden salir con pequeños defectos en el borde. El semáforo suele avisar.
-- **Para un resultado concreto** (por ejemplo, un anillo alrededor de los ojos) puedes dibujar **guías de flujo** o pintar **detalle** donde quieras más caras. Están en *Más opciones*.
+- **Para un resultado concreto** (por ejemplo, un anillo alrededor de los ojos) puedes dibujar **guías de flujo** o pintar **detalle** donde quieras más caras. Están en el grupo *2. Retopología*, debajo de *Más opciones*.
 - **Los cortes de las UVs y los rayones en Substance.** Un corte siempre parte la textura en dos trozos que no se continúan. Si las capas de Substance (grunge, vetas, rayones procedurales) usan **proyección UV**, la unión se nota: ponles proyección **triplanar** o de **espacio mundo**. Lo pintado a mano con el pincel y las máscaras de curvatura u oclusión se pintan sobre el modelo en 3D y casi no lo notan. El plugin deja todas las islas de pie (la textura va en la misma dirección a los dos lados de un corte) y, con *Costuras escondidas*, lleva los cortes a zonas poco visibles.
 - **Cuida la memoria de tu ordenador.** QuadriFlow, el motor de fondo del Motor MBL, gasta unos 54 KB por cada cara que se le pide (25.000 caras, 1,5 GB; 60.000, 3,3 GB). Con 16 GB de RAM o menos trabaja una variante a la vez, no usa más de la mitad de la memoria, corre con prioridad baja y, si la memoria libre baja de 1,2 GB, se detiene solo y Maya sigue vivo. Si pides tantas caras que no caben, te dice cuántas puedes pedir.
 - La ventana está en español.
@@ -86,7 +88,7 @@ Debajo de cada punto amarillo o rojo sale **→ qué tocar**: el ajuste exacto d
 El plugin no puede decidir dónde van los polos (los vértices que no tienen 4 aristas), y en una malla que se deforma se notan
 sobre todo en codos, rodillas, muñecas, hombros, ojos y boca. Lo que sí sigue el retopo son los **anillos que le dibujes**:
 
-1. Selecciona el modelo original y abre *Más opciones*, apartado **Guías de flujo**. Pulsa **Dibujar guías**.
+1. Selecciona el modelo original y busca el bloque **Guías de flujo**, en el grupo *2. Retopología* (debajo de *Más opciones*). Pulsa **Dibujar guías**.
 2. Dibuja un trazo cerrado alrededor de cada zona que se doble: un anillo en cada codo, rodilla y muñeca (cruzando el hueso),
    y otro alrededor de cada ojo y de la boca. Los trazos se pegan a la superficie. Si quieres varios anillos en una articulación,
    dibuja varios trazos paralelos.

@@ -255,7 +255,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         # guías y pincel de detalle
         w["retopo_detail_density"] = _spin(1.5, 16.0, 4.0, 0.5, 1, "x",
                                            "Cuántas veces más caras por unidad de área tendrán las zonas "
-                                           "pintadas. El total de caras se mantiene: el resto queda algo más ligero.")
+                                           "pintadas. Las caras extra se suman al total, así que lo no pintado no pierde detalle.")
         self.guide_button = QtWidgets.QPushButton("Dibujar guías")
         self.guide_button.setToolTip(
             "Selecciona el modelo original y pulsa: dibuja trazos sobre él (alrededor de ojos, boca, "

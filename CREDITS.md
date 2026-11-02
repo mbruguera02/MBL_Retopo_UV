@@ -11,7 +11,7 @@ MBL Retopo UV se apoya en el trabajo de otras personas. Aquí están todos los p
 | Reducción de mallas (`engine/mbl_decimate`) | Michael Garland y Paul Heckbert. *Surface Simplification Using Quadric Error Metrics*, SIGGRAPH 1997 | (algoritmo; código propio) | Colapso de aristas con cuádricas para dar al motor una versión reducida de la malla. Implementación propia, sin código de terceros. |
 | Medida de error de forma (`mbl_engine/metrics.py`) | Paolo Cignoni, Claudio Rocchini y Roberto Scopigno. *Metro: measuring error on simplified surfaces*, Computer Graphics Forum 1998 | (algoritmo; código propio) | Distancia entre superficies en los dos sentidos (Hausdorff), con la que se mide y se ajusta el retopo. |
 | Punto más cercano (`engine/mbl_geom`) | Christer Ericson. *Real-Time Collision Detection*, Morgan Kaufmann 2004 (punto más cercano de un punto a un triángulo) | (algoritmo; código propio) | Búsqueda con jerarquía de cajas y varios hilos. Implementación propia, sin código de terceros. |
-| [QuadWild-BiMDF](https://github.com/cgg-bern/quadwild-bimdf) | QuadWild: Nico Pietroni, Stefano Nuvoli, Thomas Alderighi, Paolo Cignoni y Marco Tarini (SIGGRAPH 2021). BiMDF: Martin Heistermann, Jethro Warnett y David Bommes (SIGGRAPH 2023) | GPL-3 | Motor opcional «por parches». Solo se ejecutan sus binarios oficiales como programa externo (`mbl_retopo_uv/bin/quadwild`); su código no se mezcla con el nuestro. Código fuente en su repositorio. |
+| [QuadWild-BiMDF](https://github.com/cgg-bern/quadwild-bimdf) | QuadWild: Nico Pietroni, Stefano Nuvoli, Thomas Alderighi, Paolo Cignoni y Marco Tarini (SIGGRAPH 2021). BiMDF: Martin Heistermann, Jethro Warnett y David Bommes (SIGGRAPH 2023) | GPL-3 | Motor opcional «por parches». Solo se ejecutan sus binarios oficiales como programa externo (`mbl_retopo_uv/bin/quadwild`); su código no se mezcla con el nuestro. Su `LICENSE.txt` y la dirección de su código fuente (versión 0.0.2) van junto a los ejecutables, en `mbl_retopo_uv/bin/quadwild/CODIGO_FUENTE.md`. |
 
 ## Bibliotecas usadas al compilar
 
@@ -23,7 +23,22 @@ MBL Retopo UV se apoya en el trabajo de otras personas. Aquí están todos los p
 | [PCG32](https://www.pcg-random.org) | Melissa O'Neill; versión compacta de Wenzel Jakob | Apache 2.0 | Números aleatorios en Instant Meshes y QuadriFlow |
 | Parallel Stable Sort | Intel Corporation | BSD 3 cláusulas | Ordenación en paralelo en Instant Meshes y QuadriFlow |
 | [Intel TBB](https://github.com/oneapi-src/oneTBB) | Intel Corporation | Apache 2.0 | Hilos en Instant Meshes |
-| [NanoGUI](https://github.com/wjakob/nanogui) | Wenzel Jakob | BSD 3 cláusulas | Interfaz de Instant Meshes (el plugin no la usa) |
+| [NanoGUI](https://github.com/wjakob/nanogui) | Wenzel Jakob | BSD 3 cláusulas | Interfaz de Instant Meshes (el plugin no la usa). Trae GLFW y NanoVG (licencia zlib) y GLAD (dominio público/MIT) |
+| [RPly](http://w3.impa.br/~diego/software/rply/) | Diego Nehab | MIT | Lectura y escritura de archivos PLY en Instant Meshes |
+| [half](https://half.sourceforge.net) | Christian Rau | MIT | Números de media precisión en Instant Meshes |
+| dset (conjuntos disjuntos) | Wenzel Jakob | zlib | Agrupar vértices en Instant Meshes |
+| MapleCOMSPS (derivado de MiniSat) | Jia Hui Liang y colaboradores; MiniSat: Niklas Eén y Niklas Sörensson | MIT | Resolutor SAT que trae QuadriFlow |
+
+## Licencias junto a los ejecutables
+
+Los ejecutables de `mbl_retopo_uv/bin` llevan al lado el texto de la licencia de cada proyecto:
+
+- `LICENSE.txt`: Instant Meshes (BSD 3 cláusulas).
+- `LICENSE-QuadriFlow.txt`: QuadriFlow (BSD 3 cláusulas).
+- `quadwild/LICENSE.txt` y `quadwild/CODIGO_FUENTE.md`: QuadWild-BiMDF (GPL-3) y dónde está su código fuente.
+- `mbl_decimate.exe` y `mbl_geom.exe` son código propio (licencia MIT, ver `LICENSE`); su fuente está en `engine/`.
+
+El código del plugin es MIT. Los programas GPL-3 se ejecutan como procesos aparte, sin enlazarlos con el plugin.
 
 ## Dentro de Maya
 

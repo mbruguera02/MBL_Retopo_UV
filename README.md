@@ -1,8 +1,8 @@
 # MBL Retopo UV
 
-**Prepara cualquier malla 3D para texturizarla, con un clic.** Es un plugin para Maya 2026 que limpia el modelo, le rehace la topología (una malla ordenada de cuadrados, con las caras que pidas) y le crea las UVs, listo para Substance Painter. No hace falta saber modelar ni hacer UVs.
+**Prepara cualquier malla 3D para texturizar, animar o usar en VFX, con un clic.** Es un plugin para Maya 2026 que limpia el modelo, le rehace la topología (una malla ordenada de cuadrados, con las caras que pidas) y le crea las UVs, listo para Substance Painter, para el rig y la animación o para simulación y efectos. No hace falta saber modelar ni hacer UVs.
 
-Está pensado para mallas orgánicas que no vienen bien hechas (personajes y criaturas de escaneos, de IA o de sculpts), y también para arreglar los fallos de tus propios modelos: bucles que no casan, deformaciones, subdivisiones que sobran.
+Está pensado para mallas orgánicas que no vienen bien hechas (personajes y criaturas de escaneos, de IA o de sculpts), y también para arreglar los fallos de tus propios modelos: bucles que no casan, deformaciones, subdivisiones que sobran. Para animación y VFX tienes además un [apartado con guías de flujo](#para-animación-y-vfx-guías-de-flujo) para colocar los anillos de topología en codos, rodillas, ojos y boca.
 
 ## Qué necesitas
 
@@ -140,6 +140,6 @@ El código de este proyecto es de uso libre bajo licencia MIT ([`LICENSE`](LICEN
 
 ## In short (English)
 
-MBL Retopo UV is a Maya 2026 plugin (Windows) that cleans a mesh, rebuilds its topology as quads and creates its UVs for Substance Painter, in one click. The interface is in Spanish.
+MBL Retopo UV is a Maya 2026 plugin (Windows) that cleans a mesh, rebuilds its topology as quads and creates its UVs, in one click: ready for texturing (Substance Painter), rigging and animation, or VFX and simulation. The interface is in Spanish.
 
 1. Unzip the download. 2. Open Maya 2026. 3. Drag `install.py` into the Maya viewport. 4. Select your mesh, open **MBL > MBL Retopo UV** and press **Todo** (all steps). Drag `uninstall.py` to remove it. Everything runs locally; nothing is sent over the network.

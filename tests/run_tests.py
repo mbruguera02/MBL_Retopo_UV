@@ -1,0 +1,1066 @@
+# -*- coding: utf-8 -*-
+"""Pruebas de MBL Retopo UV en Maya sin interfaz (mayapy).
+
+Windows:
+    "C:\\Program Files\\Autodesk\\Maya2026\\bin\\mayapy.exe" tests\\run_tests.py
+macOS:
+    /Applications/Autodesk/maya2026/Maya.app/Contents/bin/mayapy tests/run_tests.py
+
+Variables opcionales:
+    MBL_INSTANT_MESHES=<ruta>  usa el Instant Meshes real en vez del sustituto de pruebas
+    MBL_TEST_FBX=<ruta.fbx>    además procesa ese FBX completo (limpieza + retopo + UVs)
+"""
+
+import math
+import os
+import sys
+import tempfile
+import time
+import traceback
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
+
+import maya.standalone  # noqa: E402
+
+maya.standalone.initialize(name="python")
+
+import maya.api.OpenMaya as om  # noqa: E402
+import maya.cmds as cmds  # noqa: E402
+import numpy as np  # noqa: E402
+
+from mbl_retopo_uv import cleanup, config, diagnostics, orient, pipeline, retopo, status, uv  # noqa: E402
+from mbl_retopo_uv.common import RetopoError  # noqa: E402
+
+RESULTS = []
+
+
+def test(func):
+    """Registra la prueba y la ejecuta en una escena nueva."""
+    def wrapper():
+        cmds.file(new=True, force=True)
+        start = time.time()
+        try:
+            func()
+        except Exception:
+            RESULTS.append((func.__name__, False, traceback.format_exc()))
+            print("FALLO  {}\n{}".format(func.__name__, traceback.format_exc()))
+        else:
+            RESULTS.append((func.__name__, True, ""))
+            print("OK     {} ({:.1f} s)".format(func.__name__, time.time() - start))
+    wrapper.__name__ = func.__name__
+    TESTS.append(wrapper)
+    return wrapper
+
+
+TESTS = []
+
+
+def quiet_log(message, level="info"):
+    print("    [{}] {}".format(level, message))
+
+
+def fake_instant_meshes():
+    os.environ["MBL_FAKE_PYTHON"] = sys.executable
+    folder = os.path.join(HERE, "fake_instant_meshes")
+    if sys.platform.startswith("win"):
+        return os.path.join(folder, "Instant Meshes.cmd")
+    path = os.path.join(folder, "instant-meshes.sh")
+    os.chmod(path, 0o755)
+    return path
+
+
+def base_settings(**overrides):
+    settings = dict(config.DEFAULTS)
+    settings["instant_meshes_path"] = os.environ.get("MBL_INSTANT_MESHES") or fake_instant_meshes()
+    settings["retopo_timeout"] = 180
+    # las pruebas del circuito de Instant Meshes usan el motor por línea de comandos (o el sustituto)
+    settings["retopo_engine"] = "instant_meshes"
+    settings["uv_map_size"] = 2048
+    settings["uv_padding_px"] = 8
+    settings["uv_layout_quality"] = 256
+    settings["retopo_target_faces"] = 2000
+    # las primitivas de Maya traen UVs de serie: no son costuras puestas por el usuario
+    settings["uv_respect_existing"] = False
+    settings.update(overrides)
+    return settings
+
+
+def make_dense_mesh():
+    """Esfera de 40.000 caras deformada con ondas: algo parecido a un escaneo orgánico."""
+    mesh = cmds.polySphere(name="denseOrganic", radius=5, subdivisionsX=200, subdivisionsY=200,
+                           constructionHistory=False)[0]
+    fn = om.MFnMesh(om.MSelectionList().add(mesh).getDagPath(0))
+    points = fn.getPoints()
+    for i, p in enumerate(points):
+        bump = 1.0 + 0.08 * math.sin(p.x * 2.1) * math.cos(p.y * 1.7) + 0.05 * math.sin(p.z * 3.3)
+        points[i] = om.MPoint(p.x * bump, p.y * bump * 1.3, p.z * bump)
+    fn.setPoints(points)
+    return cmds.ls(mesh, long=True)[0]
+
+
+def make_test_meshes():
+    meshes = [
+        cmds.polyCube(name="testCube", width=2, height=3, depth=1, constructionHistory=False)[0],
+        cmds.polySphere(name="testSphere", radius=1.5, constructionHistory=False)[0],
+        cmds.polyTorus(name="testTorus", radius=2, sectionRadius=0.6, constructionHistory=False)[0],
+    ]
+    cmds.move(5, 0, 0, meshes[1])
+    cmds.move(-5, 0, 0, meshes[2])
+    cmds.rotate(30, 10, 0, meshes[2])
+    return cmds.ls(meshes, long=True) + [make_dense_mesh()]
+
+
+def assert_good_uvs(mesh, udim=False):
+    report = uv.check(mesh, udim=udim)
+    name = mesh.split("|")[-1]
+    assert report["overlapping_faces"] == 0, "{}: {} caras solapadas".format(name, report["overlapping_faces"])
+    assert report["flipped_faces"] == 0, "{}: {} caras en espejo".format(name, report["flipped_faces"])
+    if udim:
+        assert not report["negative"], "{}: UVs negativas".format(name)
+        assert not report["crossing_tiles"], "{}: islas cruzando tiles".format(name)
+    else:
+        assert not report["outside_0_1"], "{}: UVs fuera de 0-1 {}".format(name, report["bounds"])
+    faces = cmds.polyEvaluate(mesh, face=True)
+    mapped = len(cmds.ls(cmds.polyListComponentConversion(mesh + ".map[*]", toFace=True), flatten=True))
+    assert mapped == faces, "{}: {} de {} caras sin UVs".format(name, faces - mapped, faces)
+    return report
+
+
+# ---------------------------------------------------------------- pruebas sin geometría
+
+@test
+def test_config_roundtrip():
+    path = os.path.join(tempfile.mkdtemp(), "settings.json")
+    settings = dict(config.DEFAULTS, retopo_target_faces=1234, uv_udim=True)
+    config.save(settings, path)
+    loaded = config.load(path)
+    assert loaded["retopo_target_faces"] == 1234 and loaded["uv_udim"] is True
+    with open(path, "w") as handle:
+        handle.write('{"retopo_target_faces": "mal", "uv_udim": 1}')
+    loaded = config.load(path)
+    assert loaded["retopo_target_faces"] == config.DEFAULTS["retopo_target_faces"]
+    assert loaded["uv_udim"] is config.DEFAULTS["uv_udim"]
+    # ajustes de una versión anterior: las claves cuyo valor por defecto mejoró vuelven al nuevo
+    with open(path, "w") as handle:
+        handle.write('{"uv_split_shells": 0.0, "uv_optimize_iterations": 10, "retopo_target_faces": 777}')
+    loaded = config.load(path)
+    assert loaded["uv_split_shells"] == config.DEFAULTS["uv_split_shells"], loaded["uv_split_shells"]
+    assert loaded["uv_optimize_iterations"] == config.DEFAULTS["uv_optimize_iterations"]
+    assert loaded["retopo_target_faces"] == 777
+    config.save(dict(config.DEFAULTS, uv_split_shells=0.2), path)
+    assert config.load(path)["uv_split_shells"] == 0.2
+
+
+@test
+def test_resolve_executable():
+    folder = tempfile.mkdtemp()
+    exe = os.path.join(folder, "Instant Meshes.exe")
+    open(exe, "w").close()
+    assert config.resolve_executable(folder, "win32") == exe
+    assert config.resolve_executable('"{}"'.format(exe), "win32") == exe
+    assert config.resolve_executable(os.path.join(folder, "nada.exe")) is None
+    # bundle de macOS
+    app = os.path.join(folder, "Instant Meshes.app")
+    os.makedirs(os.path.join(app, "Contents", "MacOS"))
+    binary = os.path.join(app, "Contents", "MacOS", "Instant Meshes")
+    open(binary, "w").close()
+    assert config.resolve_executable(app, "darwin") == binary
+
+
+@test
+def test_build_command():
+    settings = dict(config.DEFAULTS, retopo_target_faces=3000, retopo_crease_angle=35, retopo_smooth=3,
+                    retopo_pure_quads=True, retopo_deterministic=True)
+    command = retopo.build_command("im", "in.obj", "out.obj", settings)
+    assert command[:4] == ["im", "in.obj", "-o", "out.obj"]
+    joined = " ".join(command)
+    # en modo quads puros se pide menos porque Instant Meshes subdivide al final
+    for part in ("-f 952", "-r 4", "-p 4", "-S 3", "-c 35", "-d"):
+        assert part in joined, part
+    assert "-D" not in command and "-b" not in command
+    settings.update(retopo_pure_quads=False, retopo_deterministic=False, retopo_crease_angle=0,
+                    _align_boundaries_now=True)
+    command = retopo.build_command("im", "in.obj", "out.obj", settings)
+    assert "-D" in command and "-b" in command and "-d" not in command and "-c" not in command
+    assert "-f 3000" in " ".join(command)
+    # densidad adaptativa: solo si el motor la admite
+    settings.update(retopo_adaptive=0.4, retopo_adaptive_ratio=3.0)
+    assert "--adaptive" not in retopo.build_command("im", "a", "b", settings)
+    settings["_adaptive_supported"] = True
+    joined = " ".join(retopo.build_command("im", "a", "b", settings))
+    assert "--adaptive 0.4" in joined and "--adaptive-ratio 3" in joined, joined
+
+
+@test
+def test_engine_detection():
+    bin_dir = os.path.join(ROOT, "mbl_retopo_uv", "bin")
+    mbl = os.path.join(bin_dir, "Instant Meshes.exe")
+    official = os.path.join(bin_dir, "Instant Meshes (oficial).exe")
+    if not os.path.isfile(mbl):
+        print("    sin Instant Meshes en mbl_retopo_uv/bin: se omite")
+        return
+    assert retopo.engine_supports_adaptive(mbl), "la versión MBL debería admitir --adaptive"
+    if os.path.isfile(official):
+        assert not retopo.engine_supports_adaptive(official)
+    assert not retopo.engine_supports_adaptive(fake_instant_meshes())
+
+
+@test
+def test_repair_topology():
+    """Defectos típicos de Instant Meshes, reparados sin Maya sobre la lista de caras."""
+    # rejilla 3x3 de quads (vértices 0..15), con defectos añadidos
+    points = [(x, y, 0.0) for y in range(4) for x in range(4)]
+    grid = [[y * 4 + x, y * 4 + x + 1, (y + 1) * 4 + x + 1, (y + 1) * 4 + x] for y in range(3) for x in range(3)]
+    faces = [list(f) for f in grid]
+    faces[4] = faces[4][::-1]                       # cara invertida respecto a sus vecinas
+    faces.append(list(grid[0]))                     # cara duplicada
+    faces.append([0, 1, 1, 5])                      # cara degenerada
+    # vértice pajarita: un triángulo suelto que solo toca la rejilla en el vértice 15
+    points += [(4.0, 4.0, 0.0), (4.0, 3.0, 0.0)]
+    faces.append([15, 17, 16])
+    fixed_points, fixed, report = retopo.repair_topology(points, faces, min_piece_ratio=0.0, max_hole_edges=0)
+    assert report["bowties"] == 1, report
+    edge_faces = retopo._edge_faces(fixed)
+    assert all(len(owners) <= 2 for owners in edge_faces.values())
+    directed = [e for f in fixed for e in retopo._edges(f)]
+    assert len(directed) == len(set(directed)), "orientación incoherente"
+    assert len(fixed) == 10, fixed
+
+    # vértice de 2 aristas entre dos quads (dos caras que comparten dos aristas)
+    points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0), (0, 1, 0), (1, 0.5, 0)]
+    faces = [[0, 1, 6, 4, 5], [1, 2, 3, 4, 6]]
+    _, fixed, report = retopo.repair_topology(points, faces, 0.0, 0)
+    assert report["doublets"] == 1 and all(6 not in f for f in fixed), (report, fixed)
+
+    # agujero de 4 aristas en una rejilla cerrada en anillo: se rellena con triángulos
+    points = [(x, y, 0.0) for y in range(4) for x in range(4)]
+    faces = [list(f) for i, f in enumerate(grid) if i != 4]
+    _, fixed, report = retopo.repair_topology(points, faces, 0.0, 4)
+    assert report["holes"] == 1 and len(fixed) == 8 + 4, report
+
+
+# ---------------------------------------------------------------- limpieza
+
+@test
+def test_cleanup_and_detection():
+    cube = cmds.polyCube(name="dirty", constructionHistory=False)[0]
+    cmds.move(1, 2, 3, cube)
+    cmds.scale(2, 2, 2, cube)
+    # vértices duplicados: separar una cara y volver a fusionar
+    cmds.polyChipOff(cube + ".f[0]", duplicate=False, keepFacesTogether=True)
+    before = cmds.polyEvaluate(cube, vertex=True)
+    report = cleanup.cleanup(cube, dict(config.DEFAULTS), quiet_log)
+    assert cmds.polyEvaluate(cube, vertex=True) < before, "no se fusionaron vértices"
+    assert cmds.getAttr(cube + ".translate")[0] == (0.0, 0.0, 0.0), "no se congelaron transformaciones"
+    assert not cmds.listHistory(cube, pruneDagObjects=True), "queda historial"
+    assert not any(cleanup.count_problems(report).values()), report
+
+    # malla con problemas: 3 caras compartiendo arista (no-manifold) y una cara de área cero
+    points = [om.MPoint(*p) for p in [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0), (0, -1, 0),
+                                      (1, -1, 0), (0, 0, 1), (1, 0, 1),
+                                      (3, 0, 0), (3, 0, 0), (3, 0, 0)]]
+    counts = [4, 4, 4, 3]
+    connects = [0, 1, 3, 2, 0, 4, 5, 1, 0, 1, 7, 6, 8, 9, 10]
+    fn = om.MFnMesh()
+    fn.create(points, counts, connects)
+    bad = cmds.ls(cmds.listRelatives(fn.fullPathName(), parent=True, fullPath=True), long=True)[0]
+    counts = cleanup.count_problems(cleanup.analyze(bad))
+    assert counts["nonmanifold_edges"] >= 1, counts
+    assert counts["zero_area_faces"] == 1, counts
+
+    # las UVs se niegan con un mensaje claro y sin tocar la malla
+    uvs_before = cmds.polyEvaluate(bad, uvcoord=True)
+    outcome = pipeline.run([bad], ["uv"], base_settings(), quiet_log)
+    assert outcome["errors"] and "no-manifold" in outcome["errors"][0][1], outcome
+    assert cmds.polyEvaluate(bad, uvcoord=True) == uvs_before
+    # la limpieza lo repara y después las UVs funcionan
+    cleanup.cleanup(bad, dict(config.DEFAULTS, cleanup_merge=False), quiet_log)
+    assert cleanup.nonmanifold_counts(bad) == (0, 0), cleanup.nonmanifold_counts(bad)
+    outcome = pipeline.run([bad], ["uv"], base_settings(), quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+
+
+@test
+def test_timers_and_cheap_cleanup():
+    """Duraciones legibles, hora en el registro, cronómetro por paso y limpieza que no repite lo que no cambia nada."""
+    from mbl_retopo_uv import common
+    assert common.format_duration(35) == "35 s"
+    assert common.format_duration(252) == "4 min 12 s"
+    assert common.format_duration(420.4) == "7 min 00 s"
+    assert common.format_duration(3780) == "1 h 03 min"
+    now = common.stamp()
+    assert len(now) == 8 and now[2] == ":" and now[5] == ":", now
+    cube = cmds.polyCube(name="tidy", constructionHistory=False)[0]
+    assert cleanup.is_identity(cube) and not cleanup.has_history(cube)
+    cmds.move(1, 0, 0, cube)
+    assert not cleanup.is_identity(cube)
+    cmds.move(0, 0, 0, cube)
+    messages = []
+    outcome = pipeline.run([cube], ["cleanup"], base_settings(), lambda m, level="info": messages.append(m))
+    assert not outcome["errors"], outcome["errors"]
+    assert any("sin historial" in m for m in messages) and any("ya congeladas" in m for m in messages), messages
+    assert any("Limpieza empieza" in m for m in messages) and any("ha tardado" in m and "limpieza" in m for m in messages), messages
+    timing = outcome["timings"][outcome["results"][0]]
+    assert timing["total"] >= timing["cleanup"] >= 0.0, timing
+    # con historial y transformaciones por congelar sí se hacen
+    dirty = cmds.polyCube(name="dirty2")[0]
+    cmds.move(1, 2, 3, dirty)
+    assert cleanup.has_history(dirty)
+    cleanup.cleanup(dirty, dict(config.DEFAULTS), quiet_log)
+    assert cmds.getAttr(dirty + ".translate")[0] == (0.0, 0.0, 0.0) and not cleanup.has_history(dirty)
+
+
+# ---------------------------------------------------------------- UVs
+
+@test
+def test_hard_edges_match_polySelectConstraint():
+    """Nuestro cálculo por ángulo coincide con polySelectConstraint (el método del prototipo)."""
+    for mesh, angle in [(cmds.polyCube(constructionHistory=False)[0], 80),
+                        (cmds.polyTorus(subdivisionsX=12, subdivisionsY=6, constructionHistory=False)[0], 40)]:
+        ours = set(uv.hard_angle_edges(mesh, angle))
+        cmds.select(mesh + ".e[*]")
+        cmds.polySelectConstraint(mode=2, type=0x8000, angle=1, anglebound=(angle, 180))
+        theirs = set(int(e.rsplit("[", 1)[1][:-1]) for e in cmds.ls(selection=True, flatten=True))
+        cmds.polySelectConstraint(disable=True)
+        cmds.polySelectConstraint(angle=0, mode=0)
+        cmds.select(clear=True)
+        assert ours == theirs, (mesh, len(ours), len(theirs))
+
+
+@test
+def test_respect_existing_seams():
+    cube = cmds.ls(cmds.polyCube(constructionHistory=False)[0], long=True)[0]
+    uv.create_base_uvs(cube)
+    cmds.polyMapCut(cube + ".e[0:7]")
+    before = set(uv.uv_seam_edges(cube))
+    assert before, "no se crearon costuras de prueba"
+    uv.unwrap(cube, base_settings(uv_respect_existing=True), quiet_log)
+    assert set(uv.uv_seam_edges(cube)) == before, "se añadieron o quitaron costuras"
+    assert_good_uvs(cube)
+
+
+@test
+def test_uv_only_all_meshes():
+    meshes = make_test_meshes()
+    outcome = pipeline.run(meshes, ["uv"], base_settings(), quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    for mesh in outcome["results"]:
+        assert_good_uvs(mesh)
+
+
+@test
+def test_uv_udim():
+    # una malla con 8 piezas sueltas (8 islas) que a esta densidad no caben en un solo tile
+    pieces = []
+    for i in range(8):
+        piece = cmds.polySphere(radius=1.0, subdivisionsX=24, subdivisionsY=16, constructionHistory=False)[0]
+        cmds.move(i * 3.0, 0, 0, piece)
+        pieces.append(piece)
+    mesh = cmds.ls(cmds.polyUnite(pieces, constructionHistory=False, name="udimPieces")[0], long=True)[0]
+    settings = base_settings(uv_udim=True, uv_udim_tiles=0, uv_texel_density=400.0)
+    outcome = pipeline.run([mesh], ["uv"], settings, quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    report = assert_good_uvs(mesh, udim=True)
+    assert report["bounds"][0][1] > 1.0, "con esta densidad debería ocupar más de un UDIM"
+    density = uv.texel_density(mesh, settings["uv_map_size"])
+    assert abs(density - 400.0) / 400.0 < 0.05, density
+
+    # por nº de tiles: el plugin elige la densidad para llenar 3 UDIMs sin pasarse
+    settings = base_settings(uv_udim=True, uv_udim_tiles=3)
+    outcome = pipeline.run([mesh], ["uv"], settings, quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    report = assert_good_uvs(mesh, udim=True)
+    (umin, umax), (vmin, vmax) = report["bounds"]
+    assert 1.0 < umax <= 3.0 + 1e-4 and vmax <= 1.0 + 1e-4, report["bounds"]
+    assert uv.texel_density(mesh, settings["uv_map_size"]) > density * 0.5
+
+    # una sola isla enorme: se baja la densidad para que quepa en un tile, con aviso y sin error
+    dense = make_dense_mesh()
+    outcome = pipeline.run([dense], ["uv"], base_settings(uv_udim=True, uv_udim_tiles=0, uv_texel_density=1000.0),
+                           quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    assert_good_uvs(dense, udim=True)
+
+
+@test
+def test_hidden_seams():
+    """Modo 'costuras escondidas': UVs válidas y costuras más baratas (menos visibles) que las de Unfold3D."""
+    from mbl_retopo_uv import uv_seams
+    mesh = cmds.ls(cmds.polyTorus(radius=3, sectionRadius=1, subdivisionsX=40, subdivisionsY=20,
+                                  constructionHistory=False)[0], long=True)[0]
+    outcome = pipeline.run([mesh], ["uv"], base_settings(uv_seam_style="hidden"), quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    assert_good_uvs(mesh)
+    assert not cmds.ls("mblSeamTry*"), "quedó la copia de prueba en la escena"
+    # las islas que deja optimize_seams se pueden aplanar (discos)
+    graph = uv_seams.SeamGraph(mesh)
+    seams = set(uv.uv_seam_edges(mesh))
+    assert graph.all_disks(seams)[0]
+    new, info = uv_seams.optimize_seams(mesh, seams)
+    assert graph.all_disks(set(new))[0] and info["cost_after"] <= info["cost_before"] + 1e-9, info
+
+
+@test
+def test_pole_cleanup():
+    """Un giro de arista en una rejilla crea 4 polos; la limpieza los quita."""
+    from mbl_retopo_uv import quadopt
+    n = 8
+    points = [(x, y, 0.0) for y in range(n + 1) for x in range(n + 1)]
+    faces = [[y * (n + 1) + x, y * (n + 1) + x + 1, (y + 1) * (n + 1) + x + 1, (y + 1) * (n + 1) + x]
+             for y in range(n) for x in range(n)]
+    assert quadopt.pole_count(faces) == 0
+    # girar la arista central a mano (sin la comprobación geométrica, que lo impediría)
+    mesh = quadopt._Mesh(points, faces)
+    u, w = 4 * (n + 1) + 4, 4 * (n + 1) + 5
+    option = mesh.rotations(u, w)[0]
+    mesh.set_face(option[1], option[3])
+    mesh.set_face(option[2], option[4])
+    damaged = [f for f in mesh.faces if f is not None]
+    assert quadopt.pole_count(damaged) == 4, quadopt.pole_count(damaged)
+    _, cleaned, operations = quadopt.clean_poles(points, damaged)
+    assert quadopt.pole_count(cleaned) == 0 and operations >= 1, (quadopt.pole_count(cleaned), operations)
+    directed = [(f[i], f[(i + 1) % 4]) for f in cleaned for i in range(4)]
+    assert len(directed) == len(set(directed)), "orientación incoherente"
+
+
+@test
+def test_relax_keeps_corners():
+    """La relajación no redondea las esquinas de una pieza dura ni mueve los bordes."""
+    from mbl_retopo_uv import quadopt
+    cube = cmds.polyCube(subdivisionsX=4, subdivisionsY=4, subdivisionsZ=4, constructionHistory=False)[0]
+    points, faces = retopo.mesh_arrays(cube)
+    relaxed = quadopt.relax(points, faces, 20)
+    corners = [i for i, p in enumerate(points) if all(abs(abs(c) - 0.5) < 1e-6 for c in p)]
+    assert len(corners) == 8
+    assert np.abs(relaxed[corners] - points[corners]).max() < 1e-9
+    plane = cmds.polyPlane(subdivisionsX=6, subdivisionsY=6, constructionHistory=False)[0]
+    points, faces = retopo.mesh_arrays(plane)
+    cmds.move(0.03, 0, 0.02, plane + ".vtx[24]", relative=True)
+    points, faces = retopo.mesh_arrays(plane)
+    relaxed = quadopt.relax(points, faces, 30)
+    border = [i for i, p in enumerate(points) if abs(abs(p[0]) - 0.5) < 1e-6 or abs(abs(p[2]) - 0.5) < 1e-6]
+    assert np.abs(relaxed[border] - points[border]).max() < 1e-9
+    assert np.linalg.norm(relaxed[24] - (0.0, 0.0, 0.0)) < np.linalg.norm(points[24])
+
+
+# ---------------------------------------------------------------- retopo y pipeline completo
+
+@test
+def test_full_pipeline():
+    meshes = make_test_meshes()
+    outcome = pipeline.run(meshes, ["cleanup", "retopo", "uv"], base_settings(), quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    assert len(outcome["results"]) == len(meshes)
+    for original, result in zip(meshes, outcome["results"]):
+        assert result.endswith("_retopo"), result
+        assert cmds.getAttr(original + ".visibility") is False, "el original no está oculto"
+        assert_good_uvs(result)
+
+
+@test
+def test_maya_engine():
+    """Motor polyRetopo de Maya: quads, sin restos de historial y con poco error frente al original."""
+    meshes = make_test_meshes()[1:]   # esfera, torus y malla densa
+    settings = base_settings(retopo_engine="maya", retopo_target_faces=1500)
+    outcome = pipeline.run(meshes, ["cleanup", "retopo", "uv"], settings, quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    for original, result in zip(meshes, outcome["results"]):
+        stats = diagnostics.topology_stats(result)
+        assert stats["quad_percent"] > 95, (result, stats["quad_percent"])
+        assert 700 < stats["faces"] < 3000, (result, stats["faces"])
+        assert not cmds.listHistory(result, pruneDagObjects=True), "queda historial de polyRetopo"
+        assert diagnostics.find_source(result) == original
+        error = diagnostics.surface_error(original, result)
+        assert error["mean_percent"] < 1.0, (result, error)
+        assert_good_uvs(result)
+
+
+@test
+def test_loops_and_curvature():
+    """Métrica de loops y direcciones de curvatura del Motor MBL."""
+    # rejilla 4x4 de quads: 10 loops abiertos de 4 aristas
+    faces = [[y * 5 + x, y * 5 + x + 1, y * 5 + x + 6, y * 5 + x + 5] for y in range(4) for x in range(4)]
+    loops = diagnostics.loop_stats(faces)
+    assert loops["loops"] == 10 and abs(loops["loop_mean"] - 4.0) < 1e-9, loops
+    # cilindro sin tapas: los anillos son loops cerrados
+    cylinder = cmds.polyCylinder(radius=1, height=6, subdivisionsX=24, subdivisionsY=12,
+                                 subdivisionsCaps=0, constructionHistory=False)[0]
+    cmds.delete(cylinder + ".f[288:289]")
+    assert diagnostics.loop_stats(diagnostics.mesh_faces(cylinder))["loop_closed_percent"] > 40
+    # direcciones: alrededor del tubo con peso alto; en la esfera, sin dirección (peso ~0)
+    cmds.polyTriangulate(cylinder, constructionHistory=False)
+    points, faces = retopo.mesh_arrays(cylinder)
+    directions, weights = orient.curvature_directions(points, faces)
+    middle = np.abs(points[:, 1]) < 1.5
+    assert weights[middle].mean() > 0.9 and np.abs(directions[middle, 1]).mean() < 0.1
+    sphere = cmds.polySphere(radius=2, subdivisionsX=30, subdivisionsY=20, constructionHistory=False)[0]
+    cmds.polyTriangulate(sphere, constructionHistory=False)
+    points, faces = retopo.mesh_arrays(sphere)
+    assert orient.curvature_directions(points, faces)[1].mean() < 0.1
+    cmds.delete(cylinder, sphere)
+
+
+@test
+def test_fill_new_holes():
+    """Solo se cierran los agujeros que no estaban en el original, y con quads (función pura)."""
+    # rejilla 6x6 de quads con un agujero de 2x2 caras en el centro (borde de 8 aristas)
+    points = [(float(x), float(y), 0.0) for y in range(7) for x in range(7)]
+    faces = [[y * 7 + x, y * 7 + x + 1, y * 7 + x + 8, y * 7 + x + 7]
+             for y in range(6) for x in range(6) if not (2 <= x <= 3 and 2 <= y <= 3)]
+    outer = [p for p in points if p[0] in (0, 6) or p[1] in (0, 6)]
+    new_points, new_faces, filled = retopo.fill_new_holes(points, faces, outer, 60)
+    assert filled == 1 and len(new_faces) == len(faces) + 4, (filled, len(new_faces))
+    assert all(len(f) == 4 for f in new_faces)
+    # si el original ya tenía ese agujero, se respeta
+    hole = [p for p in points if 2 <= p[0] <= 4 and 2 <= p[1] <= 4 and (p[0] in (2, 4) or p[1] in (2, 4))]
+    assert retopo.fill_new_holes(points, faces, outer + hole, 60)[2] == 0
+
+
+@test
+def test_degenerate_faces_and_guide_directions():
+    """Chequeo de sanidad (caras con ángulos muy agudos) y guías para --orient (funciones puras)."""
+    from mbl_retopo_uv import guides, quadopt
+    # rejilla 6x6 con un vértice interior casi encima de su vecino: caras con ángulos de pocos grados
+    points = [[float(x), float(y), 0.0] for y in range(7) for x in range(7)]
+    faces = [[y * 7 + x, y * 7 + x + 1, y * 7 + x + 8, y * 7 + x + 7] for y in range(6) for x in range(6)]
+    points[3 * 7 + 3] = [3.97, 3.97, 0.0]
+    assert quadopt.degenerate_faces(points, faces)
+    fixed, before, after = quadopt.fix_degenerate(points, faces)
+    assert before > 0 and after == 0, (before, after)
+    # guía recta en X a la altura y = 0: dirección X con peso 1 cerca, 0 lejos
+    samples = np.array([[x * 0.5, 0.0, 0.0] for x in range(13)])
+    tangents = np.tile([1.0, 0.0, 0.0], (len(samples), 1))
+    near_far = np.array([[3.0, 0.5, 0.0], [3.0, 10.0, 0.0]])
+    directions, weights = guides.guide_directions(near_far, samples, tangents, edge_length=1.0)
+    assert weights[0] == 1.0 and weights[1] == 0.0, weights
+    assert np.allclose(directions[0], [1.0, 0.0, 0.0])
+
+
+@test
+def test_engine_matches_maya_metrics():
+    """El núcleo sin Maya (mbl_engine) da las mismas métricas que la versión con la API de Maya."""
+    from mbl_engine import metrics
+    from mbl_engine.mesh import Mesh
+    source = cmds.polySphere(radius=2, subdivisionsX=60, subdivisionsY=40, constructionHistory=False)[0]
+    target = cmds.polySphere(radius=2, subdivisionsX=16, subdivisionsY=10, constructionHistory=False)[0]
+    cmds.delete(target + ".f[0:15]")   # un agujero, para que haya bordes
+    maya_topo = diagnostics.topology_stats(target)
+    mesh_t, mesh_s = Mesh(*retopo.mesh_arrays(target)), Mesh(*retopo.mesh_arrays(source))
+    engine_topo = metrics.topology_stats(mesh_t)
+    for key in ("faces", "quads", "tris", "ngons", "pole_count"):
+        assert maya_topo[key] == engine_topo[key], (key, maya_topo[key], engine_topo[key])
+    assert abs(maya_topo["regular_percent"] - engine_topo["regular_percent"]) < 1e-9
+    assert {k: sorted(v) for k, v in maya_topo["poles"].items()} == engine_topo["poles"]
+    maya_err = diagnostics.surface_error(source, target)
+    engine_err = metrics.surface_error(mesh_s, mesh_t)
+    assert abs(maya_err["mean"] - engine_err["mean"]) < 0.05 * maya_err["mean"], (maya_err, engine_err)
+    cmds.delete(source, target)
+
+
+@test
+def test_quadwild_scale():
+    """Cálculo del tamaño de quad de QuadWild y su corrección por intentos (funciones puras)."""
+    # cuadrado 10x10 en triángulos de lado 1: área 100, arista media (1+1+1.414)/3
+    points = [(x, y, 0.0) for y in range(11) for x in range(11)]
+    faces = []
+    for y in range(10):
+        for x in range(10):
+            a = y * 11 + x
+            faces += [[a, a + 1, a + 12], [a, a + 12, a + 11]]
+    scale = retopo.quadwild_scale(points, faces, 25)
+    assert abs(scale - 2.0 / ((2 + 2 ** 0.5) / 3)) < 1e-6, scale
+    assert retopo.quadwild_scale(points, [], 25) == 1.0
+    # con un intento: exponente 1 -> el doble de caras pide el doble de escala
+    assert abs(retopo.quadwild_next_scale([(1.0, 2000)], 1000) - 2.0) < 1e-9
+    # con dos: se estima el exponente (aquí 2) y se acierta
+    s = retopo.quadwild_next_scale([(1.0, 4000), (2.0, 1000)], 250)
+    assert abs(s - 4.0) < 1e-6, s
+
+
+@test
+def test_quadwild_engine():
+    """Motor QuadWild (si están los binarios en mbl_retopo_uv/bin/quadwild): quads y poco error."""
+    if not config.find_quadwild():
+        print("    (sin QuadWild en bin/quadwild: se omite)")
+        return
+    mesh = make_dense_mesh()
+    settings = base_settings(retopo_engine="quadwild", retopo_target_faces=1500)
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    outcome = pipeline.run([mesh], ["cleanup", "retopo"], settings, quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    result = outcome["results"][0]
+    stats = diagnostics.topology_stats(result)
+    assert stats["quad_percent"] > 95, stats["quad_percent"]
+    assert 1000 < stats["faces"] < 2500, stats["faces"]
+    assert diagnostics.surface_error(mesh, result)["mean_percent"] < 1.0
+    cmds.undo()
+    assert not cmds.objExists(result), "deshacer no quitó la malla de QuadWild"
+
+
+@test
+def test_auto_engine():
+    """Modo automático: prueba Maya y QuadWild, deja una sola malla "_retopo" y se deshace de una vez."""
+    mesh = make_dense_mesh()
+    settings = base_settings(retopo_engine="auto", retopo_target_faces=1500)
+    messages = []
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    meshes_before = sorted(cmds.ls(type="mesh", long=True))
+    outcome = pipeline.run([mesh], ["retopo"], settings, lambda m, level="info": messages.append(m))
+    assert not outcome["errors"], outcome["errors"]
+    result = outcome["results"][0]
+    assert result.split("|")[-1] == "denseOrganic_retopo", result
+    assert len(cmds.ls("denseOrganic_retopo*", type="transform")) == 1, cmds.ls("denseOrganic_retopo*")
+    assert any("modo automático ->" in m for m in messages), messages
+    assert diagnostics.find_source(result) == mesh
+    assert cmds.getAttr(mesh + ".visibility") is False
+    cmds.undo()
+    assert sorted(cmds.ls(type="mesh", long=True)) == meshes_before, "quedaron mallas tras deshacer"
+
+
+@test
+def test_mbl_engine():
+    """Motor MBL: una sola malla "_retopo" de solo quads, original oculto, enlace al original, y se deshace de una vez."""
+    from mbl_retopo_uv import config
+    if not config.find_quadriflow():
+        print("    (sin QuadriFlow: se omite)")
+        return
+    mesh = make_dense_mesh()
+    settings = base_settings(retopo_engine="mbl", retopo_target_faces=1500, mbl_variants=2)
+    messages = []
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    meshes_before = sorted(cmds.ls(type="mesh", long=True))
+    outcome = pipeline.run([mesh], ["retopo"], settings, lambda m, level="info": messages.append(m))
+    assert not outcome["errors"], outcome["errors"]
+    result = outcome["results"][0]
+    assert result.split("|")[-1] == "denseOrganic_retopo", result
+    assert len(cmds.ls("denseOrganic_retopo*", type="transform")) == 1
+    assert any("Motor MBL: variante" in m for m in messages), messages
+    assert diagnostics.topology_stats(result)["quad_percent"] > 98.0
+    assert diagnostics.find_source(result) == mesh
+    assert cmds.getAttr(mesh + ".visibility") is False
+    cmds.undo()
+    assert sorted(cmds.ls(type="mesh", long=True)) == meshes_before, "quedaron mallas tras deshacer"
+
+
+@test
+def test_auto_with_mbl():
+    """Automático con el Motor MBL: compara con el mejor de Maya y QuadWild y deja una sola malla."""
+    from mbl_retopo_uv import config
+    if not config.find_quadriflow():
+        print("    (sin QuadriFlow: se omite)")
+        return
+    mesh = make_dense_mesh()
+    settings = base_settings(retopo_engine="auto", retopo_target_faces=1500, mbl_variants=2)
+    messages = []
+    outcome = pipeline.run([mesh], ["retopo"], settings, lambda m, level="info": messages.append(m))
+    assert not outcome["errors"], outcome["errors"]
+    result = outcome["results"][0]
+    assert result.split("|")[-1] == "denseOrganic_retopo", result
+    assert len(cmds.ls("denseOrganic_retopo*", type="transform")) == 1, cmds.ls("denseOrganic_retopo*")
+    assert any("Motor MBL:" in m and "caras" in m for m in messages), messages
+    assert any("modo automático ->" in m for m in messages), messages
+    assert cmds.getAttr(mesh + ".visibility") is False
+
+
+@test
+def test_status():
+    """Semáforo: verde en un resultado bueno, rojo con el problema y el consejo en los casos malos."""
+    sphere = cmds.ls(cmds.polySphere(subdivisionsX=30, subdivisionsY=20, constructionHistory=False)[0], long=True)[0]
+    outcome = pipeline.run([sphere], ["cleanup", "retopo", "uv"],
+                           base_settings(retopo_engine="maya", retopo_target_faces=600), quiet_log)
+    result = outcome["results"][0]
+    results = outcome["status"][result]
+    assert [r["step"] for r in results] == ["cleanup", "retopo", "uv"]
+    assert status.overall(results) == status.GREEN, results
+    # sin indicar pasos se deduce lo que tiene la malla (original enlazado y UVs)
+    assert [r["step"] for r in status.evaluate(result)] == ["cleanup", "retopo", "uv"]
+
+    def levels(results, step):
+        return [c for r in results if r["step"] == step for c in r["checks"] if c["level"] != status.GREEN]
+
+    # UVs solapadas (proyección plana sobre una esfera) -> rojo con consejo
+    other = cmds.ls(cmds.polySphere(constructionHistory=False)[0], long=True)[0]
+    cmds.polyProjection(other + ".f[*]", type="Planar", mapDirection="z", constructionHistory=False)
+    bad = levels(status.evaluate(other), "uv")
+    assert any(c["level"] == status.RED and "solapadas" in c["text"] and c["advice"] for c in bad), bad
+
+    # sin UVs -> rojo
+    cmds.polyMapDel(other + ".f[*]", constructionHistory=False)
+    assert status.uv_status(other)["level"] == status.RED
+
+    # un "retopo" que no se parece al original -> error de forma en rojo
+    cube = cmds.ls(cmds.polyCube(width=3, height=0.2, depth=3, constructionHistory=False)[0], long=True)[0]
+    diagnostics.link_source(cube, sphere)
+    bad = levels([status.retopo_status(cube)], "retopo")
+    assert any(c["level"] == status.RED and "Error de forma" in c["text"] for c in bad), bad
+
+    # no-manifold -> limpieza en rojo
+    points = [om.MPoint(*p) for p in [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0), (0, -1, 0),
+                                      (1, -1, 0), (0, 0, 1), (1, 0, 1)]]
+    fn = om.MFnMesh()
+    fn.create(points, [4, 4, 4], [0, 1, 3, 2, 0, 4, 5, 1, 0, 1, 7, 6])
+    nonmanifold = cmds.listRelatives(fn.fullPathName(), parent=True, fullPath=True)[0]
+    assert status.cleanup_status(nonmanifold)["level"] == status.RED
+
+
+@test
+def test_mirror_mesh():
+    """Reflejo de la mitad: suelda la costura, invierte las caras y no deja vértices al otro lado."""
+    from mbl_retopo_uv import symmetry
+    # rejilla 2x2 de quads en x [0, 2], con la columna x=0 algo desplazada (como deja un retopo)
+    points = [(x + (0.05 if x == 0 else 0.0), y, 0.0) for y in range(3) for x in range(3)]
+    faces = [[y * 3 + x, y * 3 + x + 1, y * 3 + x + 4, y * 3 + x + 3] for y in range(2) for x in range(2)]
+    out_points, out_faces, welded = symmetry.mirror_mesh(points, faces, 0.0, 0.3)
+    assert welded == 3, welded
+    assert len(out_points) == 9 + 6 and len(out_faces) == 8
+    assert min(p[0] for p in out_points[:9]) >= 0.0
+    # cada arista interior la comparten exactamente dos caras: la costura está soldada
+    count = {}
+    for face in out_faces:
+        for a, b in zip(face, face[1:] + face[:1]):
+            count[(min(a, b), max(a, b))] = count.get((min(a, b), max(a, b)), 0) + 1
+    seam = [e for e, n in count.items() if n == 2 and out_points[e[0]][0] == 0 and out_points[e[1]][0] == 0]
+    assert len(seam) == 2, seam
+    # orientación: la cara reflejada recorre los vértices al revés
+    # cara 0 = [0, 1, 4, 3]; su reflejo es [3, 4', 1', 0] con 0 y 3 soldados (columna x=0)
+    assert out_faces[4][0] == 3 and out_faces[4][3] == 0 and out_faces[4][1] >= 9 and out_faces[4][2] >= 9, out_faces[4]
+    # una tapa sobre el plano (el relleno de agujeros cerrando el corte) se quita y el borde se suelda
+    flat = [(0.0 if x == 0 else p[0], p[1], p[2]) for p, x in zip(points, [i % 3 for i in range(9)])]
+    capped = faces + [[0, 3, 6]]
+    out_points, out_faces, welded = symmetry.mirror_mesh(flat, capped, 0.0, 0.3)
+    assert welded == 3 and len(out_faces) == 8, (welded, len(out_faces))
+    # un quad estrecho junto al plano (no está sobre él) se conserva
+    narrow = [(0.0, 0, 0), (0.1, 0, 0), (0.1, 1, 0), (0.0, 1, 0)]
+    assert len(symmetry.mirror_mesh(narrow, [[0, 1, 2, 3]], 0.0, 0.3)[1]) == 2
+
+
+@test
+def test_symmetric_retopo():
+    """Simetría automática (hay que pedirla: por defecto va apagada): una esfera se hace por mitades y sale idéntica a su reflejo, sin grietas."""
+    from mbl_retopo_uv import symmetry
+    sphere = cmds.ls(cmds.polySphere(radius=2, subdivisionsX=40, subdivisionsY=30,
+                                     constructionHistory=False)[0], long=True)[0]
+    cmds.move(3, 1, 0, sphere)
+    assert symmetry.is_symmetric(sphere)[0]
+    lumpy = make_dense_mesh()
+    assert not symmetry.is_symmetric(lumpy)[0], symmetry.mirror_error(lumpy)
+    messages = []
+    outcome = pipeline.run([sphere], ["retopo"], base_settings(retopo_engine="maya", retopo_target_faces=800,
+                                                    retopo_symmetry="auto"),
+                           lambda m, level="info": messages.append(m))
+    assert not outcome["errors"], outcome["errors"]
+    result = outcome["results"][0]
+    assert any("reflejada" in m for m in messages), messages
+    assert symmetry.mirror_error(result, symmetry.plane_x(sphere))[0] < 1e-4
+    assert not retopo.border_loops(result), "quedó una grieta en la costura central"
+    assert cleanup.nonmanifold_counts(result) == (0, 0)
+    assert 500 < cmds.polyEvaluate(result, face=True) < 1300
+    assert diagnostics.find_source(result) == sphere
+    # con la simetría desactivada no se refleja
+    messages = []
+    pipeline.run([sphere], ["retopo"], base_settings(retopo_engine="maya", retopo_target_faces=800,
+                                                     retopo_symmetry="off"),
+                 lambda m, level="info": messages.append(m))
+    assert not any("reflejada" in m for m in messages)
+
+
+@test
+def test_guides():
+    """Una curva guía sobre la esfera hace que el retopo de Maya ponga un loop siguiéndola (también por mitades)."""
+    from mbl_retopo_uv import guides
+    normal = np.array([1.0, 1.0, 0.0]) / math.sqrt(2)
+
+    def edges_on_ring(mesh):
+        fn = om.MFnMesh(om.MSelectionList().add(mesh).getDagPath(0))
+        pts = np.array([(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)])
+        d = pts @ normal
+        return sum(1 for e in range(fn.numEdges) if all(abs(d[v]) < 0.01 for v in fn.getEdgeVertices(e)))
+
+    results = {}
+    for with_guide in (False, True):
+        sphere = cmds.ls(cmds.polySphere(radius=2, subdivisionsX=80, subdivisionsY=60,
+                                         constructionHistory=False)[0], long=True)[0]
+        if with_guide:
+            ring = cmds.circle(normal=(1, 1, 0), radius=2.0, sections=24, constructionHistory=False)[0]
+            guides.add_curves(sphere, [ring])
+            assert len(guides.guide_curves(sphere)) == 1
+        messages = []
+        outcome = pipeline.run([sphere], ["retopo"], base_settings(retopo_engine="auto", retopo_target_faces=800,
+                                                        retopo_symmetry="auto"),
+                               lambda m, level="info": messages.append(m))
+        assert not outcome["errors"], outcome["errors"]
+        result = outcome["results"][0]
+        results[with_guide] = (edges_on_ring(result), cmds.polyEvaluate(result, face=True), messages)
+        if with_guide:
+            assert guides.clear_guides(sphere) and not guides.guide_curves(sphere)
+        cmds.delete(sphere, result)
+    plain, guided = results[False], results[True]
+    assert plain[0] < 5, plain[0]
+    assert guided[0] >= 20, guided[0]
+    assert 500 < guided[1] < 1400, guided[1]
+    assert any("se usa el motor de Maya" in m for m in guided[2]), guided[2]
+    assert any("sin reflejar" in m for m in guided[2]), "con guías el retopo no debe ir por mitades"
+
+
+@test
+def test_detail_brush():
+    """Zona pintada -> más caras por unidad de área ahí (Instant Meshes MBL con --density)."""
+    from mbl_retopo_uv import detail
+    executable = config.find_instant_meshes({})
+    if not executable or not retopo.engine_supports_density(executable):
+        print("    (sin Instant Meshes MBL con --density: se omite)")
+        return
+    points = [(0, 0, 0), (2, 0, 0), (0, 2, 0)]
+    assert abs(retopo.vertex_areas(points, [[0, 1, 2]]).sum() - 2.0) < 1e-9
+
+    def cap_share(mesh):
+        it = om.MItMeshPolygon(om.MSelectionList().add(mesh).getDagPath(0))
+        inside = total = 0
+        while not it.isDone():
+            inside += it.center(om.MSpace.kWorld).x > 1.0
+            total += 1
+            it.next()
+        return inside / float(total)
+
+    shares = {}
+    for painted in (False, True):
+        sphere = cmds.ls(cmds.polySphere(radius=2, subdivisionsX=60, subdivisionsY=40,
+                                         constructionHistory=False)[0], long=True)[0]
+        if painted:
+            assert detail.paint_sphere_region(sphere, (2, 0, 0), 1.4) > 0
+            assert detail.has_detail(sphere)
+        messages = []
+        settings = base_settings(retopo_engine="instant_meshes" if not painted else "auto",
+                                 instant_meshes_path=executable, retopo_target_faces=1200,
+                                 retopo_symmetry="off")
+        outcome = pipeline.run([sphere], ["retopo"], settings, lambda m, level="info": messages.append(m))
+        assert not outcome["errors"], outcome["errors"]
+        shares[painted] = cap_share(outcome["results"][0])
+        if painted:
+            assert any("detalle pintadas" in m for m in messages), messages
+            assert detail.clear_detail(sphere) and not detail.has_detail(sphere)
+        cmds.delete(sphere, outcome["results"][0])
+    # el casquete x > 1 es un 25% del área; pintado (radio 1.4 alrededor de su punta) se lleva
+    # claramente más caras (medido: 25% -> 38%)
+    assert shares[True] > 1.3 * shares[False], shares
+
+
+@test
+def test_symmetric_upright_uvs():
+    """Malla simétrica: costuras simétricas (cada costura tiene su reflejo) e islas nunca boca abajo."""
+    from mbl_retopo_uv.uv_seams import SeamGraph, mirror_edges
+    body = cmds.ls(cmds.polyCylinder(radius=1, height=6, subdivisionsX=24, subdivisionsY=12,
+                                     subdivisionsCaps=2, constructionHistory=False)[0], long=True)[0]
+    arms = cmds.polyCylinder(radius=0.4, height=7, subdivisionsX=12, subdivisionsY=14, constructionHistory=False)[0]
+    cmds.rotate(0, 0, 90, arms)
+    cmds.move(0, 2, 0, arms)
+    body = cmds.ls(cmds.polyUnite(body, arms, constructionHistory=False)[0], long=True)[0]
+    cmds.polyMergeVertex(body, distance=1e-4, constructionHistory=False)
+    report = uv.unwrap(body, base_settings(), quiet_log)
+    assert report["overlapping_faces"] == 0, report
+    graph = SeamGraph(body)
+    mirror, _ = mirror_edges(graph)
+    assert mirror is not None, "la malla de prueba debería ser simétrica"
+    seams = set(uv.uv_seam_edges(body))
+    asymmetric = [e for e in seams if mirror[e] is not None and mirror[e] not in seams]
+    assert not asymmetric, "{} costuras sin su reflejo".format(len(asymmetric))
+    ups = uv.shell_up_directions(body)
+    biggest = max(abs(du) + abs(dv) for du, dv in ups.values())
+    for shell, (du, dv) in ups.items():
+        # las tapas horizontales no tienen "arriba": su dirección es ruido numérico
+        if abs(du) + abs(dv) < 1e-6 * biggest:
+            continue
+        assert not (dv < 0 and abs(dv) > abs(du)), "isla {} boca abajo".format(shell)
+
+
+@test
+def test_retopo_result_is_manifold():
+    """Si el resultado del retopo trae no-manifold, se repara y las UVs funcionan sin limpiar a mano."""
+    points = [om.MPoint(*p) for p in [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0), (0, -1, 0),
+                                      (1, -1, 0), (0, 0, 1), (1, 0, 1)]]
+    fn = om.MFnMesh()
+    fn.create(points, [4, 4, 4], [0, 1, 3, 2, 0, 4, 5, 1, 0, 1, 7, 6])
+    bad = cmds.ls(cmds.listRelatives(fn.fullPathName(), parent=True, fullPath=True), long=True)[0]
+    # siempre con el sustituto: lo que se prueba es la reparación posterior, no Instant Meshes
+    settings = base_settings(retopo_reproject=False, instant_meshes_path=fake_instant_meshes())
+    outcome = pipeline.run([bad], ["retopo", "uv"], settings, quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    assert cleanup.nonmanifold_counts(outcome["results"][0]) == (0, 0)
+
+
+@test
+def test_diagnostics():
+    plane = cmds.polyPlane(subdivisionsX=4, subdivisionsY=4, constructionHistory=False)[0]
+    stats = diagnostics.topology_stats(plane)
+    assert stats["faces"] == 16 and stats["quad_percent"] == 100.0 and stats["pole_count"] == 0, stats
+    cube = cmds.polyCube(constructionHistory=False)[0]
+    stats = diagnostics.topology_stats(cube)
+    assert len(stats["poles"][3]) == 8 and stats["pole_count"] == 8, stats
+    sphere = cmds.polySphere(constructionHistory=False)[0]
+    stats = diagnostics.topology_stats(sphere)
+    assert len(stats["poles"][6]) == 2, stats
+
+    # copia exacta con transformaciones sin congelar: error 0
+    a = cmds.ls(cmds.polySphere(subdivisionsX=40, subdivisionsY=30, constructionHistory=False)[0], long=True)[0]
+    cmds.move(5, 1, 0, a)
+    cmds.scale(2, 2, 2, a)
+    b = cmds.ls(cmds.duplicate(a)[0], long=True)[0]
+    error = diagnostics.surface_error(a, b)
+    assert error["max"] < 1e-4, error
+    # esferas de radio 1 y 1,1: error medio cercano a 0,1
+    c = cmds.ls(cmds.polySphere(radius=1.0, subdivisionsX=80, subdivisionsY=60, constructionHistory=False)[0], long=True)[0]
+    d = cmds.ls(cmds.polySphere(radius=1.1, subdivisionsX=80, subdivisionsY=60, constructionHistory=False)[0], long=True)[0]
+    error = diagnostics.surface_error(c, d)
+    assert 0.09 < error["mean"] < 0.11 and error["max"] < 0.12, error
+
+    # enlace retopo -> original, colores y limpieza
+    diagnostics.link_source(d, c)
+    assert diagnostics.find_source(d) == c
+    report = diagnostics.diagnose(cube, colorize=True, log=quiet_log)
+    assert diagnostics.POLE_COLOR_SET in cmds.polyColorSet(cube, query=True, allColorSets=True)
+    assert diagnostics.clear_pole_colors(cube)
+    assert not cmds.polyColorSet(cube, query=True, allColorSets=True)
+    assert report["pole_count"] == 8
+
+
+@test
+def test_undo_restores_scene():
+    cube = cmds.ls(cmds.polyCube(constructionHistory=False)[0], long=True)[0]
+    cmds.move(1, 1, 1, cube)
+    uvs_before = cmds.polyEvaluate(cube, uvcoord=True)
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    pipeline.run([cube], ["cleanup", "uv"], base_settings(), quiet_log)
+    assert cmds.getAttr(cube + ".translate")[0] == (0.0, 0.0, 0.0)
+    cmds.undo()
+    assert cmds.getAttr(cube + ".translate")[0] == (1.0, 1.0, 1.0), "un solo Ctrl+Z no lo deshizo todo"
+    assert cmds.polyEvaluate(cube, uvcoord=True) == uvs_before
+
+    # proceso completo con el motor de Maya (limpieza de polos, relajación y mejor empaquetado incluidos)
+    sphere = cmds.ls(cmds.polySphere(subdivisionsX=30, subdivisionsY=20, constructionHistory=False)[0], long=True)[0]
+    meshes_before = sorted(cmds.ls(type="mesh", long=True))
+    cmds.flushUndo()
+    outcome = pipeline.run([sphere], ["cleanup", "retopo", "uv"],
+                           base_settings(retopo_engine="maya", retopo_target_faces=500), quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    assert sorted(cmds.ls(type="mesh", long=True)) != meshes_before
+    cmds.undo()
+    assert sorted(cmds.ls(type="mesh", long=True)) == meshes_before, "quedaron mallas tras deshacer"
+    assert cmds.getAttr(sphere + ".visibility"), "el original sigue oculto tras deshacer"
+
+
+@test
+def test_errors_are_readable():
+    cube = cmds.ls(cmds.polyCube(constructionHistory=False)[0], long=True)[0]
+    sphere = cmds.ls(cmds.polySphere(constructionHistory=False)[0], long=True)[0]
+
+    missing = base_settings(instant_meshes_path=os.path.join(tempfile.mkdtemp(), "no_existe.exe"))
+    if config.find_instant_meshes(missing) is None:
+        outcome = pipeline.run([cube], ["retopo"], missing, quiet_log)
+        assert outcome["errors"] and "Instant Meshes" in outcome["errors"][0][1], outcome
+
+    os.environ["MBL_FAKE_IM_FAIL"] = "1"
+    try:
+        settings = base_settings(instant_meshes_path=fake_instant_meshes())
+        try:
+            retopo.retopo(cube, settings, quiet_log)
+        except RetopoError as exc:
+            assert "falló" in str(exc) and "fallo simulado" in str(exc), exc
+        else:
+            raise AssertionError("no se detectó el fallo de Instant Meshes")
+        # una malla que falla no impide procesar las demás, y el undo chunk queda cerrado
+        outcome = pipeline.run([cube, sphere], ["retopo"], settings, quiet_log)
+        assert len(outcome["errors"]) == 2
+    finally:
+        del os.environ["MBL_FAKE_IM_FAIL"]
+    outcome = pipeline.run([sphere], ["uv"], base_settings(), quiet_log)
+    assert not outcome["errors"]
+    cmds.undo()
+
+
+@test
+def test_installer_keeps_existing_usersetup():
+    sys.path.insert(0, ROOT)
+    import install
+    folder = tempfile.mkdtemp()
+    path = os.path.join(folder, "userSetup.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("print('lo que ya tenía el usuario')")
+    install.install(folder)
+    install.install(folder)
+    with open(path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    assert content.startswith("print('lo que ya tenía el usuario')"), content
+    assert content.count(install.BEGIN) == 1 and content.count(install.END) == 1, content
+    compile(content, path, "exec")
+
+
+UI_CHECK = r"""
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from PySide6 import QtWidgets
+app = QtWidgets.QApplication([])
+from mbl_retopo_uv import config, ui
+window = ui.RetopoUVWindow(parent=None, settings_file=sys.argv[2])
+window.apply_settings(dict(config.DEFAULTS, uv_udim=True, retopo_target_faces=777, uv_map_size=8192))
+collected = window.collect_settings()
+assert collected["uv_udim"] is True and collected["retopo_target_faces"] == 777, collected
+assert collected["uv_map_size"] == 8192, collected
+window.save_settings()
+assert config.load(sys.argv[2])["retopo_target_faces"] == 777
+window.show_status({"|pieza": [{"step": "uv", "level": 2,
+                                 "checks": [{"level": 2, "text": "3 caras solapadas", "advice": "Repite 'UVs'."}]}]})
+top = window.status_tree.topLevelItem(0)
+assert window.status_tree.topLevelItemCount() == 1 and "UVs arreglar" in top.text(0), top.text(0)
+assert top.child(0).child(0).child(0).text(0).startswith("→ Repite")
+print("UI_OK")
+"""
+
+
+@test
+def test_ui_builds():
+    """La ventana se construye y guarda ajustes (en un proceso aparte: maya.standalone no tiene QApplication)."""
+    import subprocess
+    script = os.path.join(tempfile.mkdtemp(), "ui_check.py")
+    with open(script, "w", encoding="utf-8") as handle:
+        handle.write(UI_CHECK)
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    proc = subprocess.run([sys.executable, script, ROOT, os.path.join(tempfile.mkdtemp(), "s.json")],
+                          capture_output=True, text=True, env=env, timeout=300)
+    assert "UI_OK" in proc.stdout, proc.stdout + proc.stderr
+
+
+@test
+def test_optional_fbx():
+    path = os.environ.get("MBL_TEST_FBX")
+    if not path:
+        print("    MBL_TEST_FBX no definido: se omite")
+        return
+    cmds.loadPlugin("fbxmaya", quiet=True)
+    nodes = cmds.file(path, i=True, type="FBX", returnNewNodes=True, ignoreVersion=True) or []
+    meshes = sorted({cmds.listRelatives(n, parent=True, fullPath=True)[0]
+                     for n in cmds.ls(nodes, type="mesh", long=True, noIntermediate=True)})
+    assert meshes, "el FBX no tiene mallas"
+    outcome = pipeline.run(meshes, ["cleanup", "retopo", "uv"], base_settings(uv_respect_existing=False), quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    for mesh in outcome["results"]:
+        assert_good_uvs(mesh)
+
+
+if __name__ == "__main__":
+    # mayapy tests/run_tests.py [parte_del_nombre ...]: solo las pruebas cuyo nombre contenga alguna
+    only = sys.argv[1:]
+    for run_test in TESTS:
+        if not only or any(word in run_test.__name__ for word in only):
+            run_test()
+    failed = [name for name, ok, _ in RESULTS if not ok]
+    print("\n{} pruebas, {} correctas, {} fallidas".format(len(RESULTS), len(RESULTS) - len(failed), len(failed)))
+    for name in failed:
+        print("  - " + name)
+    maya.standalone.uninitialize()
+    os._exit(1 if failed else 0)

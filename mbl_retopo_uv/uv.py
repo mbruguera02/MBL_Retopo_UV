@@ -465,7 +465,31 @@ def layout_0_1(transform, settings):
     cmds.u3dLayout(transform, preScaleMode=1, packBox=(0.0, 1.0, 0.0, 1.0), **_layout_kwargs(settings))
 
 
+# sin tumbar islas, por debajo de esta fracción de textura aprovechada (formas sencillas con pocas islas, como una
+# esfera) se prueba también a tumbarlas, y se queda ese resultado si gana por al menos ROTATION_GAIN
+POOR_LAYOUT = 0.50
+ROTATION_GAIN = 0.05
+
+
 def best_layout(transform, settings):
+    """Empaqueta en 0-1 con _best_layout. Si las islas no se pueden tumbar y la textura queda mal aprovechada,
+    prueba también a tumbarlas sobre una copia. Devuelve el % de textura aprovechada."""
+    area = _best_layout(transform, settings)
+    if settings["uv_allow_rotation"] or area >= 100.0 * POOR_LAYOUT:
+        return area
+    copy = cmds.duplicate(transform, name="mblRotateTry")[0]
+    try:
+        rotated = _best_layout(copy, dict(settings, uv_allow_rotation=True))
+        if rotated - area >= 100.0 * ROTATION_GAIN:
+            cmds.polyTransfer(transform, uvSets=True, vertices=False, vertexColor=False, alternateObject=copy)
+            return rotated
+    finally:
+        if cmds.objExists(copy):
+            cmds.delete(copy)
+    return area
+
+
+def _best_layout(transform, settings):
     """Empaqueta en 0-1 probando varias combinaciones sobre una copia y aplica la que más textura
     aprovecha. u3dLayout es determinista pero muy sensible a los ajustes: con el mismo humano daba
     entre el 48% y el 66% de la textura según pasadas, resolución y rotación.

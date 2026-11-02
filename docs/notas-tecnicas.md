@@ -290,3 +290,32 @@ Validación del mínimo (se ejecuta el Motor MBL con esa cifra y con la mitad; e
 Con el mínimo, los tres quedan en verde con holgura (límite del semáforo: 0,25 % medio, 2,5 % máximo, aunque el águila roza el máximo);
 con la mitad, el error medio sube hasta 2,6 veces y el p99 pasa de 1 % a 1,4 %. Es conservador en el error medio (0,04-0,06 %
 reales frente a 0,12 % de objetivo) porque el margen se ajustó al p99. Pendiente: probar con Maya y con otros modelos.
+
+## Memoria del Motor MBL (2 de noviembre)
+
+Incidente: con 40.000 caras objetivo, el Motor MBL lanzó tres QuadriFlow a la vez con `-f 520000` y dejó el PC (15,7 GB) con
+0,8 GB libres. Causas: la primera pasada pidió 52.000 caras, QuadriFlow devolvió unas 10 veces menos, `_next_request` multiplicó el
+pedido por objetivo/obtenido sin tope (520.000) y `resources.safe_workers` calculaba la memoria solo con las caras de entrada.
+
+Memoria máxima de QuadriFlow medida (malla de entrada de 100.000 triángulos, Windows): 5.000 caras pedidas, 0,39 GB; 25.000, 1,46 GB;
+60.000, 3,32 GB. Sube con las caras **pedidas**, unos 54 KB cada una (la medición de 150.000 se detuvo a propósito: habría gastado ~8 GB).
+
+Qué se hizo (`mbl_engine/retopo.py`, `resources.py`, `process.py`):
+
+- **Tope del pedido:** cada corrección pide como mucho el doble (o la mitad) que la anterior y nunca más de 1,5 veces el objetivo. Si lo
+  que da QuadriFlow se desvía más de 3 veces del objetivo, la variante se descarta como fallo del programa.
+- **Presupuesto de memoria:** `job_memory` usa las caras pedidas (60 KB por cara, 3 KB por triángulo de entrada, 100 MB fijos). Todos los
+  motores juntos no usan más de lo libre menos 2 GB de margen ni más de la mitad de la memoria total. Si ni una variante cabe, el Motor MBL
+  se niega con un mensaje que dice cuántas caras se pueden pedir; en modo Automático se descarta y se usa Maya o QuadWild.
+- **Un proceso a la vez** en equipos con 16 GB o menos (`SMALL_RAM_BYTES`); hasta 3 en equipos grandes si cabe.
+- **Antes de lanzar** cada variante se espera a que haya memoria (si otras corren y van a liberar); si no hay ninguna corriendo y no
+  cabe, no se lanza.
+- **Vigilancia mientras corre:** cada 0,5 s se mira la memoria libre; si baja de 1,2 GB se detiene el proceso más nuevo (si es el único,
+  ese) con un aviso, y las demás variantes siguen o el retopo termina con error, pero Maya no se cuelga.
+- **Prioridad baja** (`BELOW_NORMAL_PRIORITY_CLASS`) para los procesos de los motores.
+- **Aviso** en el log si se piden más de 100.000 caras.
+- No se limitaron los hilos de QuadriFlow: haría falta una opción en nuestra copia del programa. Pendiente.
+
+Pruebas: `tests/test_safety.py` (sin Maya ni modelos; se simula QuadriFlow): el pedido nunca pasa de 1,5 veces el objetivo aunque devuelva
+10 veces menos, la variante mala se descarta, una malla que no cabe en memoria no lanza ningún motor y la vigilancia detiene un proceso
+en menos de unos segundos sin dejar nada colgado.

@@ -16,7 +16,7 @@ import numpy as np
 from . import decimate, fit, metrics, orient, quality, quadopt, sizefield, symmetry
 from .closest import find_native, make_grid
 from .mesh import Mesh
-from .process import EngineError, _run_once, run_instant_meshes
+from .process import EngineError, MemoryLow, _run_once, run_instant_meshes
 from .repair import (_dissolve_doublets, _remove_small_pieces, fill_new_holes, read_obj, repair_topology,
                      write_obj, write_ply, vertex_areas)
 
@@ -28,6 +28,14 @@ QUADRIFLOW_FACTOR = 1.3
 # el total de caras se acepta si queda a menos de esta fracción del objetivo (hasta QUADRIFLOW_ATTEMPTS pasadas)
 QUADRIFLOW_TOLERANCE = 0.12
 QUADRIFLOW_ATTEMPTS = 3
+# Tope de la corrección del nº de caras pedido (QuadriFlow gasta ~54 KB de memoria por cada cara que se le pide): cada
+# pasada pide como mucho el doble (o la mitad) que la anterior y nunca más de QUADRIFLOW_MAX_REQUEST veces el objetivo.
+# Sin tope, una pasada que devolvía 10 veces menos de lo pedido hacía pedir 520.000 caras para un objetivo de 40.000 y
+# dejaba el ordenador sin memoria. Si lo que da QuadriFlow se desvía más de QUADRIFLOW_MAX_DEVIATION veces del objetivo
+# (por arriba o por abajo), la variante se descarta como fallo del programa.
+QUADRIFLOW_MAX_STEP = 2.0
+QUADRIFLOW_MAX_REQUEST = 1.5
+QUADRIFLOW_MAX_DEVIATION = 3.0
 # puntos del original con los que se mide lo que el retopo no cubre (también es el tamaño de SurfaceReference)
 FIT_SAMPLES = 40000
 
@@ -109,7 +117,7 @@ def _instant_meshes(executable, points, faces, target, work, timeout, tick, opti
         # el nº de caras real depende de la malla: si se desvía mucho se corrige una vez
         if attempt or not got or abs(got - target) <= 0.2 * target:
             break
-        asked = max(int(asked * float(target) / got), 1)
+        asked = max(int(np.clip(asked * float(target) / got, asked / QUADRIFLOW_MAX_STEP, asked * QUADRIFLOW_MAX_STEP)), 1)
     return result
 
 
@@ -157,6 +165,9 @@ def _quadriflow(executable, points, faces, target, work, timeout, tick, options)
     # la pasada que más se acerca al objetivo (la última no tiene por qué ser la mejor: QuadriFlow es caótico)
     usable = [t for t in tried if t[1]]
     best = min(usable, key=lambda t: abs(np.log(t[1] / float(target)))) if usable else tried[-1]
+    if usable and max(best[1] / float(target), float(target) / best[1]) > QUADRIFLOW_MAX_DEVIATION:
+        raise EngineError("QuadriFlow dio {:,} caras para un objetivo de {:,} (pidiendo {:,}): se descarta esta "
+                          "variante.".format(best[1], int(target), int(best[0])))
     return best[2]
 
 
@@ -168,7 +179,9 @@ def _next_request(tried, target):
         (a1, g1), (a2, g2) = tried[-2][:2], tried[-1][:2]
         if g1 and g2 and a1 != a2 and g1 != g2:
             slope = float(np.clip(np.log(g2 / float(g1)) / np.log(a2 / float(a1)), 0.4, 1.2))
-    return max(asked * (float(target) / got) ** (1.0 / slope), 1.0)
+    wanted = max(asked * (float(target) / got) ** (1.0 / slope), 1.0)
+    wanted = float(np.clip(wanted, asked / QUADRIFLOW_MAX_STEP, asked * QUADRIFLOW_MAX_STEP))
+    return max(min(wanted, QUADRIFLOW_MAX_REQUEST * float(target)), 1.0)
 
 
 ENGINES = {"instant_meshes": _instant_meshes, "quadriflow": _quadriflow}
@@ -538,7 +551,7 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
     import threading
     import time
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-    from . import resources
+    from . import process as _process_module, resources
     log = log or (lambda message: None)
     start = time.time()          # el presupuesto cuenta desde aquí: la preparación de la malla también tarda
     source = Mesh(points, faces)
@@ -568,10 +581,16 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
             raise EngineError("cancelado")
 
     durations = []
+    # lo máximo que se le pide al motor (con el factor mayor de las variantes) fija la memoria de cada proceso
+    asked_max = int(QUADRIFLOW_MAX_REQUEST * target_faces * max(factor for factor, _ in plan))
+    job_bytes = resources.job_memory(len(shared.tris), asked_max)
 
     def run(index):
         if not can_start_variant(time.time() - start, durations, time_budget):
             raise _OutOfTime("sin tiempo")
+        if not resources.wait_for_memory(job_bytes, _process_module.active_jobs, cancel):
+            raise MemoryLow("No hay memoria libre para otra variante ({:.1f} GB libres, hacen falta {:.1f} GB más el "
+                            "margen).".format((resources.available_memory() or 0) / 1024 ** 3, job_bytes / 1024 ** 3))
         began = time.time()
         factor, extra = plan[index]
         prepared = shared_plain if index in plain_variants else shared
@@ -589,11 +608,20 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
                 "faces_count": stats["faces"], "quad_percent": stats["quad_percent"],
                 "closed_percent": metrics.loop_stats(result)["loop_closed_percent"]}
 
-    # cada variante solo gasta memoria por la malla reducida que ve el motor, no por la de entrada
-    workers = resources.safe_workers(min(source.face_count, len(shared.tris)), workers)
-    log("{} variantes, {} a la vez".format(len(plan), workers))
+    # cada variante gasta memoria por la malla reducida que ve el motor y, sobre todo, por las caras que se le piden
+    allowed = resources.max_asked_faces(len(shared.tris))
+    if allowed is not None and allowed < asked_max:
+        suggested = int(allowed // (QUADRIFLOW_MAX_REQUEST * max(factor for factor, _ in plan)))
+        raise MemoryLow("Con {:,} caras objetivo cada variante necesita unos {:.1f} GB de memoria y solo se pueden usar {:.1f} GB "
+                        "(la memoria libre menos el margen, sin pasar de la mitad de la total). Baja las caras objetivo a unas "
+                        "{:,} o cierra otros programas.".format(int(target_faces), job_bytes / 1024 ** 3,
+                                                                (resources.memory_budget() or 0) / 1024 ** 3, max(suggested, 0)))
+    workers = resources.safe_workers(len(shared.tris), workers, asked_faces=asked_max)
+    log("{} variantes, {} a la vez (unos {:.1f} GB cada una)".format(len(plan), workers, job_bytes / 1024 ** 3))
     tried = []
     skipped = 0
+    low_memory = None
+    last_failure = ""
     pool = ThreadPoolExecutor(max_workers=workers)
     pending = {pool.submit(run, index) for index in range(len(plan))}
     try:
@@ -606,7 +634,11 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
                     skipped += 1
                     continue
                 except EngineError as exc:
-                    if not cancel.is_set():
+                    if isinstance(exc, MemoryLow):
+                        low_memory = exc
+                        log(str(exc))
+                    elif not cancel.is_set():
+                        last_failure = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
                         log("variante fallida: {}".format(exc))
                     continue
                 v = tried[-1]
@@ -631,7 +663,9 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
     if skipped:
         log("{} de {} variantes no se probaron para no pasar del tiempo máximo ({:.0f} s)".format(skipped, len(plan), time_budget))
     if not tried:
-        raise EngineError("Ninguna variante del retopo terminó.")
+        if low_memory is not None:
+            raise low_memory
+        raise EngineError("Ninguna variante del retopo terminó.{}".format(" " + last_failure if last_failure else ""))
     tried.sort(key=lambda v: v["index"])
     chosen = choose_variant(tried, target_faces)
     best = tried[chosen]

@@ -385,8 +385,17 @@ def recommended_faces(transform):
     return _RECOMMENDED.get(key)
 
 
+# a partir de estas caras objetivo el Motor MBL necesita varios GB de memoria por proceso (unos 54 KB por cara pedida)
+HEAVY_FACES = 100000
+
+
 def _log_recommendation(transform, settings, log):
-    """Avisa antes del retopo si se piden menos caras de las recomendadas. Es informativo: nunca detiene el proceso."""
+    """Avisa antes del retopo si se piden menos caras de las recomendadas (o demasiadas). Es informativo: nunca detiene
+    el proceso."""
+    if int(settings["retopo_target_faces"]) > HEAVY_FACES and settings.get("retopo_engine") in ("auto", "mbl"):
+        log("{}: pides {:,} caras: el Motor MBL necesita muchísima memoria con tantas (unos 54 KB por cara pedida) y tarda "
+            "mucho. Si falta memoria se detiene solo y se usa otro motor.".format(
+                short_name(transform), int(settings["retopo_target_faces"])).replace(",", "."), "warning")
     try:
         figures, warning = recommend_faces(transform, int(settings["retopo_target_faces"]))
     except Exception:

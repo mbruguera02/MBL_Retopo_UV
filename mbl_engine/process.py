@@ -6,6 +6,7 @@ límite de tiempo, detección de bloqueos (sin consumir CPU) y cancelación desd
 import os
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -13,8 +14,39 @@ class EngineError(Exception):
     """Error con un mensaje pensado para el usuario (los adaptadores lo muestran tal cual)."""
 
 
+class MemoryLow(EngineError):
+    """Se ha detenido un motor porque el ordenador se quedaba sin memoria libre."""
+
+
 class _Stalled(Exception):
     pass
+
+
+# Los motores corren con prioridad baja (Maya y el sistema siguen fluidos) y se vigila la memoria libre mientras
+# trabajan: si baja de resources.MEMORY_CRITICAL_BYTES se detiene el proceso más nuevo, y si no queda otro, ese.
+BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+MEMORY_CHECK_SECONDS = 0.5
+
+_active = []
+_active_lock = threading.Lock()
+
+
+def active_jobs():
+    """Cuántos motores están corriendo ahora mismo."""
+    with _active_lock:
+        return len(_active)
+
+
+def _memory_must_stop(token, free_fn=None):
+    """True si el motor `token` debe detenerse porque la memoria libre está por debajo del mínimo crítico: solo al más
+    nuevo de los que corren (los demás siguen y, al soltarse sus recursos, la memoria se recupera)."""
+    from . import resources
+    free = (free_fn or resources.available_memory)()
+    if free is None or free >= resources.MEMORY_CRITICAL_BYTES:
+        return False, free
+    with _active_lock:
+        newest = max(_active, key=lambda t: t["started"]) if _active else token
+    return newest is token, free
 
 
 # Instant Meshes a veces se bloquea (sin usar CPU) tras el paso "Coloring", de forma intermitente:
@@ -49,10 +81,10 @@ def run_instant_meshes(command, destination, timeout, log_path, tick=None):
 
 
 def _run_once(command, destination, timeout, log_path, tick=None, label="Instant Meshes", cwd=None,
-              stall_seconds=STALL_SECONDS, ignore_exit_code=False):
+              stall_seconds=STALL_SECONDS, ignore_exit_code=False, memory_free_fn=None):
     kwargs = {}
     if sys.platform.startswith("win"):
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0) | BELOW_NORMAL_PRIORITY_CLASS
     with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
         try:
             # la salida va a un archivo: con PIPE + espera activa el proceso se podría bloquear
@@ -69,11 +101,22 @@ def _run_once(command, destination, timeout, log_path, tick=None, label="Instant
 
         start = time.time()
         last_cpu, last_change = None, start
+        token = {"started": start}
+        with _active_lock:
+            _active.append(token)
+        last_memory_check = 0.0
         try:
             while process.poll() is None:
                 if tick:
                     tick()
                 now = time.time()
+                if now - last_memory_check >= MEMORY_CHECK_SECONDS:
+                    last_memory_check = now
+                    stop, free = _memory_must_stop(token, memory_free_fn)
+                    if stop:
+                        raise MemoryLow("Quedaban solo {:.1f} GB de memoria libre: se ha detenido {} para que Maya y el "
+                                        "sistema sigan funcionando. Cierra otros programas o pide menos caras."
+                                        .format(free / 1024 ** 3, label))
                 if now - start > timeout:
                     raise EngineError("{} tardó más de {} s y se ha detenido. "
                                       "Prueba con menos caras o sube el tiempo máximo.".format(label, timeout))
@@ -89,6 +132,10 @@ def _run_once(command, destination, timeout, log_path, tick=None, label="Instant
             process.kill()
             process.wait()
             raise
+        finally:
+            with _active_lock:
+                if token in _active:
+                    _active.remove(token)
 
     written = os.path.isfile(destination) and os.path.getsize(destination) > 0
     # quad_from_patches de QuadWild 0.0.2 en Windows termina con 0x80000003 al cerrarse, ya con la malla

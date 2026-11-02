@@ -300,6 +300,15 @@ def retopo(points, faces, target_faces, engine, executable, symmetric=None, time
     symmetric: None = detectar; True / False = forzar. engine: "instant_meshes" o "quadriflow".
     options["prepared"]: el resultado de prepare() si ya se hizo (variantes de best_retopo).
     """
+    raw = run_engine(points, faces, target_faces, engine, executable, symmetric, timeout, tick, min_piece, options, log)
+    return finish_retopo(raw, relax, pole_cleanup, fill_holes, log)
+
+
+def run_engine(points, faces, target_faces, engine, executable, symmetric=None, timeout=600, tick=None,
+               min_piece=0.01, options=None, log=None):
+    """Primera mitad de retopo(): prepara la entrada, la engorda si toca y deja que el motor externo dé su malla.
+    Devuelve un Prepared para finish_retopo(). Es lo único que necesita el proceso del motor (y su memoria): el resto
+    es Python, y best_retopo() lo hace mientras el motor ya trabaja en la variante siguiente."""
     log = log or (lambda message: None)
     options = dict(options or {})
     prep = options.pop("prepared", None) or prepare(points, faces, target_faces, engine, symmetric, timeout, tick,
@@ -343,6 +352,15 @@ def retopo(points, faces, target_faces, engine, executable, symmetric=None, time
     if not new_faces:
         raise EngineError("{} no devolvió ninguna malla.".format(engine))
     trace("motor", new_points, new_faces)
+    return Prepared(new_points=new_points, new_faces=new_faces, report=report, options=options, prep=prep, trace=trace)
+
+
+def finish_retopo(raw, relax=10, pole_cleanup=True, fill_holes=60, log=None):
+    """Segunda mitad de retopo(): reparación, limpieza de polos, relajado, reproyección y ajuste, y la simetría.
+    `raw`: lo que devolvió run_engine(). Devuelve (puntos, caras, informe)."""
+    log = log or (lambda message: None)
+    new_points, new_faces, report, options, prep, trace = raw.new_points, raw.new_faces, raw.report, raw.options, raw.prep, raw.trace
+    symmetric, center, work_mesh, reference = prep.symmetric, prep.center, prep.work_mesh, prep.reference
 
     # sin rellenar aquí: se cierran solo los agujeros que abrió el motor (los bordes de la entrada,
     # como el corte de la mitad o el cuello, se respetan; rellenarlos metía abanicos de triángulos)
@@ -580,13 +598,18 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
         if cancel.is_set():
             raise EngineError("cancelado")
 
-    durations = []
+    durations, engine_durations = [], []
     # lo máximo que se le pide al motor (con el factor mayor de las variantes) fija la memoria de cada proceso
     asked_max = int(QUADRIFLOW_MAX_REQUEST * target_faces * max(factor for factor, _ in plan))
     job_bytes = resources.job_memory(len(shared.tris), asked_max)
+    # retopo() en dos mitades: la del motor (usa su proceso y su memoria) y la de Python (reparar, limpiar polos, relajar,
+    # ajustar y medir), que va en otro hilo mientras el motor ya trabaja en la variante siguiente. Mismo resultado.
+    engine_kwargs = {k: kwargs[k] for k in ("symmetric", "timeout", "min_piece") if k in kwargs}
+    finish_kwargs = {k: kwargs[k] for k in ("relax", "pole_cleanup", "fill_holes") if k in kwargs}
 
-    def run(index):
-        if not can_start_variant(time.time() - start, durations, time_budget):
+    def run_engine_stage(index):
+        # sin ninguna variante terminada se estima lo que tardará con lo que ha tardado el motor (y ~50 % más de Python)
+        if not can_start_variant(time.time() - start, durations or [1.5 * d for d in engine_durations], time_budget):
             raise _OutOfTime("sin tiempo")
         if not resources.wait_for_memory(job_bytes, _process_module.active_jobs, cancel):
             raise MemoryLow("No hay memoria libre para otra variante ({:.1f} GB libres, hacen falta {:.1f} GB más el "
@@ -594,8 +617,15 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
         began = time.time()
         factor, extra = plan[index]
         prepared = shared_plain if index in plain_variants else shared
-        p, f, report = retopo(points, faces, int(round(target_faces * factor)), engine, executable,
-                              tick=worker_tick, options=dict(base_options, prepared=prepared, **extra), **kwargs)
+        raw = run_engine(points, faces, int(round(target_faces * factor)), engine, executable, tick=worker_tick,
+                         options=dict(base_options, prepared=prepared, **extra), **engine_kwargs)
+        engine_durations.append(time.time() - began)
+        return index, began, raw
+
+    def run(index, began, raw):
+        factor, extra = plan[index]
+        prepared = shared_plain if index in plain_variants else shared
+        p, f, report = finish_retopo(raw, **finish_kwargs)
         durations.append(time.time() - began)
         result = Mesh(p, f)
         stats = metrics.topology_stats(result)
@@ -623,12 +653,24 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
     low_memory = None
     last_failure = ""
     pool = ThreadPoolExecutor(max_workers=workers)
-    pending = {pool.submit(run, index) for index in range(len(plan))}
+    finish_pool = ThreadPoolExecutor(max_workers=workers)
+    pending = {pool.submit(run_engine_stage, index) for index in range(len(plan))}
+    engine_futures = set(pending)
     try:
         while pending:
             done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
             for future in done:
+                if future.cancelled():
+                    continue
                 try:
+                    if future in engine_futures:
+                        # el motor ha terminado esta variante: su parte de Python va a otro hilo
+                        if not cancel.is_set():
+                            later = finish_pool.submit(run, *future.result())
+                            pending.add(later)
+                        else:
+                            future.result()
+                        continue
                     tried.append(future.result())
                 except _OutOfTime:
                     skipped += 1
@@ -660,6 +702,7 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
         # si tick cancela (excepción) o algo falla, los procesos de motor se detienen y se espera a los hilos
         cancel.set()
         pool.shutdown(wait=True)
+        finish_pool.shutdown(wait=True)
     if skipped:
         log("{} de {} variantes no se probaron para no pasar del tiempo máximo ({:.0f} s)".format(skipped, len(plan), time_budget))
     if not tried:

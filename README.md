@@ -76,6 +76,7 @@ Debajo de cada punto amarillo o rojo sale **→ qué tocar**: el ajuste exacto d
 - **Está pensado para texturizar**, no para animar. Los anillos de la malla (los *edge loops*) no siguen la forma como lo haría un modelador a mano, así que para deformaciones finas (caras, hombros) revísalos.
 - **Las piezas más finas que una arista** (plumas, membranas, telas sueltas) pueden salir con pequeños defectos en el borde. El semáforo suele avisar.
 - **Para un resultado concreto** (por ejemplo, un anillo alrededor de los ojos) puedes dibujar **guías de flujo** o pintar **detalle** donde quieras más caras. Están en *Más opciones*.
+- **Los cortes de las UVs y los rayones en Substance.** Un corte siempre parte la textura en dos trozos que no se continúan. Si las capas de Substance (grunge, vetas, rayones procedurales) usan **proyección UV**, la unión se nota: ponles proyección **triplanar** o de **espacio mundo**. Lo pintado a mano con el pincel y las máscaras de curvatura u oclusión se pintan sobre el modelo en 3D y casi no lo notan. El plugin deja todas las islas de pie (la textura va en la misma dirección a los dos lados de un corte) y, con *Costuras escondidas*, lleva los cortes a zonas poco visibles.
 - La ventana está en español.
 
 ## Si algo falla

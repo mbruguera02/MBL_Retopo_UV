@@ -85,7 +85,10 @@ DEFAULTS = {
     "uv_optimize_iterations": 5,
     "uv_map_size": 4096,
     "uv_padding_px": 16,
-    "uv_allow_rotation": True,
+    # False: las islas se quedan de pie y el empaquetador no las tumba 90°, así el dibujo de la textura (vetas, rayones
+    # en proyección UV) sigue la misma dirección a los dos lados de un corte. Casi no cuesta textura: humano 62.6% -> 65.8%,
+    # águila 64.0% -> 60.7%; el largo de corte entre islas giradas 90° baja del 17% al 9% (humano) y del 21% al 16% (águila)
+    "uv_allow_rotation": False,
     "uv_layout_quality": 512,
     # pasadas del empaquetado final (u3dLayout -mut). 5: águila 53% -> 63% de textura aprovechada
     "uv_pack_iterations": 5,
@@ -106,12 +109,13 @@ DEFAULTS = {
 # Versión de los ajustes. Cuando cambia un valor por defecto porque las pruebas demostraron que el
 # nuevo es mejor, se sube la versión y se añade aquí la clave: los JSON guardados con una versión
 # anterior vuelven a usar el valor nuevo en esa clave (el resto de lo que eligió el usuario se respeta).
-SETTINGS_VERSION = 5
+SETTINGS_VERSION = 6
 UPGRADED_KEYS = {
     2: ("uv_seam_angle", "uv_optimize_iterations", "uv_split_shells"),
     3: ("retopo_engine",),
     4: ("retopo_symmetry",),
     5: ("mbl_time_budget",),
+    6: ("uv_allow_rotation",),
 }
 
 

@@ -320,7 +320,10 @@ class RetopoUVWindow(QtWidgets.QDialog):
         for size in config.MAP_SIZES:
             w["uv_map_size"].addItem(str(size), size)
         w["uv_padding_px"] = _spin(0, 128, 16, 2, suffix=" px", tip="Separación entre islas a la resolución elegida.")
-        w["uv_allow_rotation"] = _check("Permitir rotar islas (pasos de 90°)")
+        w["uv_allow_rotation"] = _check("Permitir rotar islas (pasos de 90°)",
+                                        "Desmarcado (recomendado): todas las islas quedan de pie y el dibujo de la textura "
+                                        "(vetas, rayones en proyección UV) sigue la misma dirección a los dos lados de un corte. "
+                                        "Marcado: el empaquetador puede tumbarlas 90° y aprovechar algo más (o menos) la textura.")
         w["uv_layout_quality"] = QtWidgets.QComboBox()
         for quality in (128, 256, 512, 1024):
             w["uv_layout_quality"].addItem(str(quality), quality)

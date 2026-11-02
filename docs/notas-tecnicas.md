@@ -232,3 +232,21 @@ Las pruebas del núcleo no cargan Maya. Basta cualquier Python 3 con numpy:
 ```
 "C:\Program Files\Autodesk\Maya2026\bin\mayapy.exe" tests\test_engine.py
 ```
+
+## Continuidad de la textura entre islas (2 de noviembre)
+
+Queja: según los rayones o el ruido que se pongan en Substance, la textura se ve cortada y no continúa (sin «racord») al otro lado de un corte. Se midió sobre humano (5.000 caras) y águila (5.000), por cada arista de corte: el giro de una orilla respecto a la otra (ángulo entre sus dos vectores UV) y su escala (cociente de longitudes), ponderado por la longitud 3D del corte. «Rígido» = el reparto de giros a lo largo de la pareja de islas varía menos de 15°: las dos orillas tienen la misma forma y una rotación rígida basta para que casen.
+
+| | Islas | Cortes | Textura | Rígido | Giro < 15° | Giro ~90° | Escala dentro de 10 % |
+|---|---|---|---|---|---|---|---|
+| Humano, empaquetador gira 90° (antes) | 54 | 7,5 % | 62,6 % | 24 % | 14 % | 17 % | 60 % |
+| Humano, sin girar (ahora) | 36 | 7,5 % | 65,8 % | 24 % | 20 % | 9 % | 61 % |
+| Águila, gira 90° (antes) | 64 | 12,8 % | 64,0 % | 15 % | 14 % | 21 % | 45 % |
+| Águila, sin girar (ahora) | 56 | 12,1 % | 60,7 % | 11 % | 20 % | 16 % | 46 % |
+
+- **Cambio hecho:** `uv_allow_rotation` pasa a `False` (ajustes versión 6). Las islas quedan de pie y el empaquetador no las tumba 90°. Mejora el giro entre islas vecinas y casi no cuesta textura (humano +3,2 puntos, águila −3,3).
+- **Lo que no se puede arreglar girando:** solo el 24 % (humano) y el 11-15 % (águila) de la longitud de los cortes separa islas cuyas orillas casan; hasta la mitad separa orillas muy distintas (una recta y otra curva, como el hombro de un brazo recto). Elegir el giro de cada isla para que case con sus vecinas (probado en prototipo) sube «giro < 15°» del 20 % al 24 % y no merece la pena.
+- **Menos islas no ayuda:** `uv_split_shells = 0` deja 8 islas en el humano, pero la textura aprovechada cae al 41 % (águila: 11 %) y el cociente de escala empeora (p90 de 1,4 a 1,9).
+- **Escala:** a lo largo de los cortes, la escala difiere más de un 10 % en el 40 % (humano) y el 55 % (águila) de su longitud. Más iteraciones de Optimize (20 en vez de 5) no lo cambian en el humano; en el águila bajan algo los casos extremos (p90 de 2,7 a 1,9) sin tocar el resto.
+- **Pendiente para la V2:** cortes que se parezcan por los dos lados (rectos, a lo largo de los tubos) y ajustar a la vez la longitud de las aristas de las dos orillas de un corte. Es un problema de elegir los cortes, no de colocar las islas.
+- **Consejo para el usuario** (en el README): en Substance, proyección triplanar o de espacio mundo en las capas procedurales; lo pintado a mano y las máscaras de curvatura u oclusión no dependen de los cortes.

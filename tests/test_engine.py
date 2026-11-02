@@ -721,6 +721,29 @@ def test_with_plain_variants():
 
 
 @test
+def test_drop_small_pieces_matches_the_reference_implementation():
+    """drop_small_pieces (numpy) quita lo mismo que repair._remove_small_pieces, en el mismo orden y contando igual."""
+    rng = np.random.RandomState(7)
+    for trial in range(30):
+        pieces, points, faces = rng.randint(1, 6), [], []
+        for _ in range(pieces):
+            n = rng.randint(1, 14)
+            base = len(points)
+            points += [tuple(rng.rand(3)) for _ in range(n + 2)]
+            for _ in range(rng.randint(1, 60)):
+                k = rng.randint(3, 6)
+                faces.append([base + int(v) for v in rng.randint(0, n + 2, size=k)])
+        order = rng.permutation(len(faces))
+        faces = [faces[i] for i in order]
+        for ratio in (0.0, 0.05, 0.2, 0.5):
+            kept, removed = repair._remove_small_pieces([list(f) for f in faces], ratio)
+            mesh, dropped = retopo.drop_small_pieces(Mesh(points, faces), ratio)
+            assert mesh.faces() == kept and dropped == removed, (trial, ratio, dropped, removed)
+    empty, none = retopo.drop_small_pieces(Mesh(np.zeros((0, 3)), []), 0.01)
+    assert none == 0 and empty.face_count == 0
+
+
+@test
 def test_quadriflow_first_attempt_hint():
     """QuadriFlow con un motor simulado que da 0,98 caras por cara pedida: la primera pasada con el factor de siempre se sale
     de la tolerancia y avisa de lo que habría acertado; con esa petición como "factor_hint" basta una ejecución."""

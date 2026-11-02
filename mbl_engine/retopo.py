@@ -17,7 +17,7 @@ from . import decimate, fit, metrics, orient, quality, quadopt, sizefield, symme
 from .closest import find_native, make_grid
 from .mesh import Mesh
 from .process import EngineError, MemoryLow, _run_once, run_instant_meshes
-from .repair import (_dissolve_doublets, _remove_small_pieces, fill_new_holes, read_obj, repair_topology,
+from .repair import (_dissolve_doublets, fill_new_holes, read_obj, repair_topology,
                      write_obj, write_ply, vertex_areas)
 
 
@@ -212,6 +212,42 @@ def triangulated(points, faces):
     return tris.tolist()
 
 
+def vertex_pieces(mesh):
+    """Pieza (el menor índice de vértice de su conjunto) de cada vértice, uniendo los vértices de cada cara. Con numpy:
+    cada pasada pasa a cada vértice el menor nombre de los que toca y los nombres se acortan saltando de uno a otro."""
+    label = np.arange(mesh.vertex_count, dtype=np.int64)
+    a, b = mesh.face_vertices, mesh.corner_next
+    while True:
+        la, lb = label[a], label[b]
+        low = np.minimum(la, lb)
+        new = label.copy()
+        np.minimum.at(new, la, low)
+        np.minimum.at(new, lb, low)
+        while True:
+            jumped = new[new]
+            if (jumped == new).all():
+                break
+            new = jumped
+        if (new == label).all():
+            return label
+        label = new
+
+
+def drop_small_pieces(mesh, min_ratio):
+    """(Mesh sin las piezas sueltas pequeñas, cuántas quitó): se quedan la mayor (o las mayores, si empatan) y las que
+    tienen al menos min_ratio de las caras. Mismo criterio que repair._remove_small_pieces, sin listas de Python."""
+    if not mesh.face_count:
+        return mesh, 0
+    first = mesh.face_vertices[mesh.face_starts]
+    _, inverse, counts = np.unique(vertex_pieces(mesh)[first], return_inverse=True, return_counts=True)
+    keep_piece = (counts == counts.max()) | (counts >= mesh.face_count * min_ratio)
+    if keep_piece.all():
+        return mesh, 0
+    keep = keep_piece[inverse.ravel()]
+    kept = keep[mesh.corner_face]
+    return Mesh(mesh.points, (mesh.face_vertices[kept], mesh.face_sizes[keep])), int((~keep_piece).sum())
+
+
 def compact_mesh(mesh):
     """compact() de un Mesh, sin pasar por listas de Python (con 528.000 triángulos son ~200 MB de objetos): otro Mesh."""
     used = np.nonzero(mesh.used_vertices)[0]
@@ -264,8 +300,8 @@ def prepare(points, faces, target_faces, engine, symmetric=None, timeout=600, ti
     options = options or {}
     trace = options.get("trace") or (lambda stage, p, f: None)
     report = {"engine": engine}
-    faces, report["pieces_removed"] = _remove_small_pieces(faces, min_piece)
-    source_kept = Mesh(np.ascontiguousarray(points, dtype=np.float64).reshape(-1, 3), faces)
+    source_kept, report["pieces_removed"] = drop_small_pieces(
+        Mesh(np.ascontiguousarray(points, dtype=np.float64).reshape(-1, 3), faces), min_piece)
     if symmetric is None:
         symmetric = symmetry.is_symmetric(source_kept)[0]
     report["symmetric"] = bool(symmetric)
@@ -274,7 +310,7 @@ def prepare(points, faces, target_faces, engine, symmetric=None, timeout=600, ti
     center = None
     if symmetric:
         center = symmetry.plane_x(source_kept.points[source_kept.used_vertices])
-        work_points, work_faces = symmetry.cut_half(source_kept.points, faces, center)
+        work_points, work_faces = symmetry.cut_half(source_kept.points, source_kept.faces(), center)
         work_mesh = Mesh(work_points, work_faces)
         target = max(target // 2, 1)
         log("mitad +X: {} caras".format(work_mesh.face_count))

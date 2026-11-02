@@ -154,6 +154,37 @@ def test_config_roundtrip():
 
 
 @test
+def test_config_removed_engine():
+    """Ajustes guardados con un motor que ya no existe (QuadWild) pasan a Automático; las demás elecciones se respetan."""
+    path = os.path.join(tempfile.mkdtemp(), "settings.json")
+
+    def load_with(engine, version=None):
+        data = '"retopo_engine": "{}", "retopo_target_faces": 777'.format(engine)
+        if version is not None:
+            data = '"_version": {}, '.format(version) + data
+        with open(path, "w") as handle:
+            handle.write("{" + data + "}")
+        return config.load(path)
+
+    assert config.SETTINGS_VERSION >= 7
+    assert set(retopo.ENGINES) == {"auto", "maya", "instant_meshes", "mbl"}, retopo.ENGINES
+    assert config.DEFAULTS["retopo_engine"] in retopo.ENGINES
+    # cualquier versión anterior a la que lo quitó (sin versión = 1), también las que ya conservaban el motor elegido (3 a 6)
+    for version in (None, 3, 4, 5, 6):
+        loaded = load_with("quadwild", version)
+        assert loaded["retopo_engine"] == "auto", (version, loaded["retopo_engine"])
+        assert loaded["retopo_target_faces"] == 777, version
+    # los motores que siguen existiendo se quedan como los eligió el usuario
+    for engine in ("maya", "mbl", "instant_meshes", "auto"):
+        assert load_with(engine, 6)["retopo_engine"] == engine, engine
+    # tras guardar con la versión nueva el JSON ya no tiene el motor viejo y se lee igual
+    config.save(load_with("quadwild", 6), path)
+    with open(path, "r", encoding="utf-8") as handle:
+        assert '"quadwild"' not in handle.read()
+    assert config.load(path)["retopo_engine"] == "auto"
+
+
+@test
 def test_resolve_executable():
     folder = tempfile.mkdtemp()
     exe = os.path.join(folder, "Instant Meshes.exe")
@@ -560,49 +591,8 @@ def test_engine_matches_maya_metrics():
 
 
 @test
-def test_quadwild_scale():
-    """Cálculo del tamaño de quad de QuadWild y su corrección por intentos (funciones puras)."""
-    # cuadrado 10x10 en triángulos de lado 1: área 100, arista media (1+1+1.414)/3
-    points = [(x, y, 0.0) for y in range(11) for x in range(11)]
-    faces = []
-    for y in range(10):
-        for x in range(10):
-            a = y * 11 + x
-            faces += [[a, a + 1, a + 12], [a, a + 12, a + 11]]
-    scale = retopo.quadwild_scale(points, faces, 25)
-    assert abs(scale - 2.0 / ((2 + 2 ** 0.5) / 3)) < 1e-6, scale
-    assert retopo.quadwild_scale(points, [], 25) == 1.0
-    # con un intento: exponente 1 -> el doble de caras pide el doble de escala
-    assert abs(retopo.quadwild_next_scale([(1.0, 2000)], 1000) - 2.0) < 1e-9
-    # con dos: se estima el exponente (aquí 2) y se acierta
-    s = retopo.quadwild_next_scale([(1.0, 4000), (2.0, 1000)], 250)
-    assert abs(s - 4.0) < 1e-6, s
-
-
-@test
-def test_quadwild_engine():
-    """Motor QuadWild (si están los binarios en mbl_retopo_uv/bin/quadwild): quads y poco error."""
-    if not config.find_quadwild():
-        print("    (sin QuadWild en bin/quadwild: se omite)")
-        return
-    mesh = make_dense_mesh()
-    settings = base_settings(retopo_engine="quadwild", retopo_target_faces=1500)
-    cmds.undoInfo(state=True)
-    cmds.flushUndo()
-    outcome = pipeline.run([mesh], ["cleanup", "retopo"], settings, quiet_log)
-    assert not outcome["errors"], outcome["errors"]
-    result = outcome["results"][0]
-    stats = diagnostics.topology_stats(result)
-    assert stats["quad_percent"] > 95, stats["quad_percent"]
-    assert 1000 < stats["faces"] < 2500, stats["faces"]
-    assert diagnostics.surface_error(mesh, result)["mean_percent"] < 1.0
-    cmds.undo()
-    assert not cmds.objExists(result), "deshacer no quitó la malla de QuadWild"
-
-
-@test
 def test_auto_engine():
-    """Modo automático: prueba Maya y QuadWild, deja una sola malla "_retopo" y se deshace de una vez."""
+    """Modo automático: prueba Maya y el Motor MBL, deja una sola malla "_retopo" y se deshace de una vez."""
     mesh = make_dense_mesh()
     settings = base_settings(retopo_engine="auto", retopo_target_faces=1500)
     messages = []
@@ -649,7 +639,7 @@ def test_mbl_engine():
 
 @test
 def test_auto_with_mbl():
-    """Automático con el Motor MBL: compara con el mejor de Maya y QuadWild y deja una sola malla."""
+    """Automático con el Motor MBL: compara con el retopo de Maya y deja una sola malla."""
     from mbl_retopo_uv import config
     if not config.find_quadriflow():
         print("    (sin QuadriFlow: se omite)")
@@ -1017,6 +1007,13 @@ assert collected["uv_udim"] is True and collected["retopo_target_faces"] == 777,
 assert collected["uv_map_size"] == 8192, collected
 window.save_settings()
 assert config.load(sys.argv[2])["retopo_target_faces"] == 777
+# el desplegable de motores: solo los que existen (un motor que ya no existe se queda en Automático)
+combo = window.widgets["retopo_engine"]
+assert [combo.itemData(i) for i in range(combo.count())] == ["auto", "mbl", "maya", "instant_meshes"]
+window.apply_settings(dict(config.DEFAULTS, retopo_engine="maya"))
+assert window.collect_settings()["retopo_engine"] == "maya"
+window.apply_settings(dict(config.DEFAULTS, retopo_engine="quadwild"))
+assert window.collect_settings()["retopo_engine"] == "auto"
 window.show_status({"|pieza": [{"step": "uv", "level": 2,
                                  "checks": [{"level": 2, "text": "3 caras solapadas", "advice": "Repite 'UVs'."}]}]})
 top = window.status_tree.topLevelItem(0)

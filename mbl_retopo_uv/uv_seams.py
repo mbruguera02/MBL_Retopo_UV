@@ -23,6 +23,30 @@ import numpy as np
 from .common import dag_path, mesh_shape
 
 
+def _components(count, a, b):
+    """Grupo de cada nodo (el menor índice de su grupo) para `count` nodos unidos por los enlaces (a[i], b[i]).
+
+    Con numpy puro: cada vuelta cuelga la raíz de un grupo de la menor que toca y aplana los árboles. Union-find
+    en Python tardaba 13 ms por llamada con 5.000 caras y se llamaba cientos de veces."""
+    label = np.arange(count)
+    if not len(a):
+        return label
+    while True:
+        la, lb = label[a], label[b]
+        low = np.minimum(la, lb)
+        new = label.copy()
+        np.minimum.at(new, la, low)
+        np.minimum.at(new, lb, low)
+        while True:
+            jump = new[new]
+            if np.array_equal(jump, new):
+                break
+            new = jump
+        if np.array_equal(new, label):
+            return label
+        label = new
+
+
 class SeamGraph:
     def __init__(self, transform):
         path = dag_path(mesh_shape(transform))
@@ -66,14 +90,47 @@ class SeamGraph:
                 seen |= loop
                 self.loops.append(loop)
 
+        # tablas de numpy para charts() y all_disks() (la topología no cambia mientras dura el grafo)
+        nv, ne = len(self.points), len(self.edge_v)
+        self.edge_count = ne
+        edge_faces = np.array([len(faces) for faces in self.edge_f], dtype=np.int64)
+        first = np.cumsum(edge_faces) - edge_faces
+        self.incident_face = np.fromiter((f for faces in self.edge_f for f in faces), dtype=np.int64,
+                                         count=int(edge_faces.sum()))
+        self.incident_edge = np.repeat(np.arange(ne), edge_faces)
+        self.interior_edges = np.nonzero(edge_faces == 2)[0]
+        self.interior_first = self.incident_face[first[self.interior_edges]]
+        self.interior_second = self.incident_face[first[self.interior_edges] + 1]
+        self.edge_ends = np.array(self.edge_v, dtype=np.int64).reshape(-1, 2)
+        # nodos del abanico: una (cara, vértice) por esquina. Los abanicos de un vértice son sus caras
+        # unidas por aristas sin costura; cada abanico es un vértice en las UVs
+        node_keys = np.unique(face_id * nv + flat)
+        self.node_face = node_keys // nv
+        ends_of = self.edge_ends[self.interior_edges]
+        self.link_a = np.concatenate([np.searchsorted(node_keys, self.interior_first * nv + ends_of[:, k])
+                                      for k in (0, 1)])
+        self.link_b = np.concatenate([np.searchsorted(node_keys, self.interior_second * nv + ends_of[:, k])
+                                      for k in (0, 1)])
+        self.link_edge = np.concatenate([self.interior_edges, self.interior_edges])
+        # agujeros del modelo: vértices de cada uno y una cara de su borde
+        self.loop_vertices = np.fromiter((v for loop in self.loops for v in loop), dtype=np.int64)
+        self.loop_index = np.repeat(np.arange(len(self.loops)), [len(loop) for loop in self.loops])
+        self.loop_face = np.array([self.edge_f[next(e for e in self.vertex_edges[next(iter(loop))]
+                                                    if e in self.border)][0] for loop in self.loops], dtype=np.int64)
+        self._charts_cache = {}
+        self._disks_cache = {}
+        self._mirror = None
+        self._neighbors = {}
+        self._cost_list = None
+
     @property
     def cost(self):
         """Coste de cortar cada arista: longitud x visibilidad. Se calcula al usarlo (lanza rayos)."""
         if self._cost is None:
             vis = self.visibility = self._visibility()
             # coste muy contrastado: una arista expuesta cuesta ~13 veces más que una escondida
-            self._cost = np.array([self.length[e] * (0.05 + 2.0 * (0.5 * (vis[a] + vis[b])) ** 2)
-                                   for e, (a, b) in enumerate(self.edge_v)])
+            self._cost = self.length * (0.05 + 2.0 * (0.5 * (vis[self.edge_ends[:, 0]] + vis[self.edge_ends[:, 1]])) ** 2)
+            self._cost_list = self._cost.tolist()
         return self._cost
 
     def _visibility(self, ray_count=32):
@@ -85,20 +142,22 @@ class SeamGraph:
             r = math.sqrt(1.0 - y * y)
             dirs.append((math.cos(golden * i) * r, y, math.sin(golden * i) * r))
         dirs = np.array(dirs)
+        vectors = [om.MFloatVector(*d) for d in dirs]
         size = float(np.linalg.norm(self.points.max(axis=0) - self.points.min(axis=0))) or 1.0
         eps = size * 1e-4
         accel = self.fn.autoUniformGridParams()
+        any_hit = self.fn.anyIntersection
+        world = om.MSpace.kWorld
         openness = np.ones(len(self.points))
         for v, (p, n) in enumerate(zip(self.points, self.normals)):
             facing = dirs @ n
-            use = facing > 0.05
-            if not use.any():
+            use = np.nonzero(facing > 0.05)[0]
+            if not len(use):
                 continue
             source = om.MFloatPoint(*(p + n * eps))
             free = total = 0.0
-            for d, w in zip(dirs[use], facing[use]):
-                hit = self.fn.anyIntersection(source, om.MFloatVector(*d), om.MSpace.kWorld, size, False,
-                                              accelParams=accel)
+            for i, w in zip(use.tolist(), facing[use].tolist()):
+                hit = any_hit(source, vectors[i], world, size, False, accelParams=accel)
                 total += w
                 if hit is None:
                     free += w
@@ -108,23 +167,32 @@ class SeamGraph:
 
     # ---------------------------------------------------------------- topología de las islas
 
-    def charts(self, seams):
-        """(isla de cada cara, nº de islas) cortando por `seams` y por los bordes."""
-        parent = list(range(self.face_count))
+    def seam_mask(self, seams):
+        """Máscara de aristas (bool) con las que son costura."""
+        mask = np.zeros(self.edge_count, dtype=bool)
+        if len(seams):
+            mask[np.fromiter(seams, dtype=np.int64, count=len(seams))] = True
+        return mask
 
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-        for e, faces in enumerate(self.edge_f):
-            if len(faces) == 2 and e not in seams:
-                a, b = find(faces[0]), find(faces[1])
-                if a != b:
-                    parent[a] = b
-        roots = {}
-        chart = [roots.setdefault(find(f), len(roots)) for f in range(self.face_count)]
-        return chart, len(roots)
+    def charts(self, seams):
+        """(isla de cada cara, nº de islas) cortando por `seams` y por los bordes. La isla de cada cara es un
+        array de numpy que no hay que modificar: el resultado se guarda para las siguientes llamadas con las
+        mismas costuras (reroute_slits y optimize_seams lo pedían cientos de veces seguidas)."""
+        return self._charts(self.seam_mask(seams))
+
+    def _charts(self, mask):
+        key = mask.tobytes()
+        found = self._charts_cache.get(key)
+        if found is None:
+            free = ~mask[self.interior_edges]
+            label = _components(self.face_count, self.interior_first[free], self.interior_second[free])
+            # las islas se numeran por su primera cara, como al recorrer las caras en orden
+            roots, chart = np.unique(label, return_inverse=True)
+            found = (chart, len(roots))
+            if len(self._charts_cache) >= 32:
+                self._charts_cache.clear()
+            self._charts_cache[key] = found
+        return found
 
     # nº de islas que no son disco que all_disks deja pasar (las que ya venían así y son diminutas)
     tolerated = 0
@@ -135,51 +203,43 @@ class SeamGraph:
         self.all_disks(seams)
         chart, _ = self.charts(seams)
         sizes = np.bincount(np.asarray(chart), minlength=len(self._euler))
-        bad = [c for c, x in enumerate(self._euler) if x != 1]
-        if any(sizes[c] > self.TINY_CHART_FACES for c in bad):
+        bad = np.nonzero(self._euler != 1)[0]
+        if (sizes[bad] > self.TINY_CHART_FACES).any():
             return None
         return len(bad)
 
     def all_disks(self, seams):
         """True si todas las islas se pueden aplanar: discos, o discos con agujeros propios del modelo
         (ojos, boca) que ninguna costura toca. Euler V - E + F = 1 - agujeros. Devuelve (ok, nº de islas)."""
-        chart, count = self.charts(seams)
-        euler = [0] * count
-        seam_vertices = {v for e in seams for v in self.edge_v[e]}
-        for loop in self.loops:
-            if loop & seam_vertices:
-                continue
-            edge = next(e for e in self.vertex_edges[next(iter(loop))] if e in self.border)
-            euler[chart[self.edge_f[edge][0]]] += 1
-        for f in range(self.face_count):
-            euler[chart[f]] += 1
-        for e, faces in enumerate(self.edge_f):
-            if len(faces) == 2 and e not in seams:
-                euler[chart[faces[0]]] -= 1
-            else:
-                for f in faces:
-                    euler[chart[f]] -= 1
-        # vértices: cuántos "abanicos" de caras (unidos por aristas no cortadas) tiene cada vértice
-        for v, edges in enumerate(self.vertex_edges):
-            faces = set()
-            for e in edges:
-                faces.update(self.edge_f[e])
-            parent = {f: f for f in faces}
-
-            def find(x):
-                while parent[x] != x:
-                    x = parent[x]
-                return x
-            for e in edges:
-                ef = self.edge_f[e]
-                if len(ef) == 2 and e not in seams:
-                    a, b = find(ef[0]), find(ef[1])
-                    if a != b:
-                        parent[a] = b
-            for root in {find(f) for f in faces}:
-                euler[chart[root]] += 1
-        self._euler = euler
-        return sum(1 for x in euler if x != 1) <= self.tolerated, count
+        mask = self.seam_mask(seams)
+        key = mask.tobytes()
+        found = self._disks_cache.get(key)
+        if found is None:
+            chart, count = self._charts(mask)
+            euler = np.bincount(chart, minlength=count)  # caras
+            # agujeros del modelo que ninguna costura toca
+            seam_vertex = np.zeros(len(self.points), dtype=bool)
+            seam_vertex[self.edge_ends[mask].ravel()] = True
+            touched = np.zeros(len(self.loops), dtype=bool)
+            touched[self.loop_index[seam_vertex[self.loop_vertices]]] = True
+            euler = euler + np.bincount(chart[self.loop_face[~touched]], minlength=count)
+            # aristas: una arista interior sin costura cuenta una vez; las demás, una por cada cara
+            joined = np.zeros(self.edge_count, dtype=bool)
+            joined[self.interior_edges] = ~mask[self.interior_edges]
+            euler = euler - np.bincount(chart[self.interior_first[~mask[self.interior_edges]]], minlength=count)
+            cut = ~joined[self.incident_edge]
+            euler = euler - np.bincount(chart[self.incident_face[cut]], minlength=count)
+            # vértices: cuántos "abanicos" de caras (unidos por aristas no cortadas) tiene cada vértice
+            fan = _components(len(self.node_face), self.link_a[~mask[self.link_edge]],
+                              self.link_b[~mask[self.link_edge]])
+            roots = np.nonzero(fan == np.arange(len(fan)))[0]
+            euler = euler + np.bincount(chart[self.node_face[roots]], minlength=count)
+            found = (euler, count)
+            if len(self._disks_cache) >= 32:
+                self._disks_cache.clear()
+            self._disks_cache[key] = found
+        self._euler, count = found
+        return int(np.count_nonzero(self._euler != 1)) <= self.tolerated, count
 
     def make_disks(self, seams):
         """Añade los cortes que faltan para que todas las islas se puedan aplanar.
@@ -199,8 +259,10 @@ class SeamGraph:
                 x = parent[x]
             return x
         candidates = set()
+        self.cost  # noqa: B018 (calcula también _cost_list)
+        cost = self._cost_list
         interior = [e for e, faces in enumerate(self.edge_f) if len(faces) == 2 and e not in seams]
-        for e in sorted(interior, key=lambda e: -self.cost[e]):
+        for e in sorted(interior, key=lambda e: -cost[e]):
             a, b = find(self.edge_f[e][0]), find(self.edge_f[e][1])
             if a != b:
                 parent[a] = b
@@ -219,7 +281,7 @@ class SeamGraph:
         cheapest = {}
         for e in candidates:
             c = chart[self.edge_f[e][0]]
-            if c not in anchored and (c not in cheapest or self.cost[e] < self.cost[cheapest[c]]):
+            if c not in anchored and (c not in cheapest or cost[e] < cost[cheapest[c]]):
                 cheapest[c] = e
         forced = set(cheapest.values())
         candidates -= forced
@@ -303,13 +365,35 @@ class SeamGraph:
 
     TURN_PENALTY = 1.0
 
-    def _paths(self, start, blocked_vertices, blocked_edges):
+    def _sharing(self, edge):
+        """Aristas que comparten cara con `edge` (para el castigo por girar)."""
+        found = self._neighbors.get(edge)
+        if found is None:
+            if not hasattr(self, "_face_edges"):
+                self._face_edges = [[] for _ in range(self.face_count)]
+                for e, faces in enumerate(self.edge_f):
+                    for f in faces:
+                        self._face_edges[f].append(e)
+            found = self._neighbors[edge] = frozenset(e for f in self.edge_f[edge] for e in self._face_edges[f])
+        return found
+
+    def _paths(self, start, blocked_vertices, blocked_edges, allowed=None, stop=None):
         """Dijkstra desde start (un vértice o un conjunto). Devuelve (distancia por vértice, rastro).
 
         Girar (pasar a una arista que comparte cara con la anterior) cuesta un extra: así la costura
         sigue los loops en línea recta en vez de hacer escalera en diagonal.
+
+        allowed: lista de bool por arista; las que no lo están se tratan como bloqueadas.
+        stop: vértices de destino. Si se da, se para al terminar la capa del primer destino que se alcanza:
+        las distancias y el rastro de ese destino (y de los que empaten con él) son ya las definitivas, y los
+        que llamaban solo miraban los destinos. Evita recorrer toda la isla para cada tramo.
         """
         starts = set(start) if isinstance(start, (set, frozenset, list, tuple)) else {start}
+        self.cost  # noqa: B018 (calcula también _cost_list)
+        cost = self._cost_list
+        edge_v, vertex_edges = self.edge_v, self.vertex_edges
+        turn = self.TURN_PENALTY
+        inf = math.inf
         # estado = (vértice, arista por la que se llegó)
         best = {(v, -1): 0.0 for v in starts}
         prev = {}
@@ -317,27 +401,35 @@ class SeamGraph:
         arrival = {v: (v, -1) for v in starts}
         heap = [(0.0, v, -1) for v in starts]
         heapq.heapify(heap)
+        pop, push = heapq.heappop, heapq.heappush
+        limit = inf
         while heap:
-            d, v, came = heapq.heappop(heap)
-            if d > best.get((v, came), math.inf):
+            d, v, came = pop(heap)
+            if d > limit:
+                break
+            if d > best.get((v, came), inf):
                 continue
+            if stop is not None and limit == inf and v in stop and v not in starts:
+                limit = d
             if v in blocked_vertices and v not in starts:
                 continue  # se puede llegar pero no pasar a través
-            came_faces = set(self.edge_f[came]) if came >= 0 else ()
-            for e in self.vertex_edges[v]:
+            sharing = self._sharing(came) if came >= 0 else ()
+            for e in vertex_edges[v]:
                 if e in blocked_edges or e == came:
                     continue
-                a, b = self.edge_v[e]
+                if allowed is not None and not allowed[e]:
+                    continue
+                a, b = edge_v[e]
                 w = b if a == v else a
-                step = self.cost[e]
-                if came_faces and came_faces.intersection(self.edge_f[e]):
-                    step += self.TURN_PENALTY * self.cost[e]
+                step = cost[e]
+                if e in sharing:
+                    step += turn * step
                 nd = d + step
-                if nd < best.get((w, e), math.inf):
+                if nd < best.get((w, e), inf):
                     best[(w, e)] = nd
                     prev[(w, e)] = (v, came)
-                    heapq.heappush(heap, (nd, w, e))
-                    if nd < dist.get(w, math.inf):
+                    push(heap, (nd, w, e))
+                    if nd < dist.get(w, inf):
                         dist[w] = nd
                         arrival[w] = (w, e)
         return dist, (prev, arrival)
@@ -354,7 +446,15 @@ class SeamGraph:
 def mirror_edges(graph, tolerance=1e-4):
     """Arista espejo (reflejo en X por el centro del modelo) de cada arista, o None si la malla no es
     simétrica. Exige que casi todos los vértices tengan pareja (las mallas del retopo simétrico la
-    tienen exacta)."""
+    tienen exacta). Solo depende de la geometría: se calcula una vez por grafo."""
+    if tolerance == 1e-4:
+        if graph._mirror is None:
+            graph._mirror = _mirror_edges(graph, tolerance)
+        return graph._mirror
+    return _mirror_edges(graph, tolerance)
+
+
+def _mirror_edges(graph, tolerance):
     points = graph.points
     if not len(points):
         return None, None
@@ -422,10 +522,10 @@ def symmetrize_seams(transform, seams, graph=None):
     return None
 
 
-def fix_charts(transform, seams):
+def fix_charts(transform, seams, graph=None):
     """Si alguna isla no se puede aplanar, devuelve (costuras con los cortes que faltan, nº de cortes
     añadidos); si todas están bien, None."""
-    graph = SeamGraph(transform)
+    graph = graph or SeamGraph(transform)
     seams = set(seams) - graph.border
     if graph.all_disks(seams)[0]:
         return None
@@ -454,18 +554,21 @@ def reroute_slits(graph, seams):
     for _ in range(20):
         changed = False
         chains, _ = graph.chains(seams)
+        # las costuras no cambian dentro de esta vuelta (se sale al primer cambio): las islas se miden una vez
+        chart, count = graph.charts(seams)
         for chain, a, b in chains:
             faces = graph.edge_f[chain[0]]
             if len(faces) != 2 or not set(chain) <= seams:
                 continue
-            chart, count = graph.charts(seams)
             if chart[faces[0]] != chart[faces[1]]:
                 continue  # separa dos islas: no es un corte de tubo
             c = chart[faces[0]]
             others = seams - set(chain)
-            inside = {f for f in range(graph.face_count) if chart[f] == c}
+            inside = chart == c
             # bordes de la isla sin este corte: aristas de costura o de borde que tocan sus caras
-            rim = [e for e in (others | graph.border) if any(f in inside for f in graph.edge_f[e])]
+            touching = np.bincount(graph.incident_edge[inside[graph.incident_face]], minlength=graph.edge_count) > 0
+            candidates = np.fromiter(others | graph.border, dtype=np.int64, count=len(others | graph.border))
+            rim = candidates[touching[candidates]].tolist()
             # componentes conexas de esos bordes
             parent = {}
 
@@ -480,14 +583,14 @@ def reroute_slits(graph, seams):
                 continue
             sources = {v for v in parent if find(v) == find(a)}
             targets = {v for v in parent if find(v) == find(b)}
-            allowed = {e for e in range(len(graph.edge_v))
-                       if e not in others and len(graph.edge_f[e]) == 2 and graph.edge_f[e][0] in inside
-                       and graph.edge_f[e][1] in inside}
-            blocked_edges = set(range(len(graph.edge_v))) - allowed
+            # aristas por las que se puede pasar: interiores, sin costura y con las dos caras dentro de la isla
+            allowed = np.zeros(graph.edge_count, dtype=bool)
+            inner = graph.interior_edges
+            allowed[inner] = (~graph.seam_mask(others)[inner]) & inside[graph.interior_first] & inside[graph.interior_second]
             blocked_vertices = set(parent) - sources - targets
             # tampoco a lo largo de un borde (dejaría tiras): los vértices del borde de origen solo
             # sirven para salir
-            dist, trail = graph._paths(sources, blocked_vertices | targets, blocked_edges)
+            dist, trail = graph._paths(sources, blocked_vertices | targets, (), allowed.tolist(), targets)
             reachable = [v for v in targets if v in dist]
             if not reachable:
                 continue
@@ -520,8 +623,17 @@ def optimize_seams(transform, seams, merge_area=0.005, passes=3, relocate=True, 
     remove_exposed: True quita todos los tramos visibles que sobran; "light" solo los que unen un
     agujero (ojo, boca) con el resto y el corte central de delante que parte en dos mitades una isla
     que ya está cortada por detrás (el torso); False no quita ninguno.
+    graph: si se da, se reutiliza (la tolerancia de islas diminutas se devuelve como estaba al terminar).
     """
     graph = graph or SeamGraph(transform)
+    tolerated = graph.tolerated
+    try:
+        return _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, merge_tiny, reroute)
+    finally:
+        graph.tolerated = tolerated
+
+
+def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, merge_tiny, reroute):
     seams = set(seams) - graph.border
     report = {"moved": 0, "merged": 0, "rerouted": 0, "cost_before": float(sum(graph.cost[e] for e in seams))}
     ok, report["charts_before"] = graph.all_disks(seams)
@@ -559,7 +671,7 @@ def optimize_seams(transform, seams, merge_area=0.005, passes=3, relocate=True, 
                 # del agujero y llegar a cualquier otra costura o agujero por el camino más escondido
                 loop = graph.border_loop(a)
                 targets = (blocked_vertices - loop) | {v for e in others for v in graph.edge_v[e]}
-                dist, prev = graph._paths(loop, (blocked_vertices | targets) - loop, others)
+                dist, prev = graph._paths(loop, (blocked_vertices | targets) - loop, others, stop=targets)
                 reachable = [v for v in targets if v in dist and v not in loop]
                 if not reachable:
                     continue
@@ -582,7 +694,7 @@ def optimize_seams(transform, seams, merge_area=0.005, passes=3, relocate=True, 
             # salvo cerca de los extremos, donde hay que llegar a ellas
             near_ends = graph.ring({a, b}, 2)
             beside = graph.ring({v for e in others for v in graph.edge_v[e]}, 1) - near_ends
-            dist, prev = graph._paths(a, (blocked_vertices | beside) - {a, b}, others)
+            dist, prev = graph._paths(a, (blocked_vertices | beside) - {a, b}, others, stop={b})
             end = b
             if end not in dist:
                 continue

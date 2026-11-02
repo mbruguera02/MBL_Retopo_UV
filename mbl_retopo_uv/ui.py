@@ -8,7 +8,7 @@ import time
 import maya.cmds as cmds
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from . import __version__, cleanup, config, detail, diagnostics, guides, pipeline, status
+from . import __version__, cleanup, config, detail, diagnostics, guides, pipeline, retopo, status
 from .common import MBLError, format_duration, selected_mesh_transforms, short_name, stamp
 
 WINDOW_OBJECT_NAME = "MBLRetopoUVWindow"
@@ -201,6 +201,15 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow("Motor", w["retopo_engine"])
         form.addRow(self.engine_note)
         form.addRow("Caras objetivo", w["retopo_target_faces"])
+        recommend = QtWidgets.QPushButton("Recomendar caras")
+        recommend.setToolTip("Mide la malla seleccionada y dice cuántas caras hacen falta para no perder la forma "
+                             "(mínimo recomendado) y cuántas para conservar también las piezas más finas (máximo detalle).")
+        recommend.clicked.connect(self._recommend_faces)
+        self.faces_note = QtWidgets.QLabel()
+        self.faces_note.setWordWrap(True)
+        self.faces_note.setObjectName("note")
+        form.addRow(recommend)
+        form.addRow(self.faces_note)
         form.addRow("Simetría", w["retopo_symmetry"])
 
         # opciones del Motor MBL (solo se ven con Motor MBL o Automático)
@@ -530,6 +539,30 @@ class RetopoUVWindow(QtWidgets.QDialog):
         if found:
             cmds.select(found, replace=True)
             self.log("Componentes problemáticos seleccionados.")
+
+    def _recommend_faces(self):
+        meshes = selected_mesh_transforms()
+        if not meshes:
+            self.log("Selecciona al menos una malla poligonal.", "warning")
+            return
+        from mbl_engine.analyze import thousands
+        requested = int(self.widgets["retopo_target_faces"].value())
+        notes = []
+        for mesh in meshes:
+            try:
+                figures, warning = retopo.recommend_faces(mesh, requested)
+            except Exception as exc:
+                self.log("{}: no se pudo medir ({}).".format(short_name(mesh), exc), "warning")
+                continue
+            self.log("{}: caras recomendadas: al menos {} (máximo detalle {}; {:.0f} % de láminas finas que el motor engorda)."
+                     .format(short_name(mesh), thousands(figures["minimum"]), thousands(figures["detail"]),
+                             figures["sheet_percent"]))
+            if warning:
+                self.log("{}: {}".format(short_name(mesh), warning), "warning")
+            notes.append("Mínimo recomendado: {} · Máximo detalle: {}{}".format(
+                thousands(figures["minimum"]), thousands(figures["detail"]),
+                "" if len(meshes) == 1 else " ({})".format(short_name(mesh))))
+        self.faces_note.setText(" | ".join(notes))
 
     def _diagnose(self):
         meshes = selected_mesh_transforms()

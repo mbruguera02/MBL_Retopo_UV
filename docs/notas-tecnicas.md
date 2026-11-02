@@ -250,3 +250,43 @@ Queja: según los rayones o el ruido que se pongan en Substance, la textura se v
 - **Escala:** a lo largo de los cortes, la escala difiere más de un 10 % en el 40 % (humano) y el 55 % (águila) de su longitud. Más iteraciones de Optimize (20 en vez de 5) no lo cambian en el humano; en el águila bajan algo los casos extremos (p90 de 2,7 a 1,9) sin tocar el resto.
 - **Pendiente para la V2:** cortes que se parezcan por los dos lados (rectos, a lo largo de los tubos) y ajustar a la vez la longitud de las aristas de las dos orillas de un corte. Es un problema de elegir los cortes, no de colocar las islas.
 - **Consejo para el usuario** (en el README): en Substance, proyección triplanar o de espacio mundo en las capas procedurales; lo pintado a mano y las máscaras de curvatura u oclusión no dependen de los cortes.
+
+## Analizador de caras mínimas (2 de noviembre)
+
+`mbl_engine/analyze.py` (numpy puro) dice cuántas caras hacen falta para no perder la forma del original. El plugin lo
+llama antes de cada retopo (aviso en el log si se piden menos), en el semáforo (amarillo si el retopo tiene menos del
+85 % del mínimo) y con el botón *Recomendar caras*. Tarda 0,3 s con el humano y unos 4-5 s con mallas de 528.000
+triángulos (se mide en una versión reducida de 30.000).
+
+- **Mínimo recomendado = curvatura.** El error de cuerda de una arista de longitud L sobre un radio R es L²/(8R), así
+  que el error de forma medio de N caras iguales es proporcional a 1/N. La curvatura de cada vértice se estima con lo que
+  giran las normales por unidad de longitud en cada arista (la que más gira, promediada con sus vecinos). El error real del
+  Motor MBL es 2 veces el calculado (`CURVATURE_GAIN`), y se apunta a un error medio de 0,12 % de la diagonal más un margen
+  de 1,3 para que el 1 % de peor error (p99) quede en torno al 1 % (`MINIMUM_MARGIN`).
+- **Máximo detalle = grosor.** `sizefield.thickness` con pasos geométricos de 0,15 a 30 aristas de referencia; N con el
+  que solo el 10 % del área de volúmenes queda más fino que 3 aristas. Es informativo: el águila y la criatura piden más de
+  200.000 caras para esto y con 12.000 el Motor MBL ya da 0,06 % de error medio, porque engorda las piezas finas. Por eso no
+  manda en el mínimo (probado: ninguna regla de «% de área más fina que w aristas» da cifras parecidas en el humano y en el
+  águila, y la que acierta en uno se pasa 20 veces en el otro).
+
+Error medio previsto con el valor calibrado frente al medido en el Motor MBL (% de la diagonal; el medido a 1.000 caras
+incluye piezas perdidas, que la curvatura no ve):
+
+| Caras | Humano previsto / medido | Águila previsto / medido | Criatura previsto / medido |
+|---|---|---|---|
+| 1.000 | 0,375 / 0,338 | 0,473 / 1,322 | 0,473 / 0,978 |
+| 2.500 | 0,178 / 0,373 | 0,269 / 0,231 | 0,269 / 0,203 |
+| 5.000 | 0,096 / 0,131 | 0,170 / 0,115 | 0,169 / 0,135 |
+| 12.000 | 0,044 / 0,046 | 0,090 / 0,067 | 0,090 / 0,059 |
+
+Validación del mínimo (se ejecuta el Motor MBL con esa cifra y con la mitad; error medio / p99 / máximo, % de la diagonal):
+
+| Modelo | Mínimo | Real con el mínimo | Real con la mitad |
+|---|---|---|---|
+| Humano | 9.176 | 0,056 / 0,78 / 1,32 | 0,146 / 1,42 / 2,26 |
+| Águila | 17.687 | 0,056 / 0,98 / 2,38 | 0,082 / 1,42 / 3,38 |
+| Criatura | 17.693 | 0,043 / 0,60 / 1,97 | 0,089 / 1,50 / 2,73 |
+
+Con el mínimo, los tres quedan en verde con holgura (límite del semáforo: 0,25 % medio, 2,5 % máximo, aunque el águila roza el máximo);
+con la mitad, el error medio sube hasta 2,6 veces y el p99 pasa de 1 % a 1,4 %. Es conservador en el error medio (0,04-0,06 %
+reales frente a 0,12 % de objetivo) porque el margen se ajustó al p99. Pendiente: probar con Maya y con otros modelos.

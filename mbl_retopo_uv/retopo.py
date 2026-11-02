@@ -356,9 +356,55 @@ def _maya_engine(transform, settings, log, tick):
     return new, fixes
 
 
+# cifras del analizador de caras mínimas por malla original (nombre largo), para el semáforo
+_RECOMMENDED = {}
+
+
+def recommend_faces(transform, requested=0):
+    """Caras mínimas y de máximo detalle de una malla (mbl_engine.analyze). Devuelve (cifras, aviso); el aviso es
+    None si `requested` llega al mínimo. Tarda de menos de un segundo a unos 5 s según el tamaño de la malla."""
+    from mbl_engine import analyze, decimate
+    points, faces = mesh_arrays(transform)
+    tris = _core.Mesh(points, faces).triangles()[0]
+    report, warning = analyze.recommend(points, tris, int(requested), decimator=decimate.find_decimator())
+    figures = {"minimum": report["minimum"], "detail": report["detail"], "sheet_percent": report["sheet_percent"]}
+    _RECOMMENDED[cmds.ls(transform, long=True)[0]] = figures
+    return figures, warning
+
+
+def recommended_faces(transform):
+    """Cifras ya calculadas de una malla original, o las calcula. None si no se pueden calcular."""
+    if not transform or not cmds.objExists(transform):
+        return None
+    key = cmds.ls(transform, long=True)[0]
+    if key not in _RECOMMENDED:
+        try:
+            recommend_faces(transform)
+        except Exception:
+            return None
+    return _RECOMMENDED.get(key)
+
+
+def _log_recommendation(transform, settings, log):
+    """Avisa antes del retopo si se piden menos caras de las recomendadas. Es informativo: nunca detiene el proceso."""
+    try:
+        figures, warning = recommend_faces(transform, int(settings["retopo_target_faces"]))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return
+    from mbl_engine.analyze import thousands
+    log("{}: caras recomendadas: al menos {} (máximo detalle {}).".format(
+        short_name(transform), thousands(figures["minimum"]), thousands(figures["detail"])))
+    if warning:
+        log("{}: {}".format(short_name(transform), warning), "warning")
+
+
 def retopo(transform, settings, log=default_log, tick=None):
     """Retopologiza una malla con el motor elegido. Devuelve el transform nuevo; el original queda oculto."""
     mesh_shape(transform)
+    if not settings.get("_symmetry_half"):
+        _log_recommendation(transform, settings, log)
     settings = _resolve_guides_and_detail(transform, settings, log)
     engine = settings.get("retopo_engine", "maya")
     if engine == "mbl":

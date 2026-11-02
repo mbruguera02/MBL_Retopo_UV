@@ -15,6 +15,7 @@ import maya.cmds as cmds
 
 from . import cleanup, diagnostics, retopo, uv
 from .common import dag_path, mesh_shape, short_name
+from mbl_engine.analyze import thousands
 
 GREEN, YELLOW, RED = 0, 1, 2
 LEVEL_NAMES = {GREEN: "listo", YELLOW: "revisar", RED: "arreglar"}
@@ -30,6 +31,8 @@ ERROR_MAX_PERCENT = (2.5, 5.0)
 POLES_6_PERCENT = 0.25
 MIN_VERTICES_FOR_POLES = 200
 QUAD_PERCENT = 98.0
+# amarillo si el retopo tiene menos de esta fracción de las caras mínimas recomendadas
+MIN_FACES_TOLERANCE = 0.85
 UV_COVERAGE_PERCENT = (50.0, 35.0)      # menos es peor
 # con "Costuras escondidas" se cambia resolución por costuras ocultas (águila 42%, humano 46%)
 UV_COVERAGE_HIDDEN_PERCENT = (35.0, 25.0)
@@ -117,16 +120,27 @@ def retopo_status(transform, source=None, stats=None):
 
     if source and cmds.objExists(source):
         error = stats.get("error") or diagnostics.surface_error(source, transform)
-        level = _grade(error["mean_percent"], ERROR_MEAN_PERCENT)
+        level = shape_level = _grade(error["mean_percent"], ERROR_MEAN_PERCENT)
         checks.append(_check(level, "Error de forma medio {:.3f}% del tamaño".format(error["mean_percent"]),
                              "" if level == GREEN else
                              "Sube 'Caras objetivo' (más caras = más detalle) y deja marcado "
                              "'Reproyectar sobre el original'."))
         level = _grade(error["max_percent"], ERROR_MAX_PERCENT)
+        shape_level = max(shape_level, level)
         checks.append(_check(level, "Error de forma máximo {:.2f}% del tamaño".format(error["max_percent"]),
                              "" if level == GREEN else
                              "Alguna zona fina (dedos, orejas, picos) se ha perdido o deformado. Sube "
                              "'Caras objetivo' o prueba otro motor."))
+        recommended = retopo.recommended_faces(source)
+        # con pocas caras pero la forma bien medida (una esfera, una pieza sencilla) no hay nada que avisar
+        if recommended and stats["faces"] < MIN_FACES_TOLERANCE * recommended["minimum"] and shape_level != GREEN:
+            checks.append(_check(YELLOW, "{} caras; se recomiendan al menos {}".format(
+                thousands(stats["faces"]), thousands(recommended["minimum"])),
+                "Sube 'Caras objetivo' a {} o más: con menos se pierden puntas y piezas finas (dedos, plumas, "
+                "orejas). 'Recomendar caras' lo calcula.".format(thousands(recommended["minimum"]))))
+        elif recommended:
+            checks.append(_check(GREEN, "{} caras (mínimo recomendado {})".format(
+                thousands(stats["faces"]), thousands(recommended["minimum"]))))
     else:
         checks.append(_check(YELLOW, "No encuentro la malla original: no se mide el error de forma",
                              "Si la borraste o renombraste no pasa nada; el resto de comprobaciones vale."))

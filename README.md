@@ -52,6 +52,7 @@ Con los valores que trae la ventana, la mayoría de modelos salen bien. Estos so
 | Ajuste | Para qué sirve | Qué poner |
 |---|---|---|
 | **Caras objetivo** | Cuántas caras tendrá el resultado (aproximadamente) | 5.000 por defecto. Un personaje medio: de 5.000 a 20.000 |
+| **Recomendar caras** (botón bajo *Caras objetivo*) | Mide tu malla y dice cuántas caras hacen falta para no perder puntas ni piezas finas | Púlsalo con la malla seleccionada y pon esa cifra. Si pides menos, el log y el semáforo te avisan |
 | **Motor** | Quién hace el retopo | **Automático**: prueba varios motores y se queda con el mejor. Es lo recomendable |
 | **Calidad** (Motor MBL) | Cuántas pruebas hace antes de entregar | *Normal* por defecto. *Alta* tarda el doble y mejora un poco; *Rápida* para ver cómo queda |
 | **Simetría** | Si el modelo es simétrico, hace una mitad y la refleja | *No* por defecto. *Automática* si tu modelo es simétrico y quieres los dos lados idénticos |

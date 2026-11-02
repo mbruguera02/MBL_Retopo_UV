@@ -81,6 +81,27 @@ Debajo de cada punto amarillo o rojo sale **→ qué tocar**: el ajuste exacto d
 - **Cuida la memoria de tu ordenador.** QuadriFlow, el motor de fondo del Motor MBL, gasta unos 54 KB por cada cara que se le pide (25.000 caras, 1,5 GB; 60.000, 3,3 GB). Con 16 GB de RAM o menos trabaja una variante a la vez, no usa más de la mitad de la memoria, corre con prioridad baja y, si la memoria libre baja de 1,2 GB, se detiene solo y Maya sigue vivo. Si pides tantas caras que no caben, te dice cuántas puedes pedir.
 - La ventana está en español.
 
+## Para animación y VFX: guías de flujo
+
+El plugin no puede decidir dónde van los polos (los vértices que no tienen 4 aristas), y en una malla que se deforma se notan
+sobre todo en codos, rodillas, muñecas, hombros, ojos y boca. Lo que sí sigue el retopo son los **anillos que le dibujes**:
+
+1. Selecciona el modelo original y abre *Más opciones*, apartado **Guías de flujo**. Pulsa **Dibujar guías**.
+2. Dibuja un trazo cerrado alrededor de cada zona que se doble: un anillo en cada codo, rodilla y muñeca (cruzando el hueso),
+   y otro alrededor de cada ojo y de la boca. Los trazos se pegan a la superficie. Si quieres varios anillos en una articulación,
+   dibuja varios trazos paralelos.
+3. Pulsa **Terminar guías** (también puedes usar curvas que ya tengas con **Usar curvas seleccionadas**, o quitarlas con
+   **Borrar guías**). Los trazos quedan en amarillo, en el grupo `<malla>_mblGuides`.
+4. Pulsa **Retopo** o **Todo**. Con guías, el modo *Automático* usa el motor de Maya, que es el que mejor las sigue, y hace el modelo
+   entero (sin reflejar una mitad).
+5. Comprueba que los loops de la malla nueva siguen los trazos.
+
+Conviene saber:
+- **El Motor MBL no admite guías**: con guías se usa Maya.
+- Si con las guías salen más de 1,6 veces las caras pedidas, el plugin repite el retopo sin ellas y lo avisa en el log.
+- Las guías ayudan a que haya anillos donde los quieres; **no garantizan** dónde quedan los polos. Revisa la malla antes de hacer el skin.
+- Con **Pintar detalle** (mismo apartado) puedes pedir más caras en la cara y las manos.
+
 ## Si algo falla
 
 | Problema | Qué hacer |

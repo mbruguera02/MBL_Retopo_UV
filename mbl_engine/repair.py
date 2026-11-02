@@ -2,7 +2,7 @@
 """Reparación de topología sin Maya: caras degeneradas, aristas compartidas de más, vértices de 2
 aristas, orientación, pajaritas, restos sueltos y agujeros. Más lectura y escritura de OBJ.
 
-Funciones puras sobre (puntos, caras): las usan los motores de retopo (Instant Meshes, QuadWild,
+Funciones puras sobre (puntos, caras): las usan los motores de retopo (Instant Meshes, QuadriFlow,
 Maya) para dejar su resultado en una malla limpia que Unfold3D acepte.
 """
 
@@ -423,3 +423,111 @@ def fill_new_holes(points, faces, source_border, max_edges):
     faces = [list(f) for f in faces]
     points, faces, filled = _fill_holes(list(map(tuple, pts)), faces, max_edges, accept=is_new, quads=True)
     return points, faces, filled
+
+
+# ---------------------------------------------------------------------------------------------
+# Malla que Unfold3D acepta: aletas, pajaritas, vértices de 2 aristas y quads con la diagonal repetida
+#
+# Los motores dejan a veces topología que Maya da por buena (polyInfo no la marca) pero que Unfold3D rechaza
+# con "Mesh has non-manifold UVs" o que, al reconstruir la malla desde sus caras, se vuelve no-manifold:
+#  - aletas: dos triángulos con los mismos vértices y la orientación contraria pegados a una arista de la
+#    superficie (nacen al colapsar una cara diminuta: polyCollapseEdge deja aristas duplicadas, no-manifold
+#    solo cuando se juntan por pares de vértices);
+#  - un quad cuyas esquinas opuestas ya están unidas por una arista de otra cara (un triángulo de aristas que
+#    no es una cara): Unfold3D triangula el quad por esa diagonal y deja la arista en tres caras. Salía en
+#    la salida directa de polyRetopo y del Motor MBL de la figura de los dedos juntos (midnight).
+# ---------------------------------------------------------------------------------------------
+
+def _face_area(points, face):
+    total = np.zeros(3)
+    for a, b in _edges(face):
+        total += np.cross(points[a], points[b])
+    return 0.5 * float(np.linalg.norm(total))
+
+
+def _drop_fins(points, faces):
+    """Aristas con más de 2 caras: se quitan las caras que menos se agarran al resto de la malla.
+
+    Quitar "las de después" (_remove_overshared_edges) arranca a veces un quad de la superficie y deja la
+    aleta. Aquí cae primero la cara con menos aristas compartidas con otras caras vivas (la aleta) y, a
+    igualdad, la de menos área. Devuelve (caras, nº de caras quitadas).
+    """
+    owners = _edge_faces(faces)
+    alive = [True] * len(faces)
+    dropped = 0
+
+    def grip(index, skip):
+        return sum(1 for a, b in _edges(faces[index]) if (min(a, b), max(a, b)) != skip
+                   and sum(1 for j in owners[(min(a, b), max(a, b))] if alive[j]) > 1)
+
+    for edge, on_edge in owners.items():
+        live = [i for i in on_edge if alive[i]]
+        while len(live) > 2:
+            worst = min(live, key=lambda i: (grip(i, edge), _face_area(points, faces[i]), -i))
+            alive[worst] = False
+            live.remove(worst)
+            dropped += 1
+    return [f for i, f in enumerate(faces) if alive[i]], dropped
+
+
+def _break_chords(points, faces):
+    """Parte los quads (o n-gons) con una diagonal que ya es arista de otra cara.
+
+    Un quad se divide en dos triángulos por la otra diagonal; si las dos son aristas (o la cara tiene más de 4
+    lados) se pone un vértice en su centro. Devuelve (puntos, caras, nº de caras partidas).
+    """
+    edges = {(min(a, b), max(a, b)) for face in faces for a, b in _edges(face)}
+    points = list(points)
+    out, fixed = [], 0
+    for face in faces:
+        n = len(face)
+        if n < 4:
+            out.append(face)
+            continue
+        chords = {(i, j) for i in range(n) for j in range(i + 2, n)
+                  if not (i == 0 and j == n - 1) and (min(face[i], face[j]), max(face[i], face[j])) in edges}
+        if not chords:
+            out.append(face)
+            continue
+        fixed += 1
+        free = [i for i in (0, 1) if n == 4 and (i, i + 2) not in chords]
+        if free:
+            i = free[0]
+            out.append([face[i], face[i + 1], face[i + 2]])
+            out.append([face[i + 2], face[(i + 3) % 4], face[i]])
+            edges.add((min(face[i], face[i + 2]), max(face[i], face[i + 2])))
+        else:
+            points.append(tuple(np.mean([points[v] for v in face], axis=0)))
+            center = len(points) - 1
+            out.extend([face[k], face[(k + 1) % n], center] for k in range(n))
+    return points, out, fixed
+
+
+def make_manifold(points, faces, rounds=4):
+    """Deja la malla como una superficie 2-manifold que Unfold3D acepta. Devuelve (puntos, caras, informe).
+
+    informe: {"fins": caras quitadas de aristas con más de 2 caras, "doublets": vértices de 2 aristas quitados,
+    "bowties": vértices pajarita separados, "chords": quads partidos por su diagonal repetida}. Si la malla ya
+    está bien devuelve las mismas listas sin tocar (así lo que ya funcionaba sale idéntico). Se repite hasta que
+    una pasada no cambia nada: arreglar una cosa puede dejar otra (quitar una aleta deja un vértice de 2 aristas).
+    """
+    report = {"fins": 0, "doublets": 0, "bowties": 0, "chords": 0}
+    work_points = list(np.asarray(points, dtype=float).reshape(-1, 3))
+    work = [list(f) for f in faces]
+    for _ in range(rounds):
+        before = sum(report.values())
+        work, dropped = _drop_fins(work_points, work)
+        report["fins"] += dropped
+        used = {v for f in work for v in f}
+        work = _dissolve_doublets(work)
+        report["doublets"] += len(used) - len({v for f in work for v in f})
+        count = len(work_points)
+        work_points, work = _split_bowties(work_points, work)
+        report["bowties"] += len(work_points) - count
+        work_points, work, broken = _break_chords(work_points, work)
+        report["chords"] += broken
+        if sum(report.values()) == before:
+            break
+    if not sum(report.values()):
+        return points, faces, report
+    return np.array(work_points, dtype=float).reshape(-1, 3), work, report

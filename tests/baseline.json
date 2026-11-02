@@ -1,0 +1,551 @@
+{
+ "meta": {
+  "commit": "07eb504",
+  "date": "2026-11-02 23:25",
+  "engines": [
+   "maya"
+  ],
+  "faces": 5000
+ },
+ "results": {
+  "criatura": {
+   "maya": {
+    "engine": "maya",
+    "faces_target": 5000,
+    "input_tris": 528554,
+    "memory_peak_mb": 3935,
+    "quality": {
+     "bad_shape_percent": 4.954,
+     "defect_score": 3.901,
+     "flipped_percent": 1.1187,
+     "folded_percent": 1.3459,
+     "grade": 2,
+     "loop_mean": 30.07,
+     "loops_closed_percent": 15.54,
+     "new_holes": 0,
+     "reasons": [
+      "quads deformados: 4.95%",
+      "caras dadas la vuelta: 1.12%",
+      "caras dobladas: 1.35%"
+     ],
+     "size_jump_percent": 1.338
+    },
+    "retopo": {
+     "faces": 5721,
+     "ngons": 0,
+     "poles": 363,
+     "quad_percent": 99.86,
+     "tris": 8
+    },
+    "shape_error": {
+     "max_percent": 2.3035,
+     "mean_percent": 0.1289
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 2,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 1.1,
+     "retopo": 19.3,
+     "total": 63.6,
+     "uv": 43.2
+    },
+    "uv": {
+     "islands": 68,
+     "over_1_5_percent": 7.41,
+     "racord_rot_lt_15": 23.11,
+     "racord_scale_lt_10": 48.34,
+     "seam_percent": 10.84,
+     "stretch_mean": 1.12,
+     "used_percent": 64.59
+    },
+    "wall_seconds": 75.0
+   },
+   "mbl": {
+    "engine": "mbl",
+    "faces_target": 5000,
+    "input_tris": 528554,
+    "memory_peak_mb": 3320,
+    "quality": {
+     "bad_shape_percent": 7.27,
+     "defect_score": 4.675,
+     "flipped_percent": 1.4496,
+     "folded_percent": 1.3143,
+     "grade": 2,
+     "loop_mean": 32.57,
+     "loops_closed_percent": 1.72,
+     "new_holes": 0,
+     "reasons": [
+      "quads deformados: 7.27%",
+      "caras dadas la vuelta: 1.45%",
+      "caras dobladas: 1.31%"
+     ],
+     "size_jump_percent": 1.372
+    },
+    "retopo": {
+     "faces": 5174,
+     "ngons": 0,
+     "poles": 501,
+     "quad_percent": 99.961,
+     "tris": 2
+    },
+    "shape_error": {
+     "max_percent": 3.5947,
+     "mean_percent": 0.1431
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 1,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 2.9,
+     "retopo": 127.7,
+     "total": 211.6,
+     "uv": 81.0
+    },
+    "uv": {
+     "islands": 59,
+     "over_1_5_percent": 6.78,
+     "racord_rot_lt_15": 21.57,
+     "racord_scale_lt_10": 41.02,
+     "seam_percent": 9.89,
+     "stretch_mean": 1.173,
+     "used_percent": 60.59
+    },
+    "wall_seconds": 232.1
+   }
+  },
+  "hardsurface": {
+   "maya": {
+    "engine": "maya",
+    "faces_target": 5000,
+    "input_tris": 15104,
+    "memory_peak_mb": 1096,
+    "quality": {
+     "bad_shape_percent": 4.538,
+     "defect_score": 0.908,
+     "flipped_percent": 0.0,
+     "folded_percent": 0.0,
+     "grade": 1,
+     "loop_mean": 314.07,
+     "loops_closed_percent": 19.33,
+     "new_holes": 0,
+     "reasons": [
+      "quads deformados: 4.54%"
+     ],
+     "size_jump_percent": 0.0
+    },
+    "retopo": {
+     "faces": 4738,
+     "ngons": 0,
+     "poles": 34,
+     "quad_percent": 100.0,
+     "tris": 0
+    },
+    "shape_error": {
+     "max_percent": 0.2455,
+     "mean_percent": 0.0189
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 0,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.0,
+     "retopo": 2.7,
+     "total": 9.5,
+     "uv": 6.8
+    },
+    "uv": {
+     "islands": 6,
+     "over_1_5_percent": 9.73,
+     "racord_rot_lt_15": 2.91,
+     "racord_scale_lt_10": 54.14,
+     "seam_percent": 3.84,
+     "stretch_mean": 1.141,
+     "used_percent": 56.03
+    },
+    "wall_seconds": 15.3
+   },
+   "mbl": {
+    "engine": "mbl",
+    "faces_target": 5000,
+    "input_tris": 15104,
+    "memory_peak_mb": 1299,
+    "quality": {
+     "bad_shape_percent": 0.0,
+     "defect_score": 0.0,
+     "flipped_percent": 0.0,
+     "folded_percent": 0.0,
+     "grade": 0,
+     "loop_mean": 607.93,
+     "loops_closed_percent": 16.01,
+     "new_holes": 0,
+     "reasons": [],
+     "size_jump_percent": 0.0
+    },
+    "retopo": {
+     "faces": 5097,
+     "ngons": 0,
+     "poles": 28,
+     "quad_percent": 100.0,
+     "tris": 0
+    },
+    "shape_error": {
+     "max_percent": 0.3898,
+     "mean_percent": 0.0349
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 0,
+     "uv": 1
+    },
+    "timings": {
+     "cleanup": 0.1,
+     "retopo": 56.3,
+     "total": 84.1,
+     "uv": 27.7
+    },
+    "uv": {
+     "islands": 5,
+     "over_1_5_percent": 9.57,
+     "racord_rot_lt_15": 7.35,
+     "racord_scale_lt_10": 37.09,
+     "seam_percent": 3.51,
+     "stretch_mean": 1.19,
+     "used_percent": 48.93
+    },
+    "wall_seconds": 97.8
+   }
+  },
+  "human": {
+   "maya": {
+    "engine": "maya",
+    "faces_target": 5000,
+    "input_tris": 28092,
+    "memory_peak_mb": 1068,
+    "quality": {
+     "bad_shape_percent": 1.534,
+     "defect_score": 1.701,
+     "flipped_percent": 0.8832,
+     "folded_percent": 0.3729,
+     "grade": 2,
+     "loop_mean": 97.58,
+     "loops_closed_percent": 18.56,
+     "new_holes": 0,
+     "reasons": [
+      "caras dadas la vuelta: 0.88%",
+      "caras dobladas: 0.37%"
+     ],
+     "size_jump_percent": 0.413
+    },
+    "retopo": {
+     "faces": 5095,
+     "ngons": 0,
+     "poles": 174,
+     "quad_percent": 99.804,
+     "tris": 10
+    },
+    "shape_error": {
+     "max_percent": 1.1731,
+     "mean_percent": 0.0843
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 0,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.1,
+     "retopo": 7.9,
+     "total": 40.8,
+     "uv": 32.8
+    },
+    "uv": {
+     "islands": 28,
+     "over_1_5_percent": 3.51,
+     "racord_rot_lt_15": 27.46,
+     "racord_scale_lt_10": 56.81,
+     "seam_percent": 7.28,
+     "stretch_mean": 1.077,
+     "used_percent": 60.31
+    },
+    "wall_seconds": 47.3
+   },
+   "mbl": {
+    "engine": "mbl",
+    "faces_target": 5000,
+    "input_tris": 28092,
+    "memory_peak_mb": 1229,
+    "quality": {
+     "bad_shape_percent": 11.978,
+     "defect_score": 5.756,
+     "flipped_percent": 1.8427,
+     "folded_percent": 1.0071,
+     "grade": 2,
+     "loop_mean": 130.86,
+     "loops_closed_percent": 10.33,
+     "new_holes": 0,
+     "reasons": [
+      "quads deformados: 11.98%",
+      "caras dadas la vuelta: 1.84%",
+      "caras dobladas: 1.01%"
+     ],
+     "size_jump_percent": 1.532
+    },
+    "retopo": {
+     "faces": 4667,
+     "ngons": 0,
+     "poles": 166,
+     "quad_percent": 100.0,
+     "tris": 0
+    },
+    "shape_error": {
+     "max_percent": 2.5967,
+     "mean_percent": 0.1552
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 1,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.1,
+     "retopo": 29.3,
+     "total": 74.2,
+     "uv": 44.8
+    },
+    "uv": {
+     "islands": 39,
+     "over_1_5_percent": 5.1,
+     "racord_rot_lt_15": 22.28,
+     "racord_scale_lt_10": 59.53,
+     "seam_percent": 8.01,
+     "stretch_mean": 1.114,
+     "used_percent": 61.58
+    },
+    "wall_seconds": 81.9
+   }
+  },
+  "midnight": {
+   "maya": {
+    "engine": "maya",
+    "faces_target": 5000,
+    "input_tris": 41724,
+    "memory_peak_mb": 1536,
+    "quality": {
+     "bad_shape_percent": 2.076,
+     "defect_score": 3.148,
+     "flipped_percent": 1.8487,
+     "folded_percent": 0.7656,
+     "grade": 2,
+     "loop_mean": 40.46,
+     "loops_closed_percent": 13.1,
+     "new_holes": 0,
+     "reasons": [
+      "caras dadas la vuelta: 1.85%",
+      "caras dobladas: 0.77%"
+     ],
+     "size_jump_percent": 0.355
+    },
+    "retopo": {
+     "faces": 5355,
+     "ngons": 0,
+     "poles": 258,
+     "quad_percent": 99.851,
+     "tris": 8
+    },
+    "shape_error": {
+     "max_percent": 3.1745,
+     "mean_percent": 0.138
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 2,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.1,
+     "retopo": 8.1,
+     "total": 45.6,
+     "uv": 37.4
+    },
+    "uv": {
+     "islands": 43,
+     "over_1_5_percent": 6.52,
+     "racord_rot_lt_15": 15.53,
+     "racord_scale_lt_10": 47.61,
+     "seam_percent": 9.6,
+     "stretch_mean": 1.14,
+     "used_percent": 56.07
+    },
+    "wall_seconds": 51.5
+   },
+   "mbl": {
+    "engine": "mbl",
+    "faces_target": 5000,
+    "input_tris": 41724,
+    "memory_peak_mb": 1557,
+    "quality": {
+     "bad_shape_percent": 5.718,
+     "defect_score": 5.791,
+     "flipped_percent": 2.8777,
+     "folded_percent": 1.219,
+     "grade": 2,
+     "loop_mean": 31.43,
+     "loops_closed_percent": 5.83,
+     "new_holes": 0,
+     "reasons": [
+      "quads deformados: 5.72%",
+      "caras dadas la vuelta: 2.88%",
+      "caras dobladas: 1.22%"
+     ],
+     "size_jump_percent": 1.651
+    },
+    "retopo": {
+     "faces": 5004,
+     "ngons": 0,
+     "poles": 368,
+     "quad_percent": 99.6,
+     "tris": 20
+    },
+    "shape_error": {
+     "max_percent": 2.848,
+     "mean_percent": 0.1005
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 2,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.1,
+     "retopo": 38.5,
+     "total": 65.9,
+     "uv": 27.2
+    },
+    "uv": {
+     "islands": 44,
+     "over_1_5_percent": 6.61,
+     "racord_rot_lt_15": 27.78,
+     "racord_scale_lt_10": 56.67,
+     "seam_percent": 10.55,
+     "stretch_mean": 1.128,
+     "used_percent": 58.85
+    },
+    "wall_seconds": 71.7
+   }
+  },
+  "prop": {
+   "maya": {
+    "engine": "maya",
+    "faces_target": 5000,
+    "input_tris": 2167,
+    "memory_peak_mb": 944,
+    "quality": {
+     "bad_shape_percent": 0.317,
+     "defect_score": 0.915,
+     "flipped_percent": 0.812,
+     "folded_percent": 0.0396,
+     "grade": 2,
+     "loop_mean": 37.81,
+     "loops_closed_percent": 38.61,
+     "new_holes": 0,
+     "reasons": [
+      "caras dadas la vuelta: 0.81%"
+     ],
+     "size_jump_percent": 0.0
+    },
+    "retopo": {
+     "faces": 5049,
+     "ngons": 0,
+     "poles": 53,
+     "quad_percent": 100.0,
+     "tris": 0
+    },
+    "shape_error": {
+     "max_percent": 2.8429,
+     "mean_percent": 0.0873
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 1,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.0,
+     "retopo": 4.2,
+     "total": 20.7,
+     "uv": 16.5
+    },
+    "uv": {
+     "islands": 21,
+     "over_1_5_percent": 1.23,
+     "racord_rot_lt_15": 15.73,
+     "racord_scale_lt_10": 63.31,
+     "seam_percent": 5.95,
+     "stretch_mean": 1.069,
+     "used_percent": 60.28
+    },
+    "wall_seconds": 26.9
+   },
+   "mbl": {
+    "engine": "mbl",
+    "faces_target": 5000,
+    "input_tris": 2167,
+    "memory_peak_mb": 1339,
+    "quality": {
+     "bad_shape_percent": 2.511,
+     "defect_score": 5.664,
+     "flipped_percent": 4.3814,
+     "folded_percent": 0.5216,
+     "grade": 2,
+     "loop_mean": 483.94,
+     "loops_closed_percent": 14.72,
+     "new_holes": 0,
+     "reasons": [
+      "caras dadas la vuelta: 4.38%",
+      "caras dobladas: 0.52%"
+     ],
+     "size_jump_percent": 0.778
+    },
+    "retopo": {
+     "faces": 4793,
+     "ngons": 0,
+     "poles": 97,
+     "quad_percent": 99.708,
+     "tris": 14
+    },
+    "shape_error": {
+     "max_percent": 1.4527,
+     "mean_percent": 0.0822
+    },
+    "status": {
+     "cleanup": 0,
+     "retopo": 0,
+     "uv": 0
+    },
+    "timings": {
+     "cleanup": 0.0,
+     "retopo": 56.1,
+     "total": 74.5,
+     "uv": 18.4
+    },
+    "uv": {
+     "islands": 16,
+     "over_1_5_percent": 4.26,
+     "racord_rot_lt_15": 19.93,
+     "racord_scale_lt_10": 54.0,
+     "seam_percent": 4.68,
+     "stretch_mean": 1.1,
+     "used_percent": 53.61
+    },
+    "wall_seconds": 81.0
+   }
+  }
+ }
+}

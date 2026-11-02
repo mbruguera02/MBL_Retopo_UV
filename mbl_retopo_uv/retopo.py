@@ -45,6 +45,7 @@ from mbl_engine.repair import (  # noqa: F401  (núcleo del Motor MBL, sin Maya)
     _remove_small_pieces,
     _fill_holes,
     repair_topology,
+    make_manifold,
     fill_new_holes,
     OPENING_MATCH_EDGES,
 )
@@ -485,6 +486,9 @@ def _mbl_engine(transform, settings, log, tick):
     if report.get("symmetry", {}).get("asked") and not report["symmetry"]["applied"]:
         log("{}: no se aplicó la simetría porque dejaba más fallos en la costura central que el retopo sin ella."
             .format(name), "warning")
+    repaired = _manifold_fixes(report.get("manifold") or {})
+    if repaired:
+        log("{}: Motor MBL: topología arreglada para Unfold3D: {}.".format(name, ", ".join(repaired)))
     flipped = orient_pieces_like(transform, new)
     if flipped:
         log("{}: {} caras giradas hacia fuera.".format(name, flipped))
@@ -966,6 +970,34 @@ def surface_projector(transform):
     return project
 
 
+def _manifold_fixes(report):
+    """Texto de lo que arregló make_manifold ({tipo: cantidad}), una frase por tipo con algo que contar."""
+    names = (("fins", "{} caras sobrantes quitadas de aristas con más de 2 caras"),
+             ("doublets", "{} vértices de 2 aristas quitados"),
+             ("bowties", "{} vértices pajarita separados"),
+             ("chords", "{} quads con la diagonal repetida partidos en triángulos"))
+    return [text.format(report[key]) for key, text in names if report.get(key)]
+
+
+def make_unfoldable(transform, log=default_log):
+    """Aletas, pajaritas, vértices de 2 aristas y quads con la diagonal repetida (mbl_engine.repair.make_manifold).
+
+    Maya no los marca en la malla que construye polyRetopo (polyCollapseEdge deja aristas duplicadas que polyInfo
+    no ve) y se vuelven no-manifold al reconstruir la malla desde sus caras; Unfold3D rechaza además los quads cuya
+    diagonal ya es arista ("Mesh has non-manifold UVs"). Devuelve la malla: un nodo nuevo solo si hubo que tocarla.
+    """
+    points, faces = mesh_arrays(transform)
+    points, faces, report = make_manifold(points, faces)
+    fixes = _manifold_fixes(report)
+    if not fixes:
+        return transform
+    name = short_name(transform)
+    cmds.delete(transform)
+    new = meshbuild.create_mesh(points, faces, name)
+    log("{}: topología arreglada para Unfold3D: {}.".format(name, ", ".join(fixes)))
+    return new
+
+
 def optimize_quads(source, new, settings, log=default_log):
     """Limpieza de polos + relajación sobre el original. Devuelve el transform resultante (nuevo nodo)."""
     from . import quadopt
@@ -1078,6 +1110,7 @@ def _finish(transform, new, fixes, engine_name, settings, log, tick):
         if tick:
             tick()
         new = optimize_quads(transform, new, settings, log)
+    new = make_unfoldable(new, log)
 
     if settings["retopo_reproject"]:
         if tick:
@@ -1132,6 +1165,7 @@ def _symmetric_retopo(transform, settings, log, tick, mean, p95):
         fix_nonmanifold(new)
         cmds.delete(new, constructionHistory=True)
         log("{}: {} componentes no-manifold de la costura reparados.".format(name, leftover))
+    new = make_unfoldable(new, log)
     if tick:
         tick()
     return _present(transform, new, settings, log, tick)

@@ -991,13 +991,17 @@ def test_installer_keeps_existing_usersetup():
     path = os.path.join(folder, "userSetup.py")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("print('lo que ya tenía el usuario')")
-    install.install(folder)
-    install.install(folder)
+    install.write_user_setup(folder, ROOT)
+    install.write_user_setup(folder, ROOT)
     with open(path, "r", encoding="utf-8") as handle:
         content = handle.read()
     assert content.startswith("print('lo que ya tenía el usuario')"), content
     assert content.count(install.BEGIN) == 1 and content.count(install.END) == 1, content
     compile(content, path, "exec")
+    # al desinstalar, lo que había antes se queda tal cual
+    assert install.remove_user_setup_block(folder)
+    with open(path, "r", encoding="utf-8") as handle:
+        assert handle.read().strip() == "print('lo que ya tenía el usuario')"
 
 
 UI_CHECK = r"""

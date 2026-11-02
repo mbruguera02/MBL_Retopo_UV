@@ -16,7 +16,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from mbl_engine import cleanup, closest, decimate, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry  # noqa: E402
+from mbl_engine import analyze, cleanup, closest, decimate, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry  # noqa: E402
 from mbl_engine.mesh import Mesh  # noqa: E402
 
 TESTS, RESULTS = [], []
@@ -867,6 +867,31 @@ def test_fix_deformed_on_sharp_edge():
     assert np.allclose(np.abs(fixed).max(axis=1), 0.5), "salió del cubo"
     after = Mesh(fixed, faces)
     assert (np.einsum("ij,ij->i", after.face_normals, after.face_centers()) > 0).all(), "una cara dada la vuelta"
+
+
+# ------------------------------------------------------------------ analizador de caras
+
+@test
+def test_analyze_warns_about_thin_pieces_even_above_the_minimum():
+    """Se pide más que el mínimo, pero casi toda la superficie es más fina que 3 aristas: avisa; con más caras, no."""
+    v = {"area": np.ones(100), "kappa": np.zeros(100), "thick": np.full(100, 0.5), "sheet": np.zeros(100, dtype=bool),
+         "diagonal": 1.0, "total": 100.0, "min_width": 3.0}
+    fake = {"minimum": 800, "detail": 50000, "sheet_percent": 0.0, "_vertices": v}
+    points, tris = np.zeros((3, 3)), [[0, 1, 2]]
+    saved = analyze.analyze
+    analyze.analyze = lambda *args, **kwargs: fake
+    try:
+        report, warning = analyze.recommend(points, tris, 1000)
+        assert warning and "menos de 3 aristas" in warning and "Pintar detalle" in warning, warning
+        assert "100 %" in warning and "2.000" in warning, warning
+        assert analyze.recommend(points, tris, 100000)[1] is None
+        # por debajo del mínimo sigue mandando el aviso de siempre
+        assert "se recomiendan al menos" in analyze.recommend(points, tris, 400)[1]
+    finally:
+        analyze.analyze = saved
+    # una esfera maciza con caras de sobra no avisa
+    ball = uv_sphere(rings=16, segments=24)
+    assert analyze.recommend(ball.points, ball.triangles()[0], 3000)[1] is None
 
 
 if __name__ == "__main__":

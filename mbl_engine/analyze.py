@@ -49,6 +49,10 @@ FLOOR_FACES = 200
 WARN_BELOW = 0.85
 # con el mínimo recomendado, el aviso habla de piezas finas si al menos este % del área de volúmenes lo es
 THIN_WARN_PERCENT = 5.0
+# aunque se llegue al mínimo, se avisa si con las caras pedidas al menos este % del área de volúmenes queda más fino que
+# MIN_WIDTH aristas (a 30.000 caras: humano 6 %, águila 18 %; modelo de Meshy 36 %, criatura 50 %). Ahí el motor
+# engorda o funde dedos, ropa pegada y pliegues. Es un aviso: no se ha medido cuántos salen mal, solo cuánta superficie
+THIN_NOTE_PERCENT = 20.0
 
 
 def thousands(number):
@@ -174,7 +178,8 @@ def thin_percent(report, faces):
 def recommend(points, tris, requested, decimator=None, **kwargs):
     """Analiza la malla (reducida si es muy grande) y compara con las caras pedidas.
 
-    Devuelve (informe, aviso): aviso es None si lo pedido llega al mínimo recomendado."""
+    Devuelve (informe, aviso): aviso es None si lo pedido llega al mínimo recomendado y no hay demasiada superficie en
+    piezas más finas que MIN_WIDTH aristas."""
     from . import decimate
     tris = np.asarray(tris, dtype=np.int64)
     probe = None
@@ -190,4 +195,12 @@ def recommend(points, tris, requested, decimator=None, **kwargs):
                        expected["error_percent"], predict(report, report["minimum"])["error_percent"],
                        " y se pueden perder puntas y piezas finas (dedos, plumas, orejas)"
                        if expected["thin_percent"] >= THIN_WARN_PERCENT else "")
+    elif requested > 0:
+        thin = thin_percent(report, requested)
+        if thin >= THIN_NOTE_PERCENT:
+            warning = ("Con {} caras el {:.0f} % de la superficie son piezas de menos de {:.0f} aristas de grosor (dedos "
+                       "que se tocan, ropa pegada al cuerpo, pliegues): el retopo puede fundirlas o aplastarlas. Con el "
+                       "doble de caras ({}) bajaría al {:.0f} %; para no subir tanto, usa Pintar detalle en esas zonas."
+                       ).format(thousands(requested), thin, report["_vertices"]["min_width"], thousands(2 * requested),
+                                thin_percent(report, 2 * requested))
     return report, warning

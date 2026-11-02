@@ -268,6 +268,12 @@ triángulos (se mide en una versión reducida de 30.000).
   200.000 caras para esto y con 12.000 el Motor MBL ya da 0,06 % de error medio, porque engorda las piezas finas. Por eso no
   manda en el mínimo (probado: ninguna regla de «% de área más fina que w aristas» da cifras parecidas en el humano y en el
   águila, y la que acierta en uno se pasa 20 veces en el otro).
+- **Aviso de piezas finas** (`THIN_NOTE_PERCENT`, 20 %). Aunque se pida más que el mínimo, el log y *Recomendar caras*
+  avisan si con las caras pedidas más del 20 % del área de volúmenes queda más fino que 3 aristas (dedos que se tocan,
+  ropa pegada al cuerpo, pliegues). Área fina a 30.000 caras: caja dura 0,3 %, humano 6 %, águila 18 %; un personaje de
+  Meshy 36 %, la criatura 50 % (con mínimos por curvatura de 26.900 y 17.700, así que el aviso de «pides menos del
+  mínimo» no salta). El umbral se puso entre los modelos que dieron buen resultado (humano, águila) y los de mucha más
+  superficie fina. Mide superficie, no cuántas piezas salen mal: no se ha contado dedo a dedo.
 
 Error medio previsto con el valor calibrado frente al medido en el Motor MBL (% de la diagonal; el medido a 1.000 caras
 incluye piezas perdidas, que la curvatura no ve):

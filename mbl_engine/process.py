@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Ejecutar los motores externos (Instant Meshes, QuadWild, QuadriFlow) sin colgar al usuario:
+"""Ejecutar los motores externos (Instant Meshes, QuadriFlow) sin colgar al usuario:
 límite de tiempo, detección de bloqueos (sin consumir CPU) y cancelación desde la interfaz.
 """
 
@@ -138,8 +138,8 @@ def _run_once(command, destination, timeout, log_path, tick=None, label="Instant
                     _active.remove(token)
 
     written = os.path.isfile(destination) and os.path.getsize(destination) > 0
-    # quad_from_patches de QuadWild 0.0.2 en Windows termina con 0x80000003 al cerrarse, ya con la malla
-    # guardada: si se pide, vale con que el archivo exista
+    # para programas que terminan con un código de error al cerrarse (0x80000003 en Windows), ya con la malla
+    # guardada: si se pide, vale con que el archivo exista (ningún motor actual lo necesita)
     if (process.returncode != 0 and not (ignore_exit_code and written)) or not written:
         try:
             with open(log_path, "r", encoding="utf-8", errors="replace") as handle:

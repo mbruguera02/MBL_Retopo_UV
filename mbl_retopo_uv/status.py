@@ -5,7 +5,7 @@ conviene mirarlo (amarillo) o hay que arreglarlo (rojo), y qué tocar en cada ca
 Los umbrales salen de las pruebas con el humano (CC) y el águila (Meshy, 528k triángulos), con los
 ajustes por defecto:
 - retopo: 93.5-97.1% de vértices regulares, error medio 0.04-0.12%, error máximo 0.7-1.6%.
-  QuadWild con agujeros en el águila: error máximo 5.2% (lo que hay que avisar).
+  Un motor descartado con agujeros en el águila: error máximo 5.2% (lo que hay que avisar).
 - UVs: 62-70% de textura aprovechada, 4-6% de caras estiradas más de 1.5x. Antes de las mejoras
   de las UVs: 29-42% y 8-13%.
 """
@@ -27,7 +27,7 @@ REGULAR_PERCENT = (92.0, 85.0)          # menos es peor
 ERROR_MEAN_PERCENT = (0.25, 0.6)        # más es peor
 ERROR_MAX_PERCENT = (2.5, 5.0)
 # % de vértices con 6+ aristas que se tolera sin avisar (humano: 3 de 2.900 = 0.1%, sin importancia;
-# QuadWild con agujeros en el águila: 0.5%)
+# un motor descartado con agujeros en el águila: 0.5%)
 POLES_6_PERCENT = 0.25
 MIN_VERTICES_FOR_POLES = 200
 QUAD_PERCENT = 98.0

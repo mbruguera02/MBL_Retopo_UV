@@ -21,7 +21,7 @@ Qué se comprueba:
 | Paso | Rojo | Amarillo |
 |---|---|---|
 | Limpieza | geometría no-manifold sin reparar | caras de área cero, láminas, vértices sueltos o de 2 aristas |
-| Retopo | no-manifold; menos del 85 % de vértices regulares; error de forma medio > 0,6 % o máximo > 5 % | agujeros que el original no tiene; < 98 % quads; < 92 % de vértices regulares; > 0,25 % de polos de 6+ aristas; error medio > 0,25 % o máximo > 2,5 % |
+| Retopo | no-manifold; menos del 85 % de vértices regulares; error de forma medio > 0,6 % o máximo > 5 %; nota 2 del juez (agujeros nuevos; ≥ 0,5 % de caras dadas la vuelta o dobladas; ≥ 10 % de quads deformados; ≥ 15 % de saltos de tamaño; ≥ 5 % de triángulos o n-gons) | agujeros que el original no tiene; < 98 % quads; < 92 % de vértices regulares; > 0,25 % de polos de 6+ aristas; error medio > 0,25 % o máximo > 2,5 %; nota 1 del juez (≥ 0,05 % de caras dadas la vuelta o dobladas; ≥ 3 % de quads deformados; ≥ 5 % de saltos de tamaño; ≥ 1 % de triángulos o n-gons) |
 | UVs | sin UVs o caras sin UVs; solapes; UVs en espejo; fuera del cuadro 0-1 (o islas cruzando UDIMs); < 35 % de textura aprovechada; > 20 % de caras estiradas | < 50 % de textura aprovechada; > 10 % de caras estiradas más de 1,5x |
 
 Los umbrales salen de las pruebas con el humano y el águila: con los ajustes por defecto, los dos salen en verde.
@@ -29,6 +29,30 @@ Los umbrales salen de las pruebas con el humano y el águila: con los ajustes po
 Hay dos excepciones:
 - Con **Costuras escondidas**, la textura aprovechada se mide con umbrales más bajos (35 % y 25 %), porque ese modo cambia resolución por costuras ocultas.
 - En piezas de menos de 200 vértices no se avisa por polos: un cubo tiene 8 polos inevitables.
+
+### Un solo juez de calidad (2 de noviembre)
+
+El paso Retopo pasa ahora por el mismo juez que el banco de pruebas (`mbl_engine/quality.py`: `report()` y `grade()`), con sus mismos umbrales. Antes solo miraba forma, polos y quads y salía en verde con defectos que el juez sí veía (humano con Maya: 0,88 % de caras dadas la vuelta y 0,37 % dobladas, semáforo en verde).
+
+- **Cómo.** `status.judge_report` pasa el retopo y su original a `Mesh` (`retopo.mesh_arrays`) y llama a `quality.report`. Cada cifra del juez sale como un aviso con su nivel (según `quality.LIMITS`) y su «→ qué tocar»: quads deformados, saltos de tamaño, caras dadas la vuelta y caras dobladas. Los triángulos se funden con el aviso de quads y los agujeros nuevos con el de agujeros (el recuento de Maya sigue avisando en amarillo; si el juez también los ve, rojo). El nivel del paso es el peor entre lo que ya calculaba y la nota del juez (0 verde, 1 amarillo, 2 rojo). Como red de seguridad, si `grade()` da más nota que todos los avisos juntos (por ejemplo, si algún día mira una cifra nueva), se añade un aviso con sus razones.
+- **Sin original o con uno enorme.** Sin original, o con más de 1.000.000 de triángulos (`JUDGE_MAX_SOURCE_TRIANGLES`: convertirlo y construir su rejilla cuesta tiempo y memoria), no se compara con él: se miden solo las cifras que no lo necesitan (quads deformados, saltos de tamaño, caras dobladas, triángulos) y, si el original existe, sale un aviso amarillo diciendo que no se comprueban las caras dadas la vuelta. Si el cálculo del juez falla, el paso sale en amarillo con la traza en el Script Editor.
+- **Las UVs y la limpieza no cambian.**
+
+Banco (`tests/bench.py`, 5.000 caras, nota del juez y paso Retopo del semáforo antes → después; la geometría es la misma que en la línea base):
+
+| Modelo / motor | Nota del juez | Semáforo Retopo |
+|---|---|---|
+| criatura / mbl | 2 | amarillo → rojo |
+| hardsurface / maya | 1 | verde → amarillo |
+| hardsurface / mbl | 0 | verde → verde |
+| human / maya | 2 | verde → rojo |
+| human / mbl | 2 | amarillo → rojo |
+| prop / maya | 2 | amarillo → rojo |
+| prop / mbl | 2 | verde → rojo |
+
+Midnight no se puede medir en el banco (falla antes del semáforo) y criatura / maya tampoco. Tiempo del cálculo del juez: humano (original de 28.092 triángulos, retopo de 5.095 caras) 0,2 s, y `retopo_status` entero 0,3 s; criatura (original de 528.554 triángulos, retopo de prueba de 5.352 caras reducido con `polyReduce`) 1,7 s (0,5 s en convertir el original y 1,2 s en `quality.report`, que incluye su rejilla y el recuento de bordes), y `retopo_status` entero 2,4 s (6,6 s la primera vez, por las caras recomendadas, que ya se calculaban antes).
+
+Los consejos «→ qué tocar» de caras dadas la vuelta y dobladas (más caras, otro motor, *Pintar detalle* en dedos que se tocan) están redactados por criterio y por la guía del tutorial; no se ha medido que arreglen esos defectos.
 
 ## Parámetros
 

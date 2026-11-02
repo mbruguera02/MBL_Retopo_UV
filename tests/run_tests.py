@@ -698,6 +698,93 @@ def test_status():
     assert status.cleanup_status(nonmanifold)["level"] == status.RED
 
 
+def make_cube_sphere(name, subdivisions=16, radius=1.0):
+    """Esfera de solo quads (un cubo subdividido y redondeado): un retopo limpio, sin triángulos ni polos de 5."""
+    cube = cmds.polyCube(width=2, height=2, depth=2, subdivisionsX=subdivisions, subdivisionsY=subdivisions,
+                         subdivisionsZ=subdivisions, constructionHistory=False, name=name)[0]
+    fn = om.MFnMesh(om.MSelectionList().add(cube).getDagPath(0))
+    points = fn.getPoints()
+    for i, p in enumerate(points):
+        length = math.sqrt(p.x ** 2 + p.y ** 2 + p.z ** 2)
+        points[i] = om.MPoint(p.x * radius / length, p.y * radius / length, p.z * radius / length)
+    fn.setPoints(points)
+    return cmds.ls(cube, long=True)[0]
+
+
+@test
+def test_status_judge():
+    """Semáforo con el juez del motor (quality.grade): limpio -> verde; caras dadas la vuelta, dobladas o con
+    triángulos de más -> no verde, con su consejo; nunca más verde que la nota del juez."""
+    from mbl_engine import quality
+    from mbl_engine.mesh import Mesh
+    from mbl_retopo_uv import meshbuild
+    source = cmds.ls(cmds.polySphere(radius=1.0, subdivisionsX=60, subdivisionsY=40, constructionHistory=False)[0],
+                     long=True)[0]
+    clean = make_cube_sphere("limpia")
+    points, faces = retopo.mesh_arrays(clean)
+
+    def judged(points, faces, name, link=True):
+        mesh = meshbuild.create_mesh(points, faces, name)
+        if link:
+            diagnostics.link_source(mesh, source)
+        result = status.retopo_status(mesh)
+        grade = quality.grade(quality.report(Mesh(*retopo.mesh_arrays(mesh)), Mesh(*retopo.mesh_arrays(source))))[0]
+        assert result["level"] >= grade, (name, result["level"], grade)
+        return result
+
+    def bad_checks(result):
+        return [c for c in result["checks"] if c["level"] != status.GREEN]
+
+    # limpia: verde, con su línea del juez
+    result = judged(points, faces, "limpia_retopo")
+    assert result["level"] == status.GREEN, bad_checks(result)
+    assert any("Sin caras dadas la vuelta ni dobladas" in c["text"] for c in result["checks"]), result["checks"]
+
+    # el retopo entero con las normales hacia dentro: el semáforo de antes lo daba por bueno (forma y quads perfectos)
+    result = judged(points, [f[::-1] for f in faces], "alReves_retopo")
+    bad = bad_checks(result)
+    assert result["level"] == status.RED, bad
+    assert any(c["level"] == status.RED and "dadas la vuelta" in c["text"] and c["advice"] for c in bad), bad
+
+    # 10% de las caras con el orden de vértices al revés: dadas la vuelta (y dobladas contra sus vecinas) -> rojo
+    reversed_faces = [f[::-1] if i % 10 == 0 else f for i, f in enumerate(faces)]
+    result = judged(points, reversed_faces, "dadaVuelta_retopo")
+    bad = bad_checks(result)
+    assert result["level"] == status.RED, bad
+    assert any(c["level"] == status.RED and "dadas la vuelta" in c["text"] and c["advice"] for c in bad), bad
+    assert any(c["level"] == status.RED and "dobladas" in c["text"] and c["advice"] for c in bad), bad
+
+    # sin el original no se ven las caras dadas la vuelta, pero sí las dobladas (y avisa de que falta el original)
+    lonely = meshbuild.create_mesh(points, reversed_faces, "sinOriginal")
+    bad = bad_checks(status.retopo_status(lonely))
+    assert any("dobladas" in c["text"] for c in bad), bad
+    assert any("No encuentro la malla original" in c["text"] for c in bad), bad
+
+    # unos pocos triángulos (1,3%): el semáforo viejo no avisaba (98,7% quads), el juez sí -> amarillo
+    def with_triangles(every):
+        out = []
+        for i, f in enumerate(faces):
+            out.extend([[f[0], f[1], f[2]], [f[0], f[2], f[3]]] if i % every == 0 else [f])
+        return out
+    result = judged(points, with_triangles(150), "pocosTris_retopo")
+    bad = bad_checks(result)
+    assert result["level"] == status.YELLOW, bad
+    assert any("quads" in c["text"] and c["advice"] for c in bad), bad
+    # muchos (9,5%): rojo
+    result = judged(points, with_triangles(20), "muchosTris_retopo")
+    assert result["level"] == status.RED, bad_checks(result)
+
+    # original demasiado grande para el juez: no se compara con él y lo dice (amarillo, nunca verde sin saberlo)
+    limit = status.JUDGE_MAX_SOURCE_TRIANGLES
+    status.JUDGE_MAX_SOURCE_TRIANGLES = 10
+    try:
+        result = judged(points, faces, "grande_retopo")
+    finally:
+        status.JUDGE_MAX_SOURCE_TRIANGLES = limit
+    assert result["level"] == status.YELLOW, bad_checks(result)
+    assert any("no se comprueba" in c["text"] for c in bad_checks(result)), result["checks"]
+
+
 @test
 def test_mirror_mesh():
     """Reflejo de la mitad: suelda la costura, invierte las caras y no deja vértices al otro lado."""

@@ -105,6 +105,8 @@ class SeamGraph:
         # nodos del abanico: una (cara, vértice) por esquina. Los abanicos de un vértice son sus caras
         # unidas por aristas sin costura; cada abanico es un vértice en las UVs
         node_keys = np.unique(face_id * nv + flat)
+        self.corner_node = np.searchsorted(node_keys, face_id * nv + flat)
+        self.corner_count = counts
         self.node_face = node_keys // nv
         ends_of = self.edge_ends[self.interior_edges]
         self.link_a = np.concatenate([np.searchsorted(node_keys, self.interior_first * nv + ends_of[:, k])
@@ -166,6 +168,25 @@ class SeamGraph:
         return openness * (0.3 + 0.7 * front)
 
     # ---------------------------------------------------------------- topología de las islas
+
+    def uv_seams(self):
+        """Aristas interiores donde las dos caras usan UVs distintos: las costuras que ya existen en la malla."""
+        if self.fn.numUVs() == 0:
+            return []
+        uv_counts, uv_ids = self.fn.getAssignedUVs()
+        uv_counts, uv_ids = np.asarray(uv_counts, dtype=np.int64), np.asarray(uv_ids, dtype=np.int64)
+        corners = self.corner_count
+        first_uv = np.repeat(np.cumsum(uv_counts) - uv_counts, corners)
+        first_corner = np.repeat(np.cumsum(corners) - corners, corners)
+        position = np.arange(len(self.corner_node)) - first_corner
+        # solo las caras con una UV por esquina; en las demás, ninguna (-1)
+        complete = np.repeat(uv_counts == corners, corners)
+        corner_uv = np.full(len(self.corner_node), -1, dtype=np.int64)
+        corner_uv[complete] = uv_ids[(first_uv + position)[complete]]
+        node_uv = np.full(len(self.node_face), -1, dtype=np.int64)
+        node_uv[self.corner_node] = corner_uv
+        differ = node_uv[self.link_a] != node_uv[self.link_b]
+        return np.unique(self.link_edge[differ]).tolist()
 
     def seam_mask(self, seams):
         """Máscara de aristas (bool) con las que son costura."""

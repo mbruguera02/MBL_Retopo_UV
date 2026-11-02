@@ -46,8 +46,11 @@ def has_uvs(transform):
     return fn.numUVs() > 0
 
 
-def uv_seam_edges(transform):
-    """Aristas interiores donde las dos caras usan UVs distintas: las costuras que ya existen."""
+def uv_seam_edges(transform, graph=None):
+    """Aristas interiores donde las dos caras usan UVs distintas: las costuras que ya existen.
+    Con un SeamGraph de la malla se saca de sus tablas de numpy (el recorrido por caras tardaba 40 ms)."""
+    if graph is not None:
+        return graph.uv_seams()
     shape = mesh_shape(transform)
     path = dag_path(shape)
     fn = om.MFnMesh(path)
@@ -289,20 +292,18 @@ def _face_shell_areas(transform):
         return []
     _, shell_ids = fn.getUvShellsIds()
     us, vs = fn.getUVs()
-    result = []
+    us, vs = np.asarray(us), np.asarray(vs)
     uv_counts, uv_ids = fn.getAssignedUVs()
-    offset = 0
-    for face, count in enumerate(uv_counts):
-        ids = uv_ids[offset:offset + count]
-        offset += count
-        if count < 3:
-            continue
-        area = 0.0
-        for i in range(count):
-            a, b = ids[i], ids[(i + 1) % count]
-            area += us[a] * vs[b] - us[b] * vs[a]
-        result.append((face, shell_ids[ids[0]], area * 0.5))
-    return result
+    counts, ids = np.asarray(uv_counts, dtype=np.int64), np.asarray(uv_ids, dtype=np.int64)
+    face = np.repeat(np.arange(len(counts)), counts)
+    first = np.repeat(np.cumsum(counts) - counts, counts)
+    following = ids[first + (np.arange(len(ids)) - first + 1) % np.repeat(counts, counts)]
+    # suma de los productos cruzados de cada cara, en el orden de sus esquinas
+    cross = us[ids] * vs[following] - us[following] * vs[ids]
+    area = np.bincount(face, weights=cross, minlength=len(counts)) * 0.5
+    faces = np.nonzero(counts >= 3)[0]
+    shells = np.asarray(shell_ids, dtype=np.int64)[ids[(np.cumsum(counts) - counts)[faces]]]
+    return list(zip(faces.tolist(), shells.tolist(), area[faces].tolist()))
 
 
 def flipped_faces(transform):
@@ -641,7 +642,7 @@ def _layout_udim(transform, settings, target, log=default_log):
 def symmetric_seams(transform, graph=None):
     """Si la malla es simétrica en X, deja las costuras simétricas. Devuelve True si cambió algo."""
     from .uv_seams import symmetrize_seams
-    current = set(uv_seam_edges(transform))
+    current = set(uv_seam_edges(transform, graph))
     wanted = symmetrize_seams(transform, current, graph)
     if wanted is None or set(wanted) == current:
         return False
@@ -705,7 +706,7 @@ def _tailor_seams(transform, unfold_and_split, known_overlaps, log, symmetric=Fa
     from .uv_seams import fix_charts, optimize_seams
     name = short_name(transform)
     before = stretch(transform)
-    old = set(uv_seam_edges(transform))
+    old = set(uv_seam_edges(transform, graph))
     # tras partir las islas grandes puede quedar alguna que no es un disco (Unfold3D la despliega
     # igual) y optimize_seams no tocaba nada: en el humano completo, 0 cambios. Se parte de las
     # costuras con los cortes que faltan
@@ -816,7 +817,7 @@ def _unwrap(transform, settings, log, tick):
         log("{}: costuras automáticas de Unfold3D añadidas donde hacían falta para desplegar.".format(name))
         # Unfold3D a veces deja islas que no se pueden aplanar (un toro abierto por un solo tajo)
         from .uv_seams import fix_charts
-        current = set(uv_seam_edges(transform))
+        current = set(uv_seam_edges(transform, seam_graph()))
         fixed = fix_charts(transform, current, seam_graph())
         if fixed:
             _swap_seams(transform, current, set(fixed[0]))

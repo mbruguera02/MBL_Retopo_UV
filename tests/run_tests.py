@@ -539,6 +539,41 @@ def test_uv_seam_graph_matches_reference():
 
 
 @test
+def test_uv_seam_edges_and_areas_match_reference():
+    """uv_seam_edges (con SeamGraph) y _face_shell_areas dan lo mismo que los recorridos por caras de siempre,
+    también con caras sin UVs."""
+    from mbl_retopo_uv import uv_seams
+    for make in (lambda: cmds.polyTorus(radius=3, sectionRadius=1, subdivisionsX=12, subdivisionsY=8,
+                                        constructionHistory=False)[0],
+                 lambda: cmds.polySphere(subdivisionsX=10, subdivisionsY=6, constructionHistory=False)[0]):
+        mesh = make()
+        cmds.polyAutoProjection(mesh + ".f[*]", planes=6, layoutMethod=0, layout=0, optimize=1, percentageSpace=0.0,
+                                constructionHistory=False)
+        graph = uv_seams.SeamGraph(mesh)
+        assert uv.uv_seam_edges(mesh, graph) == uv.uv_seam_edges(mesh) and uv.uv_seam_edges(mesh), mesh
+        # caras sin UVs: el recorrido de siempre las trata como una UV distinta de cualquiera
+        cmds.polyMapDel(mesh + ".f[3:5]")
+        assert uv.uv_seam_edges(mesh, graph) == uv.uv_seam_edges(mesh), mesh
+    # área con signo por cara, como se calculaba con un bucle de Python
+    fn = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh)))
+    _, shell_ids = fn.getUvShellsIds()
+    us, vs = fn.getUVs()
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    expected, offset = [], 0
+    for face, count in enumerate(uv_counts):
+        ids = uv_ids[offset:offset + count]
+        offset += count
+        if count < 3:
+            continue
+        area = 0.0
+        for i in range(count):
+            a, b = ids[i], ids[(i + 1) % count]
+            area += us[a] * vs[b] - us[b] * vs[a]
+        expected.append((face, shell_ids[ids[0]], area * 0.5))
+    assert uv._face_shell_areas(mesh) == expected
+
+
+@test
 def test_pole_cleanup():
     """Un giro de arista en una rejilla crea 4 polos; la limpieza los quita."""
     from mbl_retopo_uv import quadopt

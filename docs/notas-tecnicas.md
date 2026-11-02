@@ -319,3 +319,34 @@ Qué se hizo (`mbl_engine/retopo.py`, `resources.py`, `process.py`):
 Pruebas: `tests/test_safety.py` (sin Maya ni modelos; se simula QuadriFlow): el pedido nunca pasa de 1,5 veces el objetivo aunque devuelva
 10 veces menos, la variante mala se descarta, una malla que no cabe en memoria no lanza ningún motor y la vigilancia detiene un proceso
 en menos de unos segundos sin dejar nada colgado.
+
+## Mapa de coste de polos para animación (2 de noviembre): probado y descartado
+
+Idea: un valor por punto del original (alto en articulaciones y cara, sacado del skin o de un pincel) que pondera la energía de
+`quadopt.clean_poles`: cada vértice cuesta `coste * (aristas - 4)^2` en vez de `(aristas - 4)^2`, y los giros de arista y colapsos
+empujan los polos hacia las zonas baratas. Se implementó (energía ponderada en giros, colapsos, giros generales y uniones, mapa
+posición -> coste con interpolación sobre el original, ensanchado del mapa sobre la malla del retopo y recuento de polos en zona)
+y se midió en el humano a 5.000 caras, con el mapa en bolas alrededor de polos y en cabeza, mano y pie. **No funciona**, así que no
+se ha incluido en el plugin:
+
+| Prueba | Sin mapa | Con mapa |
+|---|---|---|
+| Polos dentro de la zona cara (3 bolas de 3 aristas, 8 ensayos), coste ×3 / ×10 / ×30 | 19,1 | 21,4 / 21,6 / 21,5 |
+| Lo mismo con bolas de 1,5 aristas | 9,2 | 9,9 / 9,8 / 9,9 |
+| Búsqueda de profundidad 5 en vez de 3 (coste ×30) | 19,2 | 21,7 |
+| Retopo completo, 6 semillas, zonas en cabeza, mano y pie (coste ×10): polos en zona | 55, 68, 44, 61, 47, 57 | 56, 66, 46, 65, 47, 58 |
+| Polos totales en esas 6 semillas (media) | 147 | 156 |
+
+Por qué: los polos que quedan tras la limpieza normal (140 de 198 en este retopo) no tienen pareja a la que anular a unas pocas
+operaciones. Un giro de arista no mueve un polo suelto: cambia a la vez cuatro vértices (dos bajan y dos suben una arista), así que un
+5 solo no se puede desplazar. Con la energía ponderada solo se pueden mover parejas 3-5, que ya se anulaban antes; los polos
+aislados siguen donde los dejó QuadriFlow, y el mapa solo añade polos (de 147 a 156). Subir la profundidad de la búsqueda a 5 no
+cambia el resultado y cuesta 12 veces más.
+
+Lo que sí varía mucho es la semilla de QuadriFlow: los polos en zona van de 44 a 68. Pero quedarse con la variante de menos polos en
+zona casi coincide con lo que el motor ya hace (la de menos polos en total, la de la semilla 3, también tiene menos en zona), así que
+ponderar la elección de variantes con el mapa añadiría poco.
+
+Para controlar de verdad dónde quedan los polos hace falta un campo de direcciones propio con singularidades prescritas (por
+ejemplo conexiones triviales, Crane 2010) o forzar bucles con las guías de flujo (motor de Maya). Con el estado actual, para animación
+sirven más las **guías de flujo** alrededor de las articulaciones y la cara, que el motor de Maya sigue, que un mapa de coste.

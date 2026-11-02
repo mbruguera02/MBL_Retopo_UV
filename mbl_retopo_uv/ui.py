@@ -61,10 +61,9 @@ QProgressBar::chunk { background-color: #2f6fed; border-radius: 3px; }
 """
 
 ENGINE_NOTES = {
-    "auto": "Prueba Maya, QuadWild y el Motor MBL y se queda con el mejor. Recomendado; de 30 s a 2 min.",
+    "auto": "Prueba Maya y el Motor MBL y se queda con el mejor. Recomendado; de 30 s a 2 min.",
     "mbl": "Nuestro motor (experimental): solo quads y simétrico con bucle central. Sigue la forma muy bien, pero sus quads salen menos regulares que los de Maya. Sin guías ni detalle pintado. De 30 s a 2 min.",
     "maya": "polyRetopo de Maya: el más rápido de los buenos.",
-    "quadwild": "Por parches: menos polos con muchas caras. Experimental.",
     "instant_meshes": "Rápido, con opciones propias (abajo). Menos preciso que los demás.",
 }
 
@@ -130,21 +129,17 @@ class RetopoUVWindow(QtWidgets.QDialog):
 
         # Retopo
         w["retopo_engine"] = QtWidgets.QComboBox()
-        for key, label in (("auto", "Automático (el mejor de Maya, QuadWild y Motor MBL)"), ("mbl", "Motor MBL (experimental, solo quads)"),
-                           ("maya", "Maya (polyRetopo)"), ("quadwild", "QuadWild (por parches)"),
-                           ("instant_meshes", "Instant Meshes")):
+        for key, label in (("auto", "Automático (el mejor de Maya y Motor MBL)"), ("mbl", "Motor MBL (experimental, solo quads)"),
+                           ("maya", "Maya (polyRetopo)"), ("instant_meshes", "Instant Meshes")):
             w["retopo_engine"].addItem(label, key)
         w["retopo_engine"].setToolTip(
-            "Automático: hace el retopo con Maya y QuadWild (el mejor de los dos) y con el Motor MBL, y se queda el "
-            "de mejor forma, menos polos y solo quads. Recomendado; tarda lo que todos juntos (de 30 s a 2 min).\n"
+            "Automático: hace el retopo con Maya y con el Motor MBL, y se queda el de mejor forma, menos polos y "
+            "solo quads. Recomendado; tarda lo que los dos juntos (de 30 s a 2 min).\n"
             "Motor MBL: nuestro motor. QuadriFlow con las piezas finas engordadas, ajuste final a la forma y la mejor "
             "de 3 variantes. Solo quads, sin agujeros y la mejor fidelidad de forma en las pruebas (humano y águila, "
             "a la mitad de error que Maya). Hace siempre el modelo entero (sin reflejar la mitad) y no admite guías "
             "ni detalle pintado. Tarda de 13 s (humano) a 22 s (águila).\n"
             "Maya (polyRetopo): en las pruebas, 100% quads, muchos menos polos y menos error que Instant Meshes. El más rápido de los buenos.\n"
-            "QuadWild (experimental): divide el modelo en parches y reparte los quads minimizando los polos. "
-            "Merece la pena con muchas caras (humano a 8.000: 32% menos polos que Maya); con pocas caras "
-            "o mallas sucias Maya es mejor. Si deja agujeros, se usa Maya automáticamente.\n"
             "Instant Meshes: más rápido; las opciones de quads, determinista, suavizado, ángulo y densidad "
             "por curvatura solo afectan a este motor.")
         w["retopo_target_faces"] = _spin(50, 2000000, 5000, 500, tip="Número aproximado de caras del resultado.")

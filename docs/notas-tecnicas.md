@@ -21,7 +21,7 @@ Qué se comprueba:
 | Paso | Rojo | Amarillo |
 |---|---|---|
 | Limpieza | geometría no-manifold sin reparar | caras de área cero, láminas, vértices sueltos o de 2 aristas |
-| Retopo | no-manifold; menos del 85 % de vértices regulares; error de forma medio > 0,6 % o máximo > 5 % | agujeros que el original no tiene; < 98 % quads; < 92 % de vértices regulares; > 0,25 % de polos de 6+ aristas; error medio > 0,25 % o máximo > 2,5 % |
+| Retopo | no-manifold; menos del 85 % de vértices regulares; error de forma medio > 0,6 % o máximo > 5 %; nota 2 del juez (agujeros nuevos; ≥ 0,5 % de caras dadas la vuelta o dobladas; ≥ 10 % de quads deformados; ≥ 15 % de saltos de tamaño; ≥ 5 % de triángulos o n-gons) | agujeros que el original no tiene; < 98 % quads; < 92 % de vértices regulares; > 0,25 % de polos de 6+ aristas; error medio > 0,25 % o máximo > 2,5 %; nota 1 del juez (≥ 0,05 % de caras dadas la vuelta o dobladas; ≥ 3 % de quads deformados; ≥ 5 % de saltos de tamaño; ≥ 1 % de triángulos o n-gons) |
 | UVs | sin UVs o caras sin UVs; solapes; UVs en espejo; fuera del cuadro 0-1 (o islas cruzando UDIMs); < 35 % de textura aprovechada; > 20 % de caras estiradas | < 50 % de textura aprovechada; > 10 % de caras estiradas más de 1,5x |
 
 Los umbrales salen de las pruebas con el humano y el águila: con los ajustes por defecto, los dos salen en verde.
@@ -30,6 +30,30 @@ Hay dos excepciones:
 - Con **Costuras escondidas**, la textura aprovechada se mide con umbrales más bajos (35 % y 25 %), porque ese modo cambia resolución por costuras ocultas.
 - En piezas de menos de 200 vértices no se avisa por polos: un cubo tiene 8 polos inevitables.
 
+### Un solo juez de calidad (2 de noviembre)
+
+El paso Retopo pasa ahora por el mismo juez que el banco de pruebas (`mbl_engine/quality.py`: `report()` y `grade()`), con sus mismos umbrales. Antes solo miraba forma, polos y quads y salía en verde con defectos que el juez sí veía (humano con Maya: 0,88 % de caras dadas la vuelta y 0,37 % dobladas, semáforo en verde).
+
+- **Cómo.** `status.judge_report` pasa el retopo y su original a `Mesh` (`retopo.mesh_arrays`) y llama a `quality.report`. Cada cifra del juez sale como un aviso con su nivel (según `quality.LIMITS`) y su «→ qué tocar»: quads deformados, saltos de tamaño, caras dadas la vuelta y caras dobladas. Los triángulos se funden con el aviso de quads y los agujeros nuevos con el de agujeros (el recuento de Maya sigue avisando en amarillo; si el juez también los ve, rojo). El nivel del paso es el peor entre lo que ya calculaba y la nota del juez (0 verde, 1 amarillo, 2 rojo). Como red de seguridad, si `grade()` da más nota que todos los avisos juntos (por ejemplo, si algún día mira una cifra nueva), se añade un aviso con sus razones.
+- **Sin original o con uno enorme.** Sin original, o con más de 1.000.000 de triángulos (`JUDGE_MAX_SOURCE_TRIANGLES`: convertirlo y construir su rejilla cuesta tiempo y memoria), no se compara con él: se miden solo las cifras que no lo necesitan (quads deformados, saltos de tamaño, caras dobladas, triángulos) y, si el original existe, sale un aviso amarillo diciendo que no se comprueban las caras dadas la vuelta. Si el cálculo del juez falla, el paso sale en amarillo con la traza en el Script Editor.
+- **Las UVs y la limpieza no cambian.**
+
+Banco (`tests/bench.py`, 5.000 caras, nota del juez y paso Retopo del semáforo antes → después; la geometría es la misma que en la línea base):
+
+| Modelo / motor | Nota del juez | Semáforo Retopo |
+|---|---|---|
+| criatura / mbl | 2 | amarillo → rojo |
+| hardsurface / maya | 1 | verde → amarillo |
+| hardsurface / mbl | 0 | verde → verde |
+| human / maya | 2 | verde → rojo |
+| human / mbl | 2 | amarillo → rojo |
+| prop / maya | 2 | amarillo → rojo |
+| prop / mbl | 2 | verde → rojo |
+
+Midnight no se puede medir en el banco (falla antes del semáforo) y criatura / maya tampoco. Tiempo del cálculo del juez: humano (original de 28.092 triángulos, retopo de 5.095 caras) 0,2 s, y `retopo_status` entero 0,3 s; criatura (original de 528.554 triángulos, retopo de prueba de 5.352 caras reducido con `polyReduce`) 1,7 s (0,5 s en convertir el original y 1,2 s en `quality.report`, que incluye su rejilla y el recuento de bordes), y `retopo_status` entero 2,4 s (6,6 s la primera vez, por las caras recomendadas, que ya se calculaban antes).
+
+Los consejos «→ qué tocar» de caras dadas la vuelta y dobladas (más caras, otro motor, *Pintar detalle* en dedos que se tocan) están redactados por criterio y por la guía del tutorial; no se ha medido que arreglen esos defectos.
+
 ## Parámetros
 
 **Limpieza**
@@ -37,18 +61,16 @@ Hay dos excepciones:
 
 **Retopología**
 - *Motor*:
-  - **Automático** (por defecto): hace el retopo con Maya y con QuadWild y se queda con el resultado que tenga menos polos por cada 100 caras, sin agujeros. Para elegir QuadWild exige que tenga al menos un 5 % menos de polos por cara y como mucho el doble de error de forma. El log muestra las cifras de los dos y cuál se ha elegido. Tarda lo que los dos juntos (de 30 s a 1,5 min).
-    - Humano a 3.000 caras: elige Maya.
-    - Humano a 8.000 caras: elige QuadWild, con 217 polos frente a 319.
-    - Águila: elige Maya, porque QuadWild deja agujeros.
+  - **Automático** (por defecto): hace el retopo con Maya y con el Motor MBL y se queda con el de menor coste (forma, polos y caras que no son quads; ver *En el plugin (30/10)* más abajo). El log muestra las cifras de los dos y cuál se ha elegido. Tarda lo que los dos juntos (de 30 s a 2 min). Cuando el Motor MBL no entra (guías de flujo, detalle pintado o sin QuadriFlow) es solo Maya.
     - Si tenías los ajustes guardados de una versión anterior, el motor pasa a Automático una vez; después se respeta lo que elijas.
+    - Los ajustes guardados con el motor por parches que se quitó (ver «Motores descartados») también pasan a Automático (versión 7 de los ajustes).
   - **Maya (polyRetopo)**: el más rápido de los buenos.
     - Va con *regularidad de topología* 1 (Maya trae 0,5). Se eligió con un barrido de sus parámetros:
       - **Humano a 2.000 caras:** polos de 157 a 142 y error medio del 0,207 % al 0,195 %. Las aristas en loops cerrados suben del 15 % al 25 %.
       - **Águila a 5.000 caras:** polos de 593 a 560 y polos de 6+ de 20 a 13.
       - Anisotropía, uniformidad de caras y desviación de aristas no mejoraron nada.
     - **Agujeros nuevos:** polyRetopo abre agujeros en zonas finas, como 5 en las plumas del águila. Unfold3D los ve como UVs no-manifold. El plugin compara los bordes del resultado con los del original y cierra con quads solo los que el original no tenía. Las aberturas reales del modelo, como cuello o mangas, se dejan.
-  - **QuadWild (por parches, experimental)** divide el modelo en parches y reparte los quads en cada uno minimizando los polos. **Instant Meshes** es el más rápido. Más detalles sobre QuadWild abajo.
+  - **Instant Meshes** es el más rápido, con opciones propias (suavizado, solo quads, determinista, ángulo de aristas duras, densidad por curvatura) que no afectan a los demás motores.
 - *Simetría*: viene en **No** (por defecto, el modelo entero). Con **Automática**, si el modelo es simétrico en X se hace el retopo de la mitad +X y se refleja, soldando la costura central. Los dos lados quedan con exactamente la misma topología: polos y loops en el mismo sitio, como se espera de un personaje. También permite pintar en simetría.
   - **Cómo detecta la simetría:** compara el modelo con su reflejo en el plano X central. Lo considera simétrico si la distancia media es menor del 0,3 % del tamaño. El humano da un 0,005 % y el águila un 0,06 %; los ejes Y y Z dan entre el 2 % y el 14 %.
   - **Humano a 5.000 caras:** reflejo exacto, mismo error de forma (0,070 % frente a 0,081 %), polos parecidos (242 frente a 216) y más rápido (20 s frente a 31 s).
@@ -73,7 +95,7 @@ Hay dos excepciones:
   - **Humano a 5.000 caras con la cabeza pintada (×4):** la cabeza recibe 1.732 caras, frente a 828 con Maya y 356 con Instant Meshes sin pintar. El total sube a 7.392. Instant Meshes sigue la forma peor que Maya (error medio 0,18 % frente a 0,07 %), así que pinta solo donde haga falta.
   - **Si hay guías y detalle a la vez:** Instant Meshes usa las dos cosas. Antes las guías se ignoraban.
 - *Caras objetivo*: número aproximado de caras del resultado. Para un personaje medio, entre 5.000 y 20.000.
-- *Ángulo aristas duras*: las aristas con un ángulo mayor se respetan como bordes marcados. Con 0 se desactiva, que es lo habitual en mallas orgánicas.
+- *Ángulo aristas duras*: con Instant Meshes, las aristas con un ángulo mayor se respetan como bordes marcados. Con Maya y el Motor MBL (y, por tanto, en Automático) solo cambia el sombreado del resultado (aristas duras o suaves). Con 0 se desactiva, que es lo habitual en mallas orgánicas.
 - *Suavizado*: pasadas de suavizado de Instant Meshes. Por defecto, 2.
 - *Solo quads*: malla 100 % de quads. Si lo desmarcas, admite algún triángulo y sigue mejor la forma.
 - *Determinista*: con la misma malla y los mismos ajustes, el resultado es siempre idéntico. Algo más lento.
@@ -94,30 +116,6 @@ Hay dos excepciones:
 - error de forma máximo y medio frente al original, como porcentaje del tamaño del modelo.
 
 Además colorea los polos: azul con 3 aristas, rojo con 5 y magenta con 6 o más. *Quitar colores* los borra; hazlo antes de exportar a Substance. Cada retopo escribe estas métricas en el log al terminar.
-
-### QuadWild (motor por parches)
-
-Usa [QuadWild-BiMDF](https://github.com/cgg-bern/quadwild-bimdf) (Universidad de Berna, licencia GPL-3). Sus binarios oficiales para Windows están en `mbl_retopo_uv/bin/quadwild`, y el código fuente en `engine/quadwild-bimdf`. El plugin lo llama como programa aparte, igual que a Instant Meshes.
-
-Cómo funciona:
-1. Calcula un campo de direcciones sobre una copia suavizada del modelo y traza los parches.
-2. Reparte los quads en cada parche.
-3. Ajusta el tamaño de quad hasta acercarse a las caras pedidas (hasta tres intentos).
-4. Después pasa por la misma limpieza de polos, relajación y reproyección que los otros motores.
-
-Resultados medidos (polos por cada 100 caras, menos es mejor):
-
-| Malla | Caras | Maya | QuadWild |
-|---|---|---|---|
-| Humano | ~3.000 | 159 polos (5,5) | 234 polos (6,8) |
-| Humano | ~8.000 | 319 polos (3,7), error 0,038 % | **217 polos (2,9)**, 97 % de vértices regulares, error 0,061 % |
-| Águila (IA, 528k) | 5.000–9.000 | 372–518 polos | deja agujeros: se usa Maya |
-
-En QuadWild, el número de polos depende casi solo de la forma del modelo, no del número de caras. Por eso compensa con muchas caras y en mallas limpias.
-
-Si QuadWild deja agujeros que el original no tiene (pasa en mallas sucias como el águila), el plugin lo avisa en el log y hace el retopo con Maya automáticamente.
-
-Tarda entre 20 y 90 s.
 
 Después de Instant Meshes, la herramienta repara automáticamente su resultado: quita caras rotas o duplicadas, elimina los vértices de solo 2 aristas, separa los vértices "pajarita", orienta todas las caras hacia fuera (las caras negras del viewport) y borra los restos sueltos. El log indica qué ha arreglado.
 
@@ -211,7 +209,7 @@ En forma ya le gana a Maya en los dos modelos (la mitad de error en el águila).
 - **Triángulos:** el humano sale con solo quads. En el águila, según la variante, quedan de 0 a 0,4 % (QuadriFlow deja agujeros en las plumas y un agujero de borde impar no se puede cerrar solo con quads); la elección prefiere una variante pura si existe.
 
 
-**En el plugin (30/10).** El desplegable *Motor* tiene **Motor MBL (solo quads)** y el modo **Automático** lo incluye: hace el mejor de Maya y QuadWild (con su simetría) y el Motor MBL, y se queda el de menor coste (forma, polos y caras que no son quads). El Motor MBL hace siempre el modelo entero, no admite guías ni detalle pintado (en ese caso se usa el motor clásico) y usa `mbl_variants` (3) y `mbl_time_budget` (270 s) de los ajustes. QuadriFlow viene en `mbl_retopo_uv/bin/quadriflow.exe`. Sin él, el automático sigue como antes.
+**En el plugin (30/10).** El desplegable *Motor* tiene **Motor MBL (solo quads)** y el modo **Automático** lo incluye: hace el retopo de Maya (con su simetría) y el Motor MBL, y se queda el de menor coste (forma, polos y caras que no son quads). Entonces el lado clásico era el mejor de Maya y de un motor por parches, que se retiró el 2 de noviembre (ver «Motores descartados»). El Motor MBL hace siempre el modelo entero, no admite guías ni detalle pintado (en ese caso se usa el motor clásico) y usa `mbl_variants` (3) y `mbl_time_budget` (270 s) de los ajustes. QuadriFlow viene en `mbl_retopo_uv/bin/quadriflow.exe`. Sin él, el automático usa solo Maya.
 
 **Calidad de topología (30/10).** Las cifras de arriba solo medían forma (error, polos, quads) y no lo que se ve. `quality.py` mide también quads deformados, saltos de tamaño entre caras vecinas, caras dadas la vuelta o dobladas, agujeros nuevos, loops cerrados y simetría, con una nota (`grade`) y un número de "fealdad" (`defect_score`) que entra en la elección de variantes y en la comparación del plugin. Con ellas se vio que el Motor MBL era claramente peor que Maya en lo que ve el usuario (humano: 9,4 % de quads deformados frente a 0,8 %), y la causa principal era el ajuste final, que estiraba quads (4,9 % a 9,4 %). Ahora el ajuste y la proyección solo mueven un vértice si no empeoran los quads que toca (humano: 4,4 %; águila de 32 % a 4,8 %).
 
@@ -312,7 +310,7 @@ Qué se hizo (`mbl_engine/retopo.py`, `resources.py`, `process.py`):
   que da QuadriFlow se desvía más de 3 veces del objetivo, la variante se descarta como fallo del programa.
 - **Presupuesto de memoria:** `job_memory` usa las caras pedidas (60 KB por cara, 3 KB por triángulo de entrada, 100 MB fijos). Todos los
   motores juntos no usan más de lo libre menos 2 GB de margen ni más de la mitad de la memoria total. Si ni una variante cabe, el Motor MBL
-  se niega con un mensaje que dice cuántas caras se pueden pedir; en modo Automático se descarta y se usa Maya o QuadWild.
+  se niega con un mensaje que dice cuántas caras se pueden pedir; en modo Automático se descarta y se usa Maya.
 - **Un proceso a la vez** en equipos con 16 GB o menos (`SMALL_RAM_BYTES`); hasta 3 en equipos grandes si cabe.
 - **Antes de lanzar** cada variante se espera a que haya memoria (si otras corren y van a liberar); si no hay ninguna corriendo y no
   cabe, no se lanza.
@@ -356,3 +354,38 @@ ponderar la elección de variantes con el mapa añadiría poco.
 Para controlar de verdad dónde quedan los polos hace falta un campo de direcciones propio con singularidades prescritas (por
 ejemplo conexiones triviales, Crane 2010) o forzar bucles con las guías de flujo (motor de Maya). Con el estado actual, para animación
 sirven más las **guías de flujo** alrededor de las articulaciones y la cara, que el motor de Maya sigue, que un mapa de coste.
+
+## Motores descartados
+
+Motores que se probaron, se midieron y se quitaron del plugin. Las cifras se guardan aquí por si hay que volver a decidir.
+
+### QuadWild-BiMDF (retirado el 2 de noviembre)
+
+[QuadWild-BiMDF](https://github.com/cgg-bern/quadwild-bimdf) (Universidad de Berna, licencia GPL-3, versión 0.0.2) era el motor «por parches»: divide el modelo en parches y reparte los quads en cada uno resolviendo un problema de flujo que minimiza los polos. El plugin ejecutaba sus binarios oficiales sin modificar (`quadwild.exe` y `quad_from_patches.exe`, en `mbl_retopo_uv/bin/quadwild`) como programa aparte, igual que Instant Meshes.
+
+**Por qué se quitó.** Deja agujeros en las mallas sucias (el águila) y solo gana a Maya con muchas caras en mallas limpias. Eso no compensa llevar y mantener un programa GPL-3 dentro del plugin, con su aviso de licencia y su código fuente aparte. Ahora el modo Automático es el mejor entre Maya y el Motor MBL, y el *Ángulo aristas duras* lo usa solo Instant Meshes. El código y los binarios siguen en el historial de git (hasta el commit `7f1fc8b`). Los ajustes guardados con `retopo_engine = "quadwild"` pasan a `"auto"` al cargarse (versión 7 de los ajustes, `config.REPLACED_VALUES`).
+
+**Cómo funcionaba:**
+1. `quadwild.exe <malla> 2 <prep.txt>` remallaba, calculaba el campo de cruces y trazaba los parches (`<malla>_rem_p0.obj`). Ajustes: `do_remesh 1`, `scaleFact 1`, `sharp_feature_thr` con el ángulo de aristas duras (o -1 sin él) y `alpha` 0,02 sin aristas duras (configuración *Organic*) o 0,01 con ellas (*Mechanical*).
+2. `quad_from_patches.exe <malla>_rem_p0.obj 1 <main.txt>` repartía los quads en cada parche (configuración `flow.txt` con `flow_virtual_simple.json` y Satsuma `default.json`, `alignSingularities` activo, límite de 200 s). El tamaño de quad es la arista media de `_rem_p0` por `scaleFact`: el número de caras se controla con `scaleFact`.
+3. **Suavizado previo:** el campo sigue la curvatura y el ruido fino crea singularidades (= polos). Se suavizaba la copia 10 pasadas antes de pasarla: humano a unas 8.000 caras, de 292 a 244 polos.
+4. **Número de caras:** `scaleFact` inicial = raíz(área / caras pedidas) / arista media, por 1,4 (salían unas 2 veces las del área: humano 1,8, águila 2,4). Hasta 3 intentos, corrigiendo con el exponente medido entre los dos últimos (las caras no van con 1/scale²: en el humano, unos 0,8). Se quedaba el intento más cercano al objetivo.
+5. **Después:** la misma reparación de topología, limpieza de polos, relajación y reproyección que los otros motores. Si quedaban más agujeros que en el original, se descartaba y se usaba Maya.
+6. **Detalles de Windows:** `quad_from_patches` 0.0.2 termina con el código 0x80000003 al cerrarse, ya con la malla guardada (se aceptaba si el archivo existía), y se vigilaba el bloqueo con 120 s sin CPU en lugar de los 20 s de Instant Meshes.
+
+**Modo Automático con QuadWild.** Hacía el retopo con Maya y con QuadWild y se quedaba con el que tuviera menos polos por cada 100 caras, sin agujeros. Para elegir QuadWild exigía al menos un 5 % menos de polos por cara (`AUTO_MIN_POLE_GAIN`) y como mucho el doble de error de forma medio (`AUTO_MAX_ERROR_RATIO`). Tardaba lo que los dos juntos (de 30 s a 1,5 min).
+- Humano a 3.000 caras: elegía Maya.
+- Humano a 8.000 caras: elegía QuadWild, con 217 polos frente a 319.
+- Águila: elegía Maya, porque QuadWild dejaba agujeros.
+
+**Resultados medidos** (polos, y entre paréntesis polos por cada 100 caras; menos es mejor):
+
+| Malla | Caras | Maya | QuadWild |
+|---|---|---|---|
+| Humano | ~3.000 | 159 polos (5,5) | 234 polos (6,8) |
+| Humano | ~8.000 | 319 polos (3,7), error 0,038 % | **217 polos (2,9)**, 97 % de vértices regulares, error 0,061 % |
+| Águila (IA, 528k) | 5.000–9.000 | 372–518 polos | deja agujeros: se usaba Maya |
+
+- **Polos:** en QuadWild dependen casi solo de la forma del modelo, no del número de caras. Por eso compensaba con muchas caras y en mallas limpias, y perdía con pocas.
+- **Agujeros:** con mallas sucias (el águila) algunos parches no se cuadraban y quedaban agujeros que el original no tiene. Rellenarlos metía n-gons y polos de 6+ aristas y el error de forma se triplicaba: error máximo 5,2 % y 0,5 % de polos de 6+ (el semáforo del retopo avisa de ese caso).
+- **Tiempo:** entre 20 y 90 s.

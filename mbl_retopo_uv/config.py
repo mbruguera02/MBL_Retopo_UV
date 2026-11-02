@@ -26,9 +26,9 @@ DEFAULTS = {
     "cleanup_conform_normals": True,
     "cleanup_fix_nonmanifold": True,
     # Retopo
-    # "auto", "maya" (polyRetopo), "quadwild" o "instant_meshes". Maya frente a Instant Meshes (águila):
+    # "auto", "maya" (polyRetopo), "mbl" o "instant_meshes". Maya frente a Instant Meshes (águila):
     # 100% quads, 5 veces menos polos de 6+ aristas y 2,7 veces menos error medio. "auto" hace Maya y
-    # QuadWild y se queda el de menos polos por cara (humano a 8.000 caras: QuadWild, -32% polos)
+    # el Motor MBL y se queda el de menor coste (forma, polos y caras que no son quads)
     "retopo_engine": "auto",
     "retopo_target_faces": 5000,
     # Motor MBL: variantes que prueba (3 = una ronda; 6 = calidad alta, el doble de tiempo) y segundos máximos
@@ -109,13 +109,19 @@ DEFAULTS = {
 # Versión de los ajustes. Cuando cambia un valor por defecto porque las pruebas demostraron que el
 # nuevo es mejor, se sube la versión y se añade aquí la clave: los JSON guardados con una versión
 # anterior vuelven a usar el valor nuevo en esa clave (el resto de lo que eligió el usuario se respeta).
-SETTINGS_VERSION = 6
+SETTINGS_VERSION = 7
 UPGRADED_KEYS = {
     2: ("uv_seam_angle", "uv_optimize_iterations", "uv_split_shells"),
     3: ("retopo_engine",),
     4: ("retopo_symmetry",),
     5: ("mbl_time_budget",),
     6: ("uv_allow_rotation",),
+}
+# Valores que ya no existen porque se quitó un motor del plugin: los JSON guardados con una versión anterior
+# pasan al valor que lo sustituye. A diferencia de UPGRADED_KEYS, el resto de lo que eligió el usuario en esa
+# clave se respeta (quien tenía Maya sigue con Maya).
+REPLACED_VALUES = {
+    7: {"retopo_engine": {"quadwild": "auto"}},
 }
 
 
@@ -156,6 +162,10 @@ def load(path=None):
                 settings[key] = type(default)(value)
         elif isinstance(value, type(default)):
             settings[key] = value
+    for v, changes in REPLACED_VALUES.items():
+        if not isinstance(version, int) or version < v:
+            for key, replacements in changes.items():
+                settings[key] = replacements.get(settings[key], settings[key])
     return settings
 
 
@@ -214,19 +224,6 @@ def resolve_executable(path, platform=None):
         return None
 
     return path if os.path.isfile(path) else None
-
-
-def find_quadwild(settings=None, platform=None):
-    """Ejecutables de QuadWild en bin/quadwild junto al paquete: dict con rutas o None."""
-    platform = platform or sys.platform
-    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "quadwild")
-    extension = ".exe" if platform.startswith("win") else ""
-    tools = {"quadwild": os.path.join(folder, "quadwild" + extension),
-             "quad_from_patches": os.path.join(folder, "quad_from_patches" + extension),
-             "config": os.path.join(folder, "config")}
-    if all(os.path.exists(path) for path in tools.values()):
-        return tools
-    return None
 
 
 def find_quadriflow():

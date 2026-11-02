@@ -8,6 +8,10 @@ ajustes por defecto:
   QuadWild con agujeros en el águila: error máximo 5.2% (lo que hay que avisar).
 - UVs: 62-70% de textura aprovechada, 4-6% de caras estiradas más de 1.5x. Antes de las mejoras
   de las UVs: 29-42% y 8-13%.
+
+El paso Retopo también pasa por el juez del motor (mbl_engine.quality: quads deformados, saltos de
+tamaño, caras dadas la vuelta o dobladas, triángulos y agujeros nuevos), con sus mismos umbrales: el
+semáforo nunca sale más verde que la nota del juez (0 verde, 1 amarillo, 2 rojo).
 """
 
 import maya.api.OpenMaya as om
@@ -15,7 +19,9 @@ import maya.cmds as cmds
 
 from . import cleanup, diagnostics, retopo, uv
 from .common import dag_path, mesh_shape, short_name
+from mbl_engine import quality
 from mbl_engine.analyze import thousands
+from mbl_engine.mesh import Mesh
 
 GREEN, YELLOW, RED = 0, 1, 2
 LEVEL_NAMES = {GREEN: "listo", YELLOW: "revisar", RED: "arreglar"}
@@ -37,6 +43,9 @@ UV_COVERAGE_PERCENT = (50.0, 35.0)      # menos es peor
 # con "Costuras escondidas" se cambia resolución por costuras ocultas (águila 42%, humano 46%)
 UV_COVERAGE_HIDDEN_PERCENT = (35.0, 25.0)
 UV_STRETCH_PERCENT = (10.0, 20.0)       # % de caras estiradas más de 1.5x
+# por encima de estos triángulos el original no se compara con el juez (convertirlo y construir su rejilla
+# gasta memoria y tiempo: el águila de pruebas, con 528.000, se hace en ~1.5 s)
+JUDGE_MAX_SOURCE_TRIANGLES = 1000000
 
 
 def _check(level, text, advice=""):
@@ -78,27 +87,115 @@ def cleanup_status(transform, report=None):
 
 # ------------------------------------------------------------------ retopo
 
+def judge_report(transform, source=None):
+    """(informe de quality.report del retopo frente a su original, si se comparó con él).
+
+    Sin original (o si es enorme) solo se miden las cifras que no lo necesitan: quads deformados, saltos de
+    tamaño, caras dobladas y triángulos. Lanza lo que sea si la malla no se puede convertir."""
+    mesh = Mesh(*retopo.mesh_arrays(transform))
+    original = None
+    if source and cmds.objExists(source) and cmds.polyEvaluate(source, triangle=True) <= JUDGE_MAX_SOURCE_TRIANGLES:
+        original = Mesh(*retopo.mesh_arrays(source))
+    report = quality.report(mesh, original)
+    if original is None:
+        report["defects"]["new_holes"] = 0      # sin original no se sabe qué agujeros son nuevos
+    return report, original is not None
+
+
+def _judge_values(report):
+    """% que mira quality.grade en cada cifra, con los nombres de quality.LIMITS."""
+    faces = max(report["faces"], 1)
+    d = report["defects"]
+    return {"bad_shape_percent": report["shape"]["bad_percent"],
+            "size_jump_percent": report["uniformity"]["jump_percent"],
+            "flipped_percent": 100.0 * d["flipped"] / faces,
+            "folded_percent": 100.0 * d["folded"] / faces,
+            "tri_percent": 100.0 * (d["tris"] + d["ngons"]) / faces}
+
+
+def _judge_level(key, value):
+    review, bad = quality.LIMITS[key]
+    return RED if value >= bad else YELLOW if value >= review else GREEN
+
+
+def _judge_checks(report, levels, compared):
+    """Avisos del juez en texto claro. Los triángulos y los agujeros nuevos los cuentan sus propios avisos de
+    retopo_status; si todo está bien sale una sola línea en verde."""
+    d = report["defects"]
+    values = _judge_values(report)
+    checks = []
+    if levels["bad_shape_percent"]:
+        checks.append(_check(levels["bad_shape_percent"],
+                             "{:.1f}% de quads deformados (ángulos muy agudos o abiertos, lados muy desiguales)".format(
+                                 values["bad_shape_percent"]),
+                             "La textura se estiraría en esas caras. Con Maya, QuadWild o Instant Meshes sube 'Relajar "
+                             "quads' (en 'Más opciones'); o prueba otro motor: 'Automático' elige el mejor."))
+    if levels["size_jump_percent"]:
+        checks.append(_check(levels["size_jump_percent"],
+                             "{:.1f}% de saltos de tamaño entre caras vecinas (una cara más de {:g} veces mayor que la "
+                             "de al lado)".format(values["size_jump_percent"], quality.SIZE_JUMP),
+                             "Con Maya, QuadWild o Instant Meshes sube 'Relajar quads' (en 'Más opciones') para igualar "
+                             "los tamaños, o prueba otro motor. Si pintaste detalle, el salto en el borde de lo pintado "
+                             "es normal: baja 'Densidad en lo pintado'."))
+    if levels["flipped_percent"]:
+        checks.append(_check(levels["flipped_percent"],
+                             "Caras dadas la vuelta respecto al original: {} ({:.2f}%)".format(
+                                 d["flipped"], values["flipped_percent"]),
+                             "Se sombrean al revés y fallan al hornear mapas o pintar. Pasa en piezas finas o que se "
+                             "tocan (dedos, pliegues, ropa pegada): sube 'Caras objetivo' ('Recomendar caras' dice "
+                             "cuántas), prueba otro motor o usa 'Pintar detalle' en esa zona y repite el retopo."))
+    if levels["folded_percent"]:
+        checks.append(_check(levels["folded_percent"],
+                             "Caras dobladas sobre su vecina: {} ({:.2f}%)".format(d["folded"], values["folded_percent"]),
+                             "La superficie se pliega sobre sí misma (suele pasar entre dedos o en piezas muy finas). "
+                             "Sube 'Caras objetivo', prueba otro motor ('Maya' o 'Automático') o usa 'Pintar detalle' "
+                             "en esa zona y repite el retopo."))
+    if not checks and not d["new_holes"]:
+        checks.append(_check(GREEN, "{}; {:.1f}% de quads deformados".format(
+            "Sin caras dadas la vuelta ni dobladas" if compared else "Sin caras dobladas", values["bad_shape_percent"])))
+    return checks
+
+
 def retopo_status(transform, source=None, stats=None):
     source = source or diagnostics.find_source(transform)
     stats = stats or diagnostics.cached_stats(transform) or diagnostics.topology_stats(transform)
+    has_source = bool(source and cmds.objExists(source))
     checks = []
+
+    # el juez del motor (la misma nota que el banco de pruebas): lo que ve y el semáforo no veía
+    try:
+        report, compared = judge_report(transform, source)
+        levels = {key: _judge_level(key, value) for key, value in _judge_values(report).items()}
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        report, compared, levels = None, False, {}
+        checks.append(_check(YELLOW, "No he podido calcular la calidad de la malla (caras dadas la vuelta, dobladas...)",
+                             "Pulsa 'Comprobar estado' otra vez; si se repite, pasa 'Limpiar' al retopo."))
 
     edges, vertices = cleanup.nonmanifold_counts(transform)
     if edges or vertices:
         checks.append(_check(RED, "{} componentes no-manifold".format(edges + vertices),
                              "Las UVs pueden fallar. Pulsa 'Limpiar' con el retopo seleccionado."))
 
-    if source and cmds.objExists(source):
+    new_holes = judge_holes = 0
+    if has_source:
         new_holes = len(retopo.border_loops(transform)) - len(retopo.border_loops(source))
-        if new_holes > 0:
-            checks.append(_check(YELLOW, "{} agujeros que el original no tiene".format(new_holes),
-                                 "Sube 'Rellenar agujeros de hasta' y repite el retopo, o ciérralos con "
-                                 "Mesh > Fill Hole."))
+    if report and compared:
+        judge_holes = report["defects"]["new_holes"]
+    if new_holes > 0 or judge_holes:
+        # el juez da por mala una malla con agujeros nuevos (rojo); el conteo de Maya solo avisa (amarillo)
+        checks.append(_check(RED if judge_holes else YELLOW, "{} agujeros que el original no tiene".format(
+            max(new_holes, judge_holes)),
+            "Sube 'Rellenar agujeros de hasta' y repite el retopo, o ciérralos con Mesh > Fill Hole."))
 
-    if stats["ngons"] or stats["quad_percent"] < QUAD_PERCENT:
-        checks.append(_check(YELLOW, "{:.1f}% quads ({} triángulos, {} n-gons)".format(
+    tri_level = levels.get("tri_percent", GREEN)
+    if stats["ngons"] or stats["quad_percent"] < QUAD_PERCENT or tri_level:
+        checks.append(_check(max(YELLOW, tri_level), "{:.1f}% quads ({} triángulos, {} n-gons)".format(
             stats["quad_percent"], stats["tris"], stats["ngons"]),
             "Para texturizar no es grave. Si vas a subdividir, usa el motor 'Automático' o 'Maya', que "
+            "dan 100% quads." if tri_level != RED else
+            "Demasiados triángulos para subdividir o deformar la malla. Usa el motor 'Automático' o 'Maya', que "
             "dan 100% quads."))
     else:
         checks.append(_check(GREEN, "{:.1f}% quads".format(stats["quad_percent"])))
@@ -118,7 +215,14 @@ def retopo_status(transform, source=None, stats=None):
         checks.append(_check(YELLOW, "{} polos de 6 o más aristas".format(poles6),
                              "Pueden marcar pellizcos al subdividir. 'Diagnóstico' los pinta en magenta."))
 
-    if source and cmds.objExists(source):
+    if report:
+        checks.extend(_judge_checks(report, levels, compared))
+        if has_source and not compared:
+            checks.append(_check(YELLOW, "El original tiene {} triángulos: no se comprueba si hay caras dadas la vuelta".format(
+                thousands(cmds.polyEvaluate(source, triangle=True))),
+                "Es un límite del cálculo, no un fallo del retopo. Revisa a ojo las zonas finas (dedos, pliegues)."))
+
+    if has_source:
         error = stats.get("error") or diagnostics.surface_error(source, transform)
         level = shape_level = _grade(error["mean_percent"], ERROR_MEAN_PERCENT)
         checks.append(_check(level, "Error de forma medio {:.3f}% del tamaño".format(error["mean_percent"]),
@@ -144,6 +248,13 @@ def retopo_status(transform, source=None, stats=None):
     else:
         checks.append(_check(YELLOW, "No encuentro la malla original: no se mide el error de forma",
                              "Si la borraste o renombraste no pasa nada; el resto de comprobaciones vale."))
+
+    if report:
+        # red de seguridad: nunca más verde que la nota del juez, aunque quality.grade mire algo que aquí no se traduce
+        grade, reasons = quality.grade(report)
+        if grade > max(c["level"] for c in checks):
+            checks.append(_check(grade, "Calidad de la topología: {}".format("; ".join(reasons)),
+                                 "Prueba otro motor ('Automático' elige el mejor) o sube 'Caras objetivo'."))
     return _result("retopo", checks)
 
 

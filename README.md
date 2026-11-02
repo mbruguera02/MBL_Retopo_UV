@@ -136,7 +136,7 @@ docs/                      notas técnicas y diseño del Motor MBL
 
 ## Licencia y créditos
 
-El código de este proyecto es de uso libre bajo licencia MIT ([`LICENSE`](LICENSE)). El plugin se apoya en trabajo de otras personas (Instant Meshes, QuadriFlow, QuadWild y más), con sus licencias, en [`CREDITS.md`](CREDITS.md). Las herramientas de Maya que usa (polyRetopo, Unfold3D) son de Autodesk y vienen con Maya.
+El código de este proyecto es de uso libre bajo licencia MIT ([`LICENSE`](LICENSE)). El plugin se apoya en trabajo de otras personas (Instant Meshes, QuadriFlow y más), con sus licencias, en [`CREDITS.md`](CREDITS.md). Las herramientas de Maya que usa (polyRetopo, Unfold3D) son de Autodesk y vienen con Maya.
 
 ---
 

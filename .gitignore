@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+
+# compilados y registros de compilación (se regeneran con engine/README.md)
+engine/build/
+engine/*.log
+engine/build_log.txt
+
+# código de terceros clonado (cada uno con su propio git o descargable):
+# - instant-meshes: nuestros cambios están en engine/mbl_changes.patch
+# - quadwild-bimdf / quadwild-bin: GPL-3, se descargan de github.com/cgg-bern/quadwild-bimdf
+# - quadriflow: MIT, se descarga de github.com/hjwdzh/QuadriFlow
+engine/instant-meshes/
+engine/quadwild-bimdf/
+engine/quadwild-bin/
+engine/quadriflow/
+
+# modelos y escenas de prueba (se guardan aparte, no van en el repositorio)
+geo/*.fbx
+geo/*.Fbx
+geo/*.fbm/
+resultados/*.mb
+
+# dependencias descargadas para compilar (Boost 1.86, solo cabeceras)
+engine/deps/
+engine/build-quadriflow/
+engine/build-decimate/
+engine/build-geom/
+
+# estado de las herramientas de trabajo y paquetes generados
+.superpowers/
+*.zip

@@ -67,7 +67,10 @@ REGULAR_SPREAD = 2
 def thin_feature_density(points, faces, target_faces, edges_per_radius=THIN_EDGES_PER_RADIUS,
                          max_density=THIN_MAX_DENSITY):
     """Densidad por vértice (1 = normal) para que las piezas finas no se pierdan. faces: triángulos."""
-    mesh = Mesh(points, faces)
+    if isinstance(faces, np.ndarray):
+        mesh = Mesh(points, (faces.ravel(), np.full(len(faces), faces.shape[1], dtype=np.int64)))
+    else:
+        mesh = Mesh(points, faces)
     edge = float(np.sqrt(mesh.face_areas.sum() / max(int(target_faces), 1)))
     k1, k2, _ = orient.principal_curvatures(points, faces, THIN_SMOOTH)
     bend = np.maximum(np.abs(k1), np.abs(k2)) * edge / edges_per_radius
@@ -192,6 +195,14 @@ def triangulated(points, faces):
     return tris.tolist()
 
 
+def compact_mesh(mesh):
+    """compact() de un Mesh, sin pasar por listas de Python (con 528.000 triángulos son ~200 MB de objetos): otro Mesh."""
+    used = np.nonzero(mesh.used_vertices)[0]
+    remap = np.full(len(mesh.points), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    return Mesh(mesh.points[used], (remap[mesh.face_vertices], mesh.face_sizes))
+
+
 def compact(points, faces):
     """Solo los vértices usados, renumerados (los sueltos confunden a los motores). (puntos, caras)."""
     mesh = Mesh(points, faces)
@@ -236,30 +247,28 @@ def prepare(points, faces, target_faces, engine, symmetric=None, timeout=600, ti
     options = options or {}
     trace = options.get("trace") or (lambda stage, p, f: None)
     report = {"engine": engine}
-    source = Mesh(points, faces)
-    faces = [list(f) for f in faces]
     faces, report["pieces_removed"] = _remove_small_pieces(faces, min_piece)
-    source_kept = Mesh(source.points, faces)
+    source_kept = Mesh(np.ascontiguousarray(points, dtype=np.float64).reshape(-1, 3), faces)
     if symmetric is None:
         symmetric = symmetry.is_symmetric(source_kept)[0]
     report["symmetric"] = bool(symmetric)
-    work_points, work_faces = source_kept.points, faces
+    work_mesh = source_kept
     target = int(target_faces)
     center = None
     if symmetric:
         center = symmetry.plane_x(source_kept.points[source_kept.used_vertices])
-        work_points, work_faces = symmetry.cut_half(work_points, work_faces, center)
+        work_points, work_faces = symmetry.cut_half(source_kept.points, faces, center)
+        work_mesh = Mesh(work_points, work_faces)
         target = max(target // 2, 1)
-        log("mitad +X: {} caras".format(len(work_faces)))
+        log("mitad +X: {} caras".format(work_mesh.face_count))
 
-    work_points, work_faces = compact(work_points, work_faces)
-    work_mesh = Mesh(work_points, work_faces)
+    work_mesh = compact_mesh(work_mesh)
     if "align_boundaries" not in options:
         # con bordes (el corte de la mitad, aberturas del modelo) los vértices tienen que caer sobre
         # ellos: si no, la costura central no se suelda entera
         options = dict(options, align_boundaries=bool(len(work_mesh.boundary_edges)))
-    engine_points, engine_faces = work_points, work_faces
-    tris = triangulated(engine_points, engine_faces)
+    engine_points = work_mesh.points
+    tris = work_mesh.triangles()[0]
     # el motor no necesita 528.000 triángulos para sacar 5.000 caras: se le da una versión reducida
     # (águila: 56 s a 15 s con el mismo error). El resto del proceso usa la malla original.
     decimator = decimate.find_decimator(options.get("decimator")) if options.get("decimate", True) else None
@@ -268,7 +277,7 @@ def prepare(points, faces, target_faces, engine, symmetric=None, timeout=600, ti
                                                         timeout=timeout, tick=tick)
         log("malla reducida para el motor: {} a {} triángulos".format(len(tris), len(reduced)))
         report["decimated"] = (len(tris), len(reduced))
-        tris = reduced.tolist()
+        tris = reduced
         trace("decimada", engine_points, tris)
     reference = metrics.SurfaceReference(work_mesh, FIT_SAMPLES)
     field = None
@@ -358,6 +367,7 @@ def run_engine(points, faces, target_faces, engine, executable, symmetric=None, 
 def finish_retopo(raw, relax=10, pole_cleanup=True, fill_holes=60, log=None):
     """Segunda mitad de retopo(): reparación, limpieza de polos, relajado, reproyección y ajuste, y la simetría.
     `raw`: lo que devolvió run_engine(). Devuelve (puntos, caras, informe)."""
+    verbose = log is not None
     log = log or (lambda message: None)
     new_points, new_faces, report, options, prep, trace = raw.new_points, raw.new_faces, raw.report, raw.options, raw.prep, raw.trace
     symmetric, center, work_mesh, reference = prep.symmetric, prep.center, prep.work_mesh, prep.reference
@@ -380,10 +390,12 @@ def finish_retopo(raw, relax=10, pole_cleanup=True, fill_holes=60, log=None):
     project = lambda points_: grid.closest(points_)[0]  # noqa: E731
     new_points = np.asarray(new_points, dtype=float)
     if pole_cleanup:
-        before = quadopt.pole_count(new_faces)
+        # contar polos solo cuesta (dos pasadas por la topología) si alguien lee el mensaje
+        before = quadopt.pole_count(new_faces) if verbose else 0
         new_points, new_faces, report["pole_operations"] = quadopt.clean_poles(new_points, new_faces, depth=int(options.get("pole_depth", 3)),
                                                                        mixed=mixed)
-        log("polos {} -> {}".format(before, quadopt.pole_count(new_faces)))
+        if verbose:
+            log("polos {} -> {}".format(before, quadopt.pole_count(new_faces)))
     trace("polos", new_points, new_faces)
     regular = int(options.get("regular", REGULAR_ITERATIONS))
     relaxed = quadopt.relax(new_points, new_faces, relax, project) if relax > 0 else new_points
@@ -572,7 +584,6 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
     from . import process as _process_module, resources
     log = log or (lambda message: None)
     start = time.time()          # el presupuesto cuenta desde aquí: la preparación de la malla también tarda
-    source = Mesh(points, faces)
     count = max(1, int(variants))
     base_options = kwargs.pop("options", None) or {}
     cancel = threading.Event()
@@ -590,9 +601,12 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
                                kwargs.get("min_piece", 0.01),
                                dict(base_options, inflate=any(extra.get("inflate") for _, extra in plan)), log)
     if shared.report["pieces_removed"] or shared.symmetric:
+        source = Mesh(points, faces)
         reference = metrics.SurfaceReference(source, FIT_SAMPLES)
     else:
-        reference = shared.reference
+        # sin piezas quitadas ni corte, la malla de trabajo es el original (solo sin vértices sueltos): se comparte
+        # con su rejilla y sus aristas en vez de montar otra copia de ~100 MB con modelos de medio millón de triángulos
+        source, reference = shared.work_mesh, shared.reference
 
     def worker_tick():
         if cancel.is_set():

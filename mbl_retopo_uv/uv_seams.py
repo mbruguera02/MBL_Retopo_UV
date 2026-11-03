@@ -217,6 +217,8 @@ class SeamGraph:
 
     # nº de islas que no son disco que all_disks deja pasar (las que ya venían así y son diminutas)
     tolerated = 0
+    # costuras fijas (bordes entre materiales): optimize_seams y symmetrize_seams no las mueven ni las quitan
+    fixed = frozenset()
     TINY_CHART_FACES = 8
 
     def tiny_non_disks(self, seams):
@@ -336,6 +338,13 @@ class SeamGraph:
             for v in self.edge_v[e]:
                 degree[v] = degree.get(v, 0) + 1
         ends = {v for v, d in degree.items() if d != 2 or v in self.border_vertices}
+        if self.fixed:
+            # un tramo es entero fijo o entero libre: donde una costura fija sigue en una libre empieza otro tramo
+            kinds = {}
+            for e in seams:
+                for v in self.edge_v[e]:
+                    kinds.setdefault(v, set()).add(e in self.fixed)
+            ends |= {v for v, kind in kinds.items() if len(kind) == 2}
         seen, result = set(), []
         for start in ends:
             for e in self.vertex_edges[start]:
@@ -535,7 +544,7 @@ def symmetrize_seams(transform, seams, graph=None):
                 result.add(e)
                 if mirror[e] is not None:
                     result.add(mirror[e])
-        result -= graph.border
+        result = (result | graph.fixed) - graph.border
         if graph.all_disks(result)[0]:
             return sorted(result)
         # algún corte del lado -X era imprescindible: se completan los que faltan y se repite
@@ -579,7 +588,7 @@ def reroute_slits(graph, seams):
         chart, count = graph.charts(seams)
         for chain, a, b in chains:
             faces = graph.edge_f[chain[0]]
-            if len(faces) != 2 or not set(chain) <= seams:
+            if len(faces) != 2 or not set(chain) <= seams or graph.fixed.intersection(chain):
                 continue
             if chart[faces[0]] != chart[faces[1]]:
                 continue  # separa dos islas: no es un corte de tubo
@@ -655,7 +664,7 @@ def optimize_seams(transform, seams, merge_area=0.005, passes=3, relocate=True, 
 
 
 def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, merge_tiny, reroute):
-    seams = set(seams) - graph.border
+    seams = (set(seams) | graph.fixed) - graph.border
     report = {"moved": 0, "merged": 0, "rerouted": 0, "cost_before": float(sum(graph.cost[e] for e in seams))}
     ok, report["charts_before"] = graph.all_disks(seams)
     tiny = graph.tiny_non_disks(seams)
@@ -677,8 +686,8 @@ def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, 
         changed = False
         chains, degree = graph.chains(seams)
         for chain, a, b in chains:
-            if not set(chain) <= seams:
-                continue  # este tramo ya cambió en esta pasada
+            if not set(chain) <= seams or graph.fixed.intersection(chain):
+                continue  # este tramo ya cambió en esta pasada, o es un borde de material
             others = seams - set(chain)
             blocked_vertices = {v for e in others for v in graph.edge_v[e]} | graph.border_vertices
             old_cost = sum(graph.cost[e] for e in chain) + sum(
@@ -754,7 +763,7 @@ def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, 
         chains, _ = graph.chains(seams)
         drop = set()
         for chain, a, b in chains:
-            if on_center(chain) and exposure(chain) >= CENTER_EXPOSURE:
+            if on_center(chain) and exposure(chain) >= CENTER_EXPOSURE and not graph.fixed.intersection(chain):
                 drop |= set(chain)
         if drop:
             trial = graph.make_disks(seams - drop)
@@ -778,6 +787,8 @@ def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, 
         for chain, a, b in sorted(chains, key=lambda c: -exposure(c[0])):
             if exposure(chain) < 0.3:
                 break
+            if graph.fixed.intersection(chain):
+                continue
             ends_on_hole = a in graph.border_vertices or b in graph.border_vertices
             if not ends_on_hole and (degree.get(a, 0) == 1 or degree.get(b, 0) == 1):
                 continue  # corte de alivio en punta: hace falta para desplegar sin estirar
@@ -819,6 +830,8 @@ def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, 
                     other = chart[f[1]] if chart[f[0]] == c else chart[f[0]]
                     shared.setdefault(other, []).append(e)
             for other, edges in sorted(shared.items(), key=lambda item: -len(item[1])):
+                if graph.fixed.intersection(edges):
+                    continue  # otro material: la isla se queda aparte
                 trial = seams - set(edges)
                 if graph.all_disks(trial)[0]:
                     seams = trial

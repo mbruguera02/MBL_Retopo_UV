@@ -318,7 +318,10 @@ class RetopoUVWindow(QtWidgets.QDialog):
         w["uv_map_size"] = QtWidgets.QComboBox()
         for size in config.MAP_SIZES:
             w["uv_map_size"].addItem(str(size), size)
-        w["uv_padding_px"] = _spin(0, 128, 16, 2, suffix=" px", tip="Separación entre islas a la resolución elegida.")
+        w["uv_padding_px"] = _spin(0, 128, 0, 2, suffix=" px",
+                                   tip="Separación entre islas a la resolución elegida. 0 = automática: 1/256 del lado "
+                                       "de la textura (8 px a 2K, 16 a 4K, 32 a 8K), así las islas no se mezclan al "
+                                       "bajar la textura a mipmaps. Un número fijo se respeta tal cual.")
         w["uv_allow_rotation"] = _check("Permitir rotar islas (pasos de 90°)",
                                         "Desmarcado (recomendado): todas las islas quedan de pie y el dibujo de la textura "
                                         "(vetas, rayones en proyección UV) sigue la misma dirección a los dos lados de un corte. "
@@ -352,7 +355,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_tailor_seams"])
         form.addRow(w["uv_straight_islands"])
         form.addRow("Optimize", w["uv_optimize_iterations"])
-        form.addRow("Padding", w["uv_padding_px"])
+        form.addRow("Padding (0 = automático)", w["uv_padding_px"])
         form.addRow(w["uv_allow_rotation"])
         form.addRow("Calidad de layout", w["uv_layout_quality"])
         form.addRow("Intentos de empaquetado", w["uv_pack_tries"])

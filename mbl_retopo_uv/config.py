@@ -85,8 +85,13 @@ DEFAULTS = {
     "uv_split_big_shells": 0.12,
     # 5 en vez de 10: -15% de tiempo y la misma calidad práctica (águila: 13.6% vs 12.5% de caras >1.5x)
     "uv_optimize_iterations": 5,
+    # costuras en los bordes entre materiales distintos (cada material tiene sus propias islas y texturas).
+    # Solo actúa si la malla tiene 2 o más materiales
+    "uv_material_seams": True,
     "uv_map_size": 4096,
-    "uv_padding_px": 16,
+    # separación entre islas en píxeles de la textura. 0 = automática: 1/256 del lado (8 px a 2048, 16 a 4096,
+    # 32 a 8192), así sigue habiendo margen al bajar la textura a mipmaps (a 1/8 de la resolución, 1 px)
+    "uv_padding_px": 0,
     # False: las islas se quedan de pie y el empaquetador no las tumba 90°, así el dibujo de la textura (vetas, rayones
     # en proyección UV) sigue la misma dirección a los dos lados de un corte. Casi no cuesta textura: humano 62.6% -> 65.8%,
     # águila 64.0% -> 60.7%; el largo de corte entre islas giradas 90° baja del 17% al 9% (humano) y del 21% al 16% (águila)
@@ -127,8 +132,18 @@ UPGRADED_KEYS = {
 # volver a elegirlo en el desplegable (a partir de la 8 se respeta).
 REPLACED_VALUES = {
     7: {"retopo_engine": {"quadwild": "auto"}},
-    8: {"retopo_engine": {"auto": "maya"}},
+    # el relleno de 16 px (el valor por defecto antiguo) pasa a automático (16 px a 4096); otro número se conserva
+    8: {"retopo_engine": {"auto": "maya"}, "uv_padding_px": {16: 0}},
 }
+
+
+def padding_px(settings):
+    """Separación entre islas en píxeles. Un valor manual (> 0) se respeta; 0 = automática: 1/256 del lado de la
+    textura (8 px a 2048, 16 a 4096, 32 a 8192), con un mínimo de 2 px."""
+    manual = int(settings.get("uv_padding_px", 0))
+    if manual > 0:
+        return manual
+    return max(2, int(round(int(settings["uv_map_size"]) / 256.0)))
 
 
 def settings_path():

@@ -142,7 +142,7 @@ Después de Instant Meshes, la herramienta repara automáticamente su resultado:
 - **Chequeo de sanidad antes de las UVs:** al terminar el retopo se buscan caras con un ángulo interior de menos de 20° o con menos del 5 % del área mediana. Sus vértices se relajan sobre el original, aunque estén en un pliegue, porque la relajación normal deja quietos los pliegues para no redondear piezas duras. En el águila, esas caras eran las 8 con UVs solapadas: 6 tenían un ángulo de menos de 20° y 2 un área casi nula. Con el chequeo, los solapes pasan de 8 a 0.
 - Pase lo que pase, si Unfold3D deja una isla que no se puede aplanar (por ejemplo, un toro abierto con un solo tajo), se añade el corte que falta por la zona menos visible. Con el toro de prueba, las caras muy estiradas pasaron del 88 % al 0 %.
 - *Optimize*: iteraciones para reducir la distorsión. Por defecto 5: con 10 tarda un 15 % más y apenas mejora. Al terminar, el log indica el *estiramiento*, es decir, el porcentaje de caras cuyo tamaño en UV difiere más de 1,5 veces del que tienen en 3D.
-- *Resolución textura* y *Padding*: el padding se indica en píxeles a esa resolución. 16 px a 4K es un valor seguro para Substance.
+- *Resolución textura* y *Padding*: el padding se indica en píxeles a esa resolución. Con 0 (el valor por defecto) es automático: 1/256 del lado de la textura, es decir 8 px a 2K, 16 px a 4K y 32 px a 8K (mínimo 2 px), así a 1/8 de la resolución (mipmaps) las islas siguen separadas por 1 px. 16 px a 4K es un valor seguro para Substance. Quien tenía el 16 antiguo pasa a automático (versión 8 de los ajustes); cualquier otro número se respeta.
 - *Calidad de layout*: con más calidad se aprovecha mejor el espacio, pero tarda más.
 - *Intentos de empaquetado*: el empaquetado de Unfold3D cambia mucho con sus ajustes (con el mismo humano, entre el 48 % y el 66 % de la textura). Se prueban varias combinaciones sobre una copia y se queda la que más aprovecha. Con 3 se gana un 5–15 % de resolución a cambio de unos 5 segundos; con 1 es lo más rápido.
 - *Máx. caras para UVs*: si la malla tiene más caras, no se hacen UVs y se avisa. Unfold3D sobre medio millón de caras puede agotar la memoria y cerrar Maya. Haz antes el retopo. Con 0 no hay límite.
@@ -769,3 +769,33 @@ añade: la nota experimental, que ningún widget se quitó, que solo motor / car
 Humano: 5.095 caras, 99,8 % quads, 174 polos, error de forma 0,084 %, fealdad 1,701, UV 60,3 % usado, igual que la línea base. El prop (5.049 caras, 53 polos, 0,087 %, 0,915), el hardsurface (4.738, 34, 0,019 %, 0,908),
 la criatura (5.721, 363, 0,129 %, 3,901) y Midnight (5.355, 258, 0,138 %, 3,148) también. Las únicas diferencias con `baseline.json` son el paso Retopo del semáforo (hardsurface 0 a 1, humano 0 a 2, prop 1 a 2: viene del
 juez de retopo, anterior a esta tarea) y dos centésimas de `over_1_5_percent` (Midnight 6,52 a 6,54, prop 1,23 a 1,25; `uv.py` no se tocó).
+
+
+## Margen según la resolución y bordes de material como costuras (3 de noviembre)
+
+**Margen entre islas (B5).** Antes eran 16 px fijos: demasiado para 2K y poco para 8K cuando se baja a mipmaps. Ahora `uv_padding_px = 0` (el valor por defecto) es automático: `config.padding_px(settings)` da 1/256 del lado de la textura, es decir 8 px a 2048, 16 a 4096 y 32 a 8192 (otras resoluciones, la misma proporción, mínimo 2 px). Un número mayor que 0 se respeta tal cual. Lo usan el layout 0-1, el reparto en UDIMs y el `roomspace` de Unfold3D (`uv.py`); la etiqueta de la interfaz es «Padding (0 = automático)». Versión 8 de los ajustes: `REPLACED_VALUES[8] = {"uv_padding_px": {16: 0}}`, así quien tenía el 16 antiguo pasa a automático (a 4096 es lo mismo) y quien eligió otro número lo conserva. Quien eligió un 16 a mano antes de la versión 8 no se distingue del valor por defecto antiguo.
+
+Medido con `test_uv_padding_follows_resolution` (esfera, cubo y cilindro sueltos, 7 islas, `uv_quality.island_margin`):
+
+| textura | padding | margen mínimo medido | a 1/8 de la resolución (mipmap) |
+|---|---|---|---|
+| 2048 | 8 px (auto) | 11,49 px | 1,44 px |
+| 4096 | 16 px (auto) | 22,98 px | 2,87 px |
+| 8192 | 32 px (auto) | 45,96 px | 5,75 px |
+| 2048 | 24 px (manual) | 32,56 px | 4,07 px |
+
+`u3dLayout` deja algo más de lo pedido (en esta malla, 1,44 veces el `shellSpacing`), así que a 1/8 de la resolución sigue habiendo más de 1 px entre islas. La prueba exige margen ≥ padding − 1 px y ≥ 1 px a 1/8. Con el padding automático a 4096 (= 16 px) las UVs salen iguales que antes: el banco (`--only human,prop,hardsurface --engines maya`) da las mismas cifras de UV que `baseline.json` (aprovechado 60,3 / 60,3 / 56,0 %, caras > 1,5x 3,5 / 1,2 / 9,7 %, racord 27,46 / 15,73 / 2,91 %).
+
+**Bordes de material como costuras (B8).** Si la malla tiene 2 o más materiales (shadingEngines por caras, que es lo que deja el retopo de A2 en el `_retopo`), las aristas entre caras de materiales distintos son costura: cada material tiene sus propias islas y se puede pintar y exportar por separado. `uv.material_edges` las saca de `getConnectedShaders`; con un solo material devuelve una lista vacía y el código sigue exactamente el camino de antes (la prueba compara las UVs con y sin la opción `uv_material_seams`, y el banco da lo mismo que la línea base). Va en el paso de costuras de `_unwrap`: entran en la semilla de `seed_uvs` junto a las aristas por ángulo y se cortan explícitamente con `polyMapCut` (la proyección de partida puede dejar un borde de material dentro de un mismo plano y la semilla solo cose, no corta). Unfold3D añade después sus cortes de despliegue y `fix_charts` completa los que falten para que cada isla se pueda aplanar (el cinturón de una esfera de tres bandas es un tubo y necesita su tajo).
+
+Lo que hizo falta en `uv_seams.py` es el concepto de **costura fija** (`SeamGraph.fixed`, un `frozenset` de aristas; vacío por defecto, así no cambia nada sin materiales): `chains()` no mezcla tramos fijos y libres (los separa donde uno sigue en el otro); `reroute_slits`, la recolocación de tramos, la eliminación de tramos visibles y la unión de islas diminutas se saltan los tramos fijos (las islas de otro material no se cosen); `symmetrize_seams` y `optimize_seams` los vuelven a añadir al resultado. Sin esto, el optimizador de costuras quitaba bordes: con dos mallas de prueba (toro con dos materiales partido por un plano, esfera con un material por octante) la longitud de borde que seguía siendo costura bajaba al 93,7 % y al 73,1 % con el estilo normal. Con las costuras fijas es el 100 % en las dos, y en la esfera de tres bandas (con el estilo normal y con el escondido) también.
+
+| prueba | aristas de borde | longitud que es costura | islas | solapes / espejos |
+|---|---|---|---|---|
+| esfera 3 bandas, costuras normales | 48 | 100 % | 8 | 0 / 0 |
+| esfera 3 bandas, costuras escondidas | 48 | 100 % | 5 | 0 / 0 |
+| esfera 8 octantes, costuras normales | 96 | 100 % | 24 | 0 / 0 |
+
+Ninguna isla mezcla dos materiales, y con `uv_material_seams = False` los bordes dejan de ser costura (esfera de 3 bandas y de octantes: menos del 95 %).
+
+**Lo que no hace.** Con `uv_respect_existing` y una malla que ya trae costuras se respetan las que tiene y no se añaden las de material (son las del artista). Con las costuras simétricas y materiales repartidos sin simetría, el reflejo de un borde de material también se corta aunque en ese lado no haya cambio de material (sale una costura de más, nunca una de menos). Las caras sin material asignado cuentan como un material más. Si el reparto de materiales es muy fragmentado (por ejemplo un material distinto por cara) habrá una isla por trozo; la opción `uv_material_seams` (sin casilla en la interfaz) lo apaga.

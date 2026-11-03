@@ -18,6 +18,7 @@ import maya.api.OpenMaya as om
 import maya.cmds as cmds
 import numpy as np
 
+from . import config
 from .common import UVError, components, dag_path, default_log, flat_indices, mesh_shape, short_name
 
 UDIM_COLUMNS = 10
@@ -97,6 +98,26 @@ def hard_angle_edges(transform, threshold_degrees):
     while not edge_it.isDone():
         faces = edge_it.getConnectedFaces()
         if len(faces) == 2 and normals[faces[0]].angle(normals[faces[1]]) >= threshold:
+            result.append(edge_it.index())
+        edge_it.next()
+    return result
+
+
+def material_edges(transform):
+    """Aristas entre caras con materiales (shadingEngine) distintos. Vacío si la malla tiene un solo material.
+
+    Cada material debe tener sus propias islas: así se puede pintar y exportar su textura por separado y
+    ninguna isla mezcla dos materiales."""
+    path = dag_path(mesh_shape(transform))
+    _, per_face = om.MFnMesh(path).getConnectedShaders(path.instanceNumber())
+    per_face = np.array(per_face, dtype=np.int64)
+    if len(np.unique(per_face)) < 2:
+        return []
+    result = []
+    edge_it = om.MItMeshEdge(path)
+    while not edge_it.isDone():
+        faces = edge_it.getConnectedFaces()
+        if len(faces) == 2 and per_face[faces[0]] != per_face[faces[1]]:
             result.append(edge_it.index())
         edge_it.next()
     return result
@@ -386,8 +407,8 @@ def _layout_kwargs(settings):
     kwargs = {
         "resolution": int(settings["uv_layout_quality"]),
         # padding en píxeles -> unidades UV (como hace Maya con "Padding units: pixels")
-        "shellSpacing": float(settings["uv_padding_px"]) / map_size,
-        "tileMargin": float(settings["uv_padding_px"]) / 2.0 / map_size,
+        "shellSpacing": float(config.padding_px(settings)) / map_size,
+        "tileMargin": float(config.padding_px(settings)) / 2.0 / map_size,
     }
     if settings.get("uv_straight_islands", True):
         # islas ya de pie (orient_upright): el empaquetador solo puede dejarlas así o tumbarlas 90°,
@@ -540,7 +561,7 @@ def layout_udim(transform, settings, log=default_log):
     name = short_name(transform)
     map_size = settings["uv_map_size"]
     layout_0_1(transform, settings)
-    pad = float(settings["uv_padding_px"]) / map_size
+    pad = float(config.padding_px(settings)) / map_size
     # área de las cajas de las islas (lo que cuenta al repartir en tiles) a la escala actual
     boxes = sum((b[1] - b[0] + pad) * (b[3] - b[2] + pad) for b in shell_bounds(transform))
     current = texel_density(transform, map_size)
@@ -564,7 +585,7 @@ def _layout_udim(transform, settings, target, log=default_log):
     """Escala a la densidad objetivo y reparte las islas en los UDIMs necesarios."""
     name = short_name(transform)
     map_size = settings["uv_map_size"]
-    margin = 2.0 * settings["uv_padding_px"] / map_size
+    margin = 2.0 * config.padding_px(settings) / map_size
 
     # primero un layout 0-1 normal: islas con escala 3D uniforme y sin solapes
     layout_0_1(transform, settings)
@@ -593,7 +614,7 @@ def _layout_udim(transform, settings, target, log=default_log):
         uvs_by_shell.setdefault(shell, []).append(uv_index)
     for face, shell, _ in _face_shell_areas(transform):
         faces_by_shell.setdefault(shell, []).append(face)
-    pad = float(settings["uv_padding_px"]) / map_size
+    pad = float(config.padding_px(settings)) / map_size
     sizes = {shell: (b[1] - b[0] + pad) * (b[3] - b[2] + pad) for shell, b in enumerate(shell_bounds(transform))}
 
     fill = float(settings.get("uv_udim_fill", UDIM_FILL))
@@ -788,9 +809,11 @@ def unwrap(transform, settings, log=default_log, tick=None):
 def _unwrap(transform, settings, log, tick):
     name = short_name(transform)
     map_size = int(settings["uv_map_size"])
-    pad = int(settings["uv_padding_px"])
+    pad = config.padding_px(settings)
 
     graphs = []
+    # bordes entre materiales: costuras fijas (el optimizador de costuras no las mueve ni las quita)
+    materials = material_edges(transform) if settings.get("uv_material_seams", True) else []
 
     def seam_graph():
         """Un solo SeamGraph para todo el desplegado: la geometría no cambia, solo las UVs. Antes se construía
@@ -798,6 +821,7 @@ def _unwrap(transform, settings, log, tick):
         if not graphs:
             from .uv_seams import SeamGraph
             graphs.append(SeamGraph(transform))
+            graphs[0].fixed = frozenset(materials)
         return graphs[0]
 
     existing = uv_seam_edges(transform) if has_uvs(transform) else []
@@ -806,8 +830,13 @@ def _unwrap(transform, settings, log, tick):
         log("{}: se respetan las {} costuras que ya tiene la malla.".format(name, len(existing)))
     else:
         hard = hard_angle_edges(transform, settings["uv_seam_angle"]) if settings["uv_seam_angle"] < 180 else []
-        seed_uvs(transform, hard)
+        seed_uvs(transform, sorted(set(hard) | set(materials)))
         log("{}: {} costuras por ángulo (>= {:g}°).".format(name, len(hard), settings["uv_seam_angle"]))
+        if materials:
+            # la proyección de partida puede dejar un borde de material dentro de un mismo plano: se corta
+            cmds.polyMapCut(components(transform, "e", materials), constructionHistory=True)
+            log("{}: {} aristas entre materiales distintos son costura (cada material con sus islas).".format(
+                name, len(materials)))
     # al coser las UVs de partida (o en UVs que ya traía la malla) pueden quedar islas tocándose en un punto
     fixed = fix_nonmanifold_uvs(transform)
     if fixed:

@@ -433,6 +433,177 @@ def test_hidden_seams():
     assert graph.all_disks(set(new))[0] and info["cost_after"] <= info["cost_before"] + 1e-9, info
 
 
+def _reference_charts(graph, seams):
+    """charts() de siempre (union-find en Python), para comparar con la versión de numpy."""
+    parent = list(range(graph.face_count))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for e, faces in enumerate(graph.edge_f):
+        if len(faces) == 2 and e not in seams:
+            a, b = find(faces[0]), find(faces[1])
+            if a != b:
+                parent[a] = b
+    roots = {}
+    return [roots.setdefault(find(f), len(roots)) for f in range(graph.face_count)], len(roots)
+
+
+def _reference_euler(graph, seams):
+    """all_disks() de siempre (recorrido por caras, aristas y vértices): característica de Euler de cada isla."""
+    chart, count = _reference_charts(graph, seams)
+    euler = [0] * count
+    seam_vertices = {v for e in seams for v in graph.edge_v[e]}
+    for loop in graph.loops:
+        if loop & seam_vertices:
+            continue
+        edge = next(e for e in graph.vertex_edges[next(iter(loop))] if e in graph.border)
+        euler[chart[graph.edge_f[edge][0]]] += 1
+    for f in range(graph.face_count):
+        euler[chart[f]] += 1
+    for e, faces in enumerate(graph.edge_f):
+        if len(faces) == 2 and e not in seams:
+            euler[chart[faces[0]]] -= 1
+        else:
+            for f in faces:
+                euler[chart[f]] -= 1
+    for v, edges in enumerate(graph.vertex_edges):
+        faces = set()
+        for e in edges:
+            faces.update(graph.edge_f[e])
+        parent = {f: f for f in faces}
+
+        def find(x):
+            while parent[x] != x:
+                x = parent[x]
+            return x
+        for e in edges:
+            ef = graph.edge_f[e]
+            if len(ef) == 2 and e not in seams:
+                a, b = find(ef[0]), find(ef[1])
+                if a != b:
+                    parent[a] = b
+        for root in {find(f) for f in faces}:
+            euler[chart[root]] += 1
+    return euler, count
+
+
+def _reference_paths(graph, start, blocked_vertices, blocked_edges):
+    """_paths() de siempre (Dijkstra completo, sin parada anticipada)."""
+    import heapq
+    starts = set(start) if isinstance(start, (set, frozenset, list, tuple)) else {start}
+    best = {(v, -1): 0.0 for v in starts}
+    prev, dist, arrival = {}, {v: 0.0 for v in starts}, {v: (v, -1) for v in starts}
+    heap = [(0.0, v, -1) for v in starts]
+    heapq.heapify(heap)
+    while heap:
+        d, v, came = heapq.heappop(heap)
+        if d > best.get((v, came), math.inf):
+            continue
+        if v in blocked_vertices and v not in starts:
+            continue
+        came_faces = set(graph.edge_f[came]) if came >= 0 else ()
+        for e in graph.vertex_edges[v]:
+            if e in blocked_edges or e == came:
+                continue
+            a, b = graph.edge_v[e]
+            w = b if a == v else a
+            step = graph.cost[e]
+            if came_faces and came_faces.intersection(graph.edge_f[e]):
+                step += graph.TURN_PENALTY * graph.cost[e]
+            nd = d + step
+            if nd < best.get((w, e), math.inf):
+                best[(w, e)] = nd
+                prev[(w, e)] = (v, came)
+                heapq.heappush(heap, (nd, w, e))
+                if nd < dist.get(w, math.inf):
+                    dist[w] = nd
+                    arrival[w] = (w, e)
+    return dist, (prev, arrival)
+
+
+@test
+def test_uv_seam_graph_matches_reference():
+    """charts, all_disks y _paths (con y sin parada anticipada) dan lo mismo que los recorridos en Python de siempre,
+    en un cubo, un toro y una esfera con agujero."""
+    import random
+    from mbl_retopo_uv import uv_seams
+    rng = random.Random(11)
+    sphere = cmds.polySphere(subdivisionsX=12, subdivisionsY=8, constructionHistory=False)[0]
+    cmds.delete(sphere + ".f[20:22]")
+    meshes = [cmds.polyCube(constructionHistory=False)[0],
+              cmds.polyTorus(radius=3, sectionRadius=1, subdivisionsX=16, subdivisionsY=8, constructionHistory=False)[0],
+              sphere]
+    for mesh in meshes:
+        graph = uv_seams.SeamGraph(mesh)
+        edges = list(range(len(graph.edge_v)))
+        for _ in range(30):
+            seams = set(rng.sample(edges, rng.randint(0, max(1, len(edges) // 3))))
+            chart, count = graph.charts(seams)
+            ref_chart, ref_count = _reference_charts(graph, seams)
+            assert count == ref_count and list(chart) == ref_chart, (mesh, "charts")
+            ok, n = graph.all_disks(seams)
+            euler, ref_n = _reference_euler(graph, seams)
+            assert n == ref_n and list(graph._euler) == euler, (mesh, "euler", list(graph._euler), euler)
+            assert ok == (sum(1 for x in euler if x != 1) <= graph.tolerated)
+        vertices = range(len(graph.points))
+        for _ in range(20):
+            picked = rng.sample(vertices, min(6, len(vertices)))
+            sources, targets = set(picked[:2]), set(picked[2:])
+            blocked = set(rng.sample(vertices, 3)) - sources
+            blocked_edges = set(rng.sample(edges, len(edges) // 6))
+            ref_dist, ref_trail = _reference_paths(graph, sources, blocked, blocked_edges)
+            dist, trail = graph._paths(sources, blocked, blocked_edges)
+            assert dist == ref_dist, (mesh, "dijkstra")
+            allowed = [e not in blocked_edges for e in edges]
+            dist_stop, trail_stop = graph._paths(sources, blocked, (), allowed, targets)
+            reach = [v for v in targets if v in ref_dist]
+            assert [v for v in targets if v in dist_stop] or not reach, (mesh, "parada: sin destino")
+            if not reach:
+                continue
+            end = min(reach, key=ref_dist.get)
+            end_stop = min([v for v in targets if v in dist_stop], key=dist_stop.get)
+            assert end_stop == end and dist_stop[end] == ref_dist[end], (mesh, "parada: otro destino")
+            assert graph._trace(trail_stop, None, end) == graph._trace(ref_trail, None, end), (mesh, "parada: otro camino")
+
+
+@test
+def test_uv_seam_edges_and_areas_match_reference():
+    """uv_seam_edges (con SeamGraph) y _face_shell_areas dan lo mismo que los recorridos por caras de siempre,
+    también con caras sin UVs."""
+    from mbl_retopo_uv import uv_seams
+    for make in (lambda: cmds.polyTorus(radius=3, sectionRadius=1, subdivisionsX=12, subdivisionsY=8,
+                                        constructionHistory=False)[0],
+                 lambda: cmds.polySphere(subdivisionsX=10, subdivisionsY=6, constructionHistory=False)[0]):
+        mesh = make()
+        cmds.polyAutoProjection(mesh + ".f[*]", planes=6, layoutMethod=0, layout=0, optimize=1, percentageSpace=0.0,
+                                constructionHistory=False)
+        graph = uv_seams.SeamGraph(mesh)
+        assert uv.uv_seam_edges(mesh, graph) == uv.uv_seam_edges(mesh) and uv.uv_seam_edges(mesh), mesh
+        # caras sin UVs: el recorrido de siempre las trata como una UV distinta de cualquiera
+        cmds.polyMapDel(mesh + ".f[3:5]")
+        assert uv.uv_seam_edges(mesh, graph) == uv.uv_seam_edges(mesh), mesh
+    # área con signo por cara, como se calculaba con un bucle de Python
+    fn = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh)))
+    _, shell_ids = fn.getUvShellsIds()
+    us, vs = fn.getUVs()
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    expected, offset = [], 0
+    for face, count in enumerate(uv_counts):
+        ids = uv_ids[offset:offset + count]
+        offset += count
+        if count < 3:
+            continue
+        area = 0.0
+        for i in range(count):
+            a, b = ids[i], ids[(i + 1) % count]
+            area += us[a] * vs[b] - us[b] * vs[a]
+        expected.append((face, shell_ids[ids[0]], area * 0.5))
+    assert uv._face_shell_areas(mesh) == expected
+
+
 @test
 def test_pole_cleanup():
     """Un giro de arista en una rejilla crea 4 polos; la limpieza los quita."""

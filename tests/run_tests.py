@@ -645,6 +645,97 @@ def test_uv_seam_edges_and_areas_match_reference():
 
 
 @test
+def test_uv_seam_graph_large_mesh_no_int32_overflow():
+    """Con 48.400 caras el SeamGraph fallaba con "index N is out of bounds for axis 0 with size N": en Windows con
+    numpy 1.x np.arange es int32 y (cara * nº de vértices) se desbordaba pasadas ~46.000 caras. Es el error de las
+    pasadas de UVs sobre retopos densos."""
+    from mbl_retopo_uv import uv_seams
+    mesh = cmds.ls(cmds.polyPlane(width=10, height=10, subdivisionsX=220, subdivisionsY=220,
+                                  constructionHistory=False)[0], long=True)[0]
+    assert cmds.polyEvaluate(mesh, face=True) * cmds.polyEvaluate(mesh, vertex=True) > 2 ** 31
+    cmds.polyAutoProjection(mesh + ".f[*]", planes=6, layoutMethod=0, layout=0, optimize=1, percentageSpace=0.0,
+                            constructionHistory=False)
+    # un corte de lado a lado por la mitad (x = 0): dos islas
+    middle = []
+    it = om.MItMeshEdge(uv.dag_path(uv.mesh_shape(mesh)))
+    while not it.isDone():
+        if abs(it.point(0).x) < 1e-6 and abs(it.point(1).x) < 1e-6:
+            middle.append(it.index())
+        it.next()
+    assert len(middle) == 220, len(middle)
+    cmds.polyMapCut(uv.components(mesh, "e", middle), constructionHistory=False)
+    graph = uv_seams.SeamGraph(mesh)
+    assert graph.corner_node.max() == len(graph.node_face) - 1
+    seams = uv.uv_seam_edges(mesh, graph)
+    assert seams == uv.uv_seam_edges(mesh) == middle, (len(seams), len(middle))
+    chart, count = graph.charts(seams)
+    assert count == 2, count
+    assert graph.all_disks(seams) == (True, 2)
+    assert uv_seams.fix_charts(mesh, seams, graph) is None
+
+
+def _uv_state(mesh):
+    """Todo lo que cuenta de las UVs de la malla, comparable entre dos momentos: la (u, v) de cada esquina de cada cara,
+    el nº de UVs y las costuras. Más la geometría (puntos y caras) para ver que nada se reordena."""
+    fn = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh)))
+    us, vs = fn.getUVs()
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    counts, vertices = fn.getVertices()
+    return {"corners": [(round(us[i], 6), round(vs[i], 6)) for i in uv_ids], "uv_counts": list(uv_counts),
+            "num_uvs": fn.numUVs(), "seams": uv.uv_seam_edges(mesh), "face_counts": list(counts),
+            "vertices": list(vertices), "points": [(round(p.x, 6), round(p.y, 6), round(p.z, 6)) for p in fn.getPoints()]}
+
+
+@test
+def test_unwrap_is_atomic():
+    """Si una pasada de UVs falla a mitad (cualquier excepción), la malla se queda con las UVs y costuras de antes, sin
+    historial ni copias de trabajo; y la pasada siguiente no toma las costuras de la fallida por del usuario."""
+    from mbl_retopo_uv import uv_seams
+    from mbl_retopo_uv.common import UVError
+    sphere = cmds.ls(cmds.polySphere(subdivisionsX=16, subdivisionsY=12, constructionHistory=False)[0], long=True)[0]
+    no_uvs = cmds.ls(cmds.polySphere(subdivisionsX=10, subdivisionsY=8, constructionHistory=False)[0], long=True)[0]
+    cmds.polyMapDel(no_uvs + ".f[*]", constructionHistory=False)
+    half = cmds.ls(cmds.polySphere(subdivisionsX=10, subdivisionsY=8, constructionHistory=False)[0], long=True)[0]
+    cmds.polyMapDel(half + ".f[10:19]", constructionHistory=False)
+    transforms = set(cmds.ls(type="transform", long=True))
+    original = {mesh: _uv_state(mesh) for mesh in (sphere, no_uvs, half)}
+    assert original[no_uvs]["num_uvs"] == 0 and original[half]["seams"]
+
+    real_fix_charts, real_layout = uv_seams.fix_charts, uv.layout_0_1
+    try:
+        for failure, patch, expected in (
+                ("IndexError", "fix_charts", IndexError),             # tras sembrar UVs y añadir costuras automáticas
+                ("RuntimeError", "layout", UVError)):                  # un fallo de Unfold3D llega como UVError
+            def boom(*args, **kwargs):
+                raise IndexError("boom") if failure == "IndexError" else RuntimeError("boom")
+            uv_seams.fix_charts = boom if patch == "fix_charts" else real_fix_charts
+            uv.layout_0_1 = boom if patch == "layout" else real_layout
+            for mesh in (sphere, no_uvs, half):
+                try:
+                    uv.unwrap(mesh, base_settings(uv_respect_existing=False), quiet_log)
+                except expected:
+                    pass
+                else:
+                    raise AssertionError("{}: la pasada debía fallar con {}".format(mesh, failure))
+                after = _uv_state(mesh)
+                for key, value in original[mesh].items():
+                    assert after[key] == value, (mesh, failure, key)
+                assert not [n for n in cmds.listHistory(mesh, pruneDagObjects=True) or [] if n != mesh], mesh
+    finally:
+        uv_seams.fix_charts, uv.layout_0_1 = real_fix_charts, real_layout
+    assert set(cmds.ls(type="transform", long=True)) == transforms, "quedaron copias de trabajo tras la pasada fallida"
+
+    # la pasada siguiente ve las costuras de antes (no las de la fallida) y respeta solo esas
+    messages = []
+    uv_before = original[sphere]["seams"]
+    assert uv_before
+    uv.unwrap(sphere, base_settings(uv_respect_existing=True), lambda message, level="info": messages.append(message))
+    kept = [m for m in messages if "se respetan las" in m]
+    assert kept and "las {} costuras".format(len(uv_before)) in kept[0], (len(uv_before), kept)
+    assert_good_uvs(sphere)
+
+
+@test
 def test_uv_quality_matches_maya():
     """mbl_engine.uv_quality (numpy, sin Maya) da el mismo estiramiento, el mismo aprovechado, las mismas islas y los
     mismos solapes y espejos que uv.py sobre mallas desplegadas con uv.unwrap, y también sobre UVs estropeadas."""

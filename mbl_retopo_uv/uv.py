@@ -884,10 +884,49 @@ def unwrap(transform, settings, log=default_log, tick=None):
         raise UVError("{}: tiene {} aristas y {} vértices no-manifold y Unfold3D no puede trabajar así. "
                       "Pulsa 'Limpiar' con 'Reparar no-manifold' activado (o haz el retopo) y repite."
                       .format(name, bad_edges, bad_vertices))
+    # la pasada es atómica: si falla (o se cancela) la malla vuelve a las UVs y costuras que tenía. Antes, una pasada
+    # fallida dejaba las costuras a medias y la siguiente las tomaba como del usuario (uv_respect_existing): sin costuras
+    # automáticas, sin arreglo de islas ni separación de solapes
+    transforms_before = set(cmds.ls(type="transform", long=True))
+    backup = _backup_uvs(transform)
     try:
         return _unwrap(transform, settings, log, tick)
-    except RuntimeError as exc:
-        raise UVError("{}: Unfold3D falló: {}".format(name, str(exc).strip()))
+    except Exception as exc:
+        _restore_uvs(transform, backup, transforms_before, log)
+        if isinstance(exc, RuntimeError):
+            raise UVError("{}: Unfold3D falló: {}".format(name, str(exc).strip()))
+        raise
+    finally:
+        if backup and cmds.objExists(backup):
+            cmds.delete(backup)
+
+
+def _backup_uvs(transform):
+    """Copia oculta de la malla con sus UVs de ahora (misma topología y orden de vértices y caras)."""
+    backup = cmds.ls(cmds.duplicate(transform, name="mblUVBackup")[0], long=True)[0]
+    cmds.hide(backup)
+    return backup
+
+
+def _restore_uvs(transform, backup, transforms_before, log):
+    """Deja `transform` con las UVs de `backup` y sin el historial ni las copias de trabajo de la pasada fallida.
+    No lanza nada: lo que importa es el error original."""
+    name = short_name(transform)
+    try:
+        # copias de trabajo que la pasada no llegó a borrar (mblSeamTry, mblLayoutTry...)
+        for node in cmds.ls(type="transform", long=True):
+            if node not in transforms_before and node != backup and short_name(node).startswith("mbl"):
+                cmds.delete(node)
+        if _mesh_fn(backup).numUVs() == 0:
+            cmds.polyMapDel(transform + ".f[*]")
+        else:
+            cmds.polyTransfer(transform, uvSets=True, vertices=False, vertexColor=False, alternateObject=backup)
+        cmds.bakePartialHistory(transform, prePostDeformers=True)
+        log("{}: la pasada de UVs falló; la malla se queda con las UVs y costuras que tenía.".format(name),
+            "warning")
+    except Exception as exc:
+        log("{}: la pasada de UVs falló y no se pudieron devolver las UVs que tenía la malla ({}). "
+            "Deshaz con Ctrl+Z.".format(name, exc), "error")
 
 
 def _unwrap(transform, settings, log, tick):

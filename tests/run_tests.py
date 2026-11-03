@@ -1904,6 +1904,233 @@ def test_ui_builds():
     assert "UI_OK" in proc.stdout, proc.stdout + proc.stderr
 
 
+# ---------------------------------------------------------------- piezas repetidas (B4)
+
+def counting_retopo():
+    """Cambia retopo.retopo por una versión que apunta cada malla que se rehace; devuelve (lista, función para restaurar)."""
+    calls, real = [], retopo.retopo
+
+    def counted(transform, *args, **kwargs):
+        calls.append(transform)
+        return real(transform, *args, **kwargs)
+    retopo.retopo = counted
+    return calls, lambda: setattr(retopo, "retopo", real)
+
+
+def uv_arrays(mesh):
+    fn = om.MFnMesh(retopo.dag_path(retopo.mesh_shape(mesh)))
+    us, vs = fn.getUVs()
+    counts, ids = fn.getAssignedUVs()
+    return np.column_stack([us, vs]), list(counts), list(ids)
+
+
+def outward_fraction(mesh):
+    """Fracción de caras cuya normal mira hacia fuera del centro (1 en una esfera bien orientada). En el espacio del
+    objeto: con escala negativa Maya da la vuelta a las caras al dibujarlas, y es el sentido en el objeto el que cuenta."""
+    path = retopo.dag_path(retopo.mesh_shape(mesh))
+    points = np.array([(p.x, p.y, p.z) for p in om.MFnMesh(path).getPoints(om.MSpace.kObject)])
+    centre = points.mean(axis=0)
+    it, outward, total = om.MItMeshPolygon(path), 0, 0
+    while not it.isDone():
+        normal = it.getNormal(om.MSpace.kObject)
+        c = it.center(om.MSpace.kObject)
+        outward += (normal.x * (c.x - centre[0]) + normal.y * (c.y - centre[1]) + normal.z * (c.z - centre[2])) > 0
+        total += 1
+        it.next()
+    return outward / float(total)
+
+
+@test
+def test_duplicates_are_retopologized_once_and_copied():
+    """Cinco copias del mismo modelo (con dos materiales, grupo y pivote): una movida, otra en otro grupo con otra
+    transformación, otra con otro material y otra congelada y girada. El retopo y las UVs se hacen una vez; cada copia sale
+    con las mismas caras y UVs, sobre su transformación, con su material y enlazada a su original; un Ctrl+Z lo deshace todo."""
+    original = make_dressed_model()
+    moved = cmds.ls(cmds.duplicate(original, name="vestida_b")[0], long=True)[0]
+    cmds.xform(moved, translation=(-6, 2, 1))
+    other_group = cmds.group(empty=True, name="otroGrupo")
+    cmds.xform(other_group, translation=(0, 0, 25), rotation=(10, 120, 0))
+    reparented = cmds.ls(cmds.parent(cmds.duplicate(original, name="vestida_c")[0], other_group), long=True)[0]
+    cmds.xform(reparented, rotation=(70, 5, 33))
+    painted = cmds.ls(cmds.duplicate(original, name="vestida_d")[0], long=True)[0]
+    cmds.sets(painted, forceElement="azulSG")                      # un solo material, el azul
+    frozen = cmds.ls(cmds.duplicate(original, name="vestida_e")[0], long=True)[0]
+    cmds.xform(frozen, worldSpace=True, rotation=(30, 200, -40), translation=(5, 5, 5))
+    cmds.makeIdentity(frozen, apply=True, translate=True, rotate=True, scale=True)
+    sources = [original, moved, reparented, painted, frozen]
+
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    calls, restore = counting_retopo()
+    try:
+        outcome = pipeline.run(sources, ["retopo", "uv"], base_settings(retopo_engine="maya", retopo_target_faces=300),
+                               quiet_log)
+    finally:
+        restore()
+    assert not outcome["errors"], outcome["errors"]
+    assert calls == [original], "el retopo se repitió en las copias: {}".format(calls)
+    results = outcome["results"]
+    assert len(results) == 5 and len(set(results)) == 5, results
+    first = results[0]
+    faces = retopo.mesh_arrays(first)[1]
+    uvs = uv_arrays(first)
+    for source, result in zip(sources, results):
+        assert diagnostics.find_source(result) == source and not cmds.getAttr(source + ".visibility"), result
+        assert result.split("|")[-1].startswith(source.split("|")[-1] + "_retopo"), result
+        assert_same_placement(source, result)
+        assert retopo.mesh_arrays(result)[1] == faces, "otras caras en " + result
+        other = uv_arrays(result)
+        assert np.array_equal(other[0], uvs[0]) and other[1:] == uvs[1:], "otras UVs en " + result
+        assert uv.check(result)["overlapping_faces"] == 0, result
+        assert outward_fraction(result) > 0.99, result
+    # cada copia con sus materiales: las dos zonas en las que tienen dos, solo el azul en la pintada
+    for source, result in zip(sources, results):
+        zones = material_zones(result, source)
+        if source == painted:
+            assert zones["rojoSG"][0] == 0 and zones["azulSG"][0] > 100, zones
+        elif source == frozen:
+            # congelada y girada: "arriba" y "abajo" ya no son los ejes locales del original, solo se miran las cuentas
+            assert zones["rojoSG"][0] > 20 and zones["azulSG"][0] > 20, zones
+        else:
+            for name, (count, inside) in zones.items():
+                assert count > 20 and inside > 0.95, (result, name, count, inside)
+
+
+@test
+def test_duplicates_undo_and_redo_in_one_step():
+    """Con copias (en otro grupo y congelada, por los dos caminos de colocación), un solo Ctrl+Z deja la escena como estaba
+    y Rehacer devuelve el mismo resultado."""
+    original = make_dressed_model()
+    moved = cmds.ls(cmds.duplicate(original, name="vestida_b")[0], long=True)[0]
+    cmds.xform(moved, translation=(-6, 2, 1))
+    frozen = cmds.ls(cmds.duplicate(original, name="vestida_e")[0], long=True)[0]
+    cmds.xform(frozen, worldSpace=True, rotation=(30, 200, -40), translation=(5, 5, 5))
+    cmds.makeIdentity(frozen, apply=True, translate=True, rotate=True, scale=True)
+    sources = [original, moved, frozen]
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    outcome = pipeline.run(sources, ["retopo"], base_settings(retopo_engine="maya", retopo_target_faces=300), quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    before = [(r, retopo.mesh_arrays(r)) for r in outcome["results"]]
+    assert len(before) == 3
+    cmds.undo()
+    assert not cmds.ls("*_retopo*"), "quedaron copias tras deshacer: {}".format(cmds.ls("*_retopo*"))
+    assert all(cmds.getAttr(s + ".visibility") for s in sources)
+    cmds.redo()
+    for result, (points, faces) in before:
+        assert cmds.objExists(result), result
+        again = retopo.mesh_arrays(result)
+        assert again[1] == faces and np.allclose(again[0], points, atol=1e-6), result
+
+
+@test
+def test_duplicates_deformed_copy_is_its_own_group():
+    """Una copia con un vértice desplazado un poco no se agrupa con las demás (se rehace entera); con la opción apagada
+    ninguna se copia; y sin retopo entre los pasos no se agrupa nada."""
+    spheres = []
+    for i in range(4):
+        sphere = cmds.polySphere(name="esfera{}".format(i), radius=1.0, subdivisionsX=20, subdivisionsY=14,
+                                 constructionHistory=False)[0]
+        cmds.xform(sphere, translation=(4 * i, 0, 0), rotation=(0, 15 * i, 0))
+        spheres.append(cmds.ls(sphere, long=True)[0])
+    cmds.xform(spheres[2] + ".vtx[40]", relative=True, translation=(0.15, 0, 0))     # 7,5 % del diámetro
+    for reuse, expected in ((True, [spheres[0], spheres[2]]), (False, spheres)):
+        calls, restore = counting_retopo()
+        try:
+            outcome = pipeline.run(spheres, ["retopo"], base_settings(retopo_engine="maya", retopo_target_faces=200,
+                                                                       pipeline_reuse_duplicates=reuse), quiet_log)
+        finally:
+            restore()
+        assert not outcome["errors"], outcome["errors"]
+        assert calls == expected, (reuse, calls)
+        assert len(outcome["results"]) == 4
+        for source, result in zip(spheres, outcome["results"]):
+            assert_same_placement(source, result)
+    assert pipeline.find_copies(spheres, ["uv"], base_settings()) == {}
+    assert sorted(pipeline.find_copies(spheres, ["retopo", "uv"], base_settings())) == [spheres[1], spheres[3]]
+
+
+@test
+def test_duplicates_mirrored_copies_keep_their_normals():
+    """Dos esferas con escala negativa (espejo) y otra normal: las dos reflejadas son la misma pieza y salen bien orientadas;
+    la normal no se agrupa con ellas (el espejo invierte el sentido de las caras)."""
+    sources = []
+    for i, scale in enumerate(((-1, 1, 1), (-1, 1, 1), (1, 1, 1))):
+        sphere = cmds.polySphere(name="espejo{}".format(i), radius=1.0, subdivisionsX=20, subdivisionsY=14,
+                                 constructionHistory=False)[0]
+        cmds.xform(sphere, translation=(5 * i, 0, 0), scale=scale)
+        sources.append(cmds.ls(sphere, long=True)[0])
+    # y un duplicado del espejo con el giro congelado: sus puntos son otros en el espacio de objeto (camino por el mundo)
+    turned = cmds.ls(cmds.duplicate(sources[0], name="espejo3")[0], long=True)[0]
+    cmds.xform(turned, translation=(15, 0, 0), rotation=(0, 40, 25))
+    cmds.makeIdentity(turned, apply=True, rotate=True)
+    assert cmds.getAttr(turned + ".scale")[0] == (-1.0, 1.0, 1.0)
+    sources.append(turned)
+    calls, restore = counting_retopo()
+    try:
+        outcome = pipeline.run(sources, ["retopo"], base_settings(retopo_engine="maya", retopo_target_faces=200), quiet_log)
+    finally:
+        restore()
+    assert not outcome["errors"], outcome["errors"]
+    assert calls == [sources[0], sources[2]], calls
+    for source, result in zip(sources, outcome["results"]):
+        assert outward_fraction(result) > 0.99, result
+        assert_same_placement(source, result)
+
+
+def make_screws(count):
+    """`count` toros idénticos (copias de uno), cada uno movido y girado de otra forma."""
+    rng = np.random.RandomState(1)
+    base = cmds.polyTorus(name="tornillo", radius=2, sectionRadius=0.7, subdivisionsX=24, subdivisionsY=12,
+                          constructionHistory=False)[0]
+    sources = [cmds.ls(base, long=True)[0]]
+    for i in range(1, count):
+        copy = cmds.duplicate(base, name="tornillo{}".format(i))[0]
+        cmds.xform(copy, translation=rng.uniform(-20, 20, 3).tolist(), rotation=rng.uniform(0, 360, 3).tolist())
+        sources.append(cmds.ls(copy, long=True)[0])
+    return sources
+
+
+@test
+def test_duplicates_twenty_copies_cost_about_one():
+    """20 copias de un toro: una sola pasada de retopo y UVs. El tiempo de 1 pieza y el de 20 se anotan en la salida
+    (objetivo: 20 copias en 1 + 10 %); aquí se exige solo que cueste muy por debajo de repetirlo 20 veces."""
+    settings = base_settings(retopo_engine="maya", retopo_target_faces=600)
+    pipeline.run(make_screws(1), ["cleanup", "retopo", "uv"], settings, quiet_log)           # calentamiento
+    cmds.file(new=True, force=True)
+    began = time.time()
+    pipeline.run(make_screws(1), ["cleanup", "retopo", "uv"], settings, quiet_log)
+    one = time.time() - began
+    cmds.file(new=True, force=True)
+    sources = make_screws(20)
+    calls, restore = counting_retopo()
+    began = time.time()
+    try:
+        outcome = pipeline.run(sources, ["cleanup", "retopo", "uv"], settings, quiet_log)
+    finally:
+        restore()
+    twenty = time.time() - began
+    print("    1 pieza {:.2f} s; 20 copias {:.2f} s ({:.2f}x)".format(one, twenty, twenty / one))
+    assert not outcome["errors"] and len(outcome["results"]) == 20, outcome["errors"]
+    assert len(calls) == 1, calls
+    assert twenty < 2.0 * one, (one, twenty)
+
+
+@test
+def test_config_reuse_duplicates_and_common_texel_defaults():
+    """Los dos ajustes nuevos: copiar piezas repetidas encendido, densidad común apagada; un JSON de antes (sin ellos) los
+    carga con esos valores y uno que los trae los respeta."""
+    assert config.DEFAULTS["pipeline_reuse_duplicates"] is True and config.DEFAULTS["uv_common_texel"] is False
+    path = os.path.join(tempfile.mkdtemp(), "settings.json")
+    with open(path, "w") as handle:
+        handle.write('{"_version": 8, "retopo_target_faces": 777}')
+    loaded = config.load(path)
+    assert loaded["pipeline_reuse_duplicates"] is True and loaded["uv_common_texel"] is False
+    config.save(dict(config.DEFAULTS, pipeline_reuse_duplicates=False, uv_common_texel=True), path)
+    loaded = config.load(path)
+    assert loaded["pipeline_reuse_duplicates"] is False and loaded["uv_common_texel"] is True
+
+
 @test
 def test_optional_fbx():
     path = os.environ.get("MBL_TEST_FBX")

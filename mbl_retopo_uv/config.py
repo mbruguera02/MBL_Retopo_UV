@@ -18,6 +18,11 @@ MAP_SIZES = (1024, 2048, 4096, 8192)
 DEFAULTS = {
     # Instant Meshes
     "instant_meshes_path": "",
+    # Varias mallas a la vez
+    # mallas idénticas (mismos vértices y caras, misma forma y tamaño salvo giro y movimiento, como 20 tornillos copiados):
+    # limpieza, retopo y UVs de una sola y el resultado se copia a las demás, cada una sobre su transformación, su grupo
+    # y sus materiales. Solo cuando el retopo está entre los pasos
+    "pipeline_reuse_duplicates": True,
     # Limpieza
     "cleanup_delete_history": True,
     "cleanup_freeze": True,
@@ -108,6 +113,10 @@ DEFAULTS = {
     "uv_texel_density": 10.24,
     # nº de UDIMs a llenar; el plugin calcula la densidad. 0 = usar uv_texel_density
     "uv_udim_tiles": 4,
+    # misma densidad de texel (píxeles por unidad de escena) en todas las mallas que se procesan juntas: la de la malla
+    # más grande, que es la que menos textura da por unidad, y las demás se escalan a ella (cada una en su 0-1 o en sus
+    # UDIMs, usando solo la parte que les toca). Apagado: cada malla llena su textura por separado. Con una sola malla no cambia nada
+    "uv_common_texel": False,
     # por encima de este nº de caras Unfold3D puede agotar la memoria (528k caras llegaron a 31 GB)
     "uv_max_faces": 150000,
 }

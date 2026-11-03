@@ -373,6 +373,8 @@ def uv_status(transform, report=None, map_size=None, hidden_seams=False):
         report = uv.check(transform, udim=udim)
     stretch = report.get("stretch") or uv.stretch(transform)
     checks = []
+    # con la densidad de texel común entre mallas (uv_common_texel) una malla pequeña usa poca textura a propósito
+    common = bool(report.get("common_texel"))
     # nivel que ya da a cada cifra del juez de UVs lo que se comprueba aquí abajo
     covered = {}
 
@@ -380,6 +382,8 @@ def uv_status(transform, report=None, map_size=None, hidden_seams=False):
     # margen, el estiramiento medio y la continuidad de los cortes
     try:
         judge = uv_judge_report(transform, udim)
+        if common:
+            judge["used_percent"] = 100.0
         judge_values = _uv_judge_values(judge)
         judge_levels = {key: _uv_judge_level(key, value) for key, value in judge_values.items()}
     except Exception:
@@ -411,6 +415,9 @@ def uv_status(transform, report=None, map_size=None, hidden_seams=False):
                                  "Se cortarían entre dos texturas. Repite 'UVs' con 'UDIM' marcado."))
     elif umin < -1e-5 or vmin < -1e-5:
         checks.append(_check(RED, "UVs fuera del cuadro 0-1", "Repite 'UVs' (con 'UDIM' desmarcado)."))
+    elif common:
+        checks.append(_check(GREEN, "{:.0f}% de la textura, a la densidad de texel común con las demás mallas".format(
+            100.0 * uv.uv_area(transform))))
     else:
         coverage = 100.0 * uv.uv_area(transform)
         limits = UV_COVERAGE_HIDDEN_PERCENT if hidden_seams else UV_COVERAGE_PERCENT

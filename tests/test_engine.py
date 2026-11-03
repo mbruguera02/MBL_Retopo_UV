@@ -17,7 +17,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from mbl_engine import analyze, cleanup, closest, decimate, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry, uv_quality  # noqa: E402
+from mbl_engine import analyze, cleanup, closest, decimate, duplicates, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry, uv_quality  # noqa: E402
 from mbl_engine import scale  # noqa: E402
 from mbl_engine.mesh import Mesh  # noqa: E402
 
@@ -1450,6 +1450,77 @@ def test_core_retopo_does_not_depend_on_units():
     engine, executable = engines[-1]
     new_points, new_faces, report = retopo.best_retopo(points * 0.01, faces, 600, engine, executable, variants=1)
     assert report["scale"] == 1e3 and 0.95 < scale.diagonal(new_points) / scale.diagonal(points * 0.01) < 1.05, report["scale"]
+
+# ------------------------------------------------------------------ piezas repetidas (B4)
+
+def random_rigid(rng, far=0.0):
+    """Giro propio al azar (QR de una matriz normal) y desplazamiento de hasta `far` unidades."""
+    q, r = np.linalg.qr(rng.normal(size=(3, 3)))
+    q = q * np.sign(np.diag(r))
+    if np.linalg.det(q) < 0:
+        q[:, 0] = -q[:, 0]
+    return q, rng.uniform(-1, 1, 3) * far + rng.uniform(-3, 3, 3)
+
+
+@test
+def test_duplicates_group_rigid_copies_and_split_the_rest():
+    """Copias movidas y giradas (también lejos del origen y redondeadas a float32, como las da Maya) son una sola pieza;
+    una con un vértice desplazado un 1 % del tamaño, una a otra escala, un espejo y otra topología son grupos aparte."""
+    rng = np.random.RandomState(7)
+    base = uv_sphere(radius=2.0, rings=10, segments=14, triangulate=False)
+    points, faces = np.array(base.points, dtype=float), base.faces()
+    items, expected = [(points, faces)], {}
+    for far in (0.0, 5.0, 400.0, 20.0):
+        rotation, shift = random_rigid(rng, far)
+        moved = (points @ rotation.T + shift).astype(np.float32).astype(float)
+        items.append((moved, faces))
+    bumped = points.copy()
+    bumped[17] += 0.01 * 2 * 2.0 * np.array([1.0, 0.0, 0.0])           # 1 % del diámetro
+    items.append((bumped, faces))                                      # 5
+    items.append((points * 1.5, faces))                                # 6: misma forma, otra escala
+    items.append((points * np.array([-1.0, 1.0, 1.0]), faces))         # 7: espejo
+    items.append((points, faces[1:] + faces[:1]))                      # 8: mismas caras en otro orden
+    items.append((points[:-1], [f for f in faces if len(points) - 1 not in f]))   # 9: otra malla
+    items.append((points + 3.0, faces))                                # 10: otra más, solo movida
+    groups = duplicates.group_identical(items)
+    members = [[i for i, _ in g] for g in groups]
+    assert members == [[0, 1, 2, 3, 4, 10], [5], [6], [7], [8], [9]], members
+    assert groups[0][0][1] is None
+    for index, matrix in groups[0][1:]:
+        assert matrix.shape == (4, 4) and abs(np.linalg.det(matrix[:3, :3]) - 1.0) < 1e-9
+        mapped = points @ matrix[:3, :3].T + matrix[:3, 3]
+        assert np.abs(mapped - items[index][0]).max() < 1e-4 * 4.0 + 1e-3, (index, np.abs(mapped - items[index][0]).max())
+
+
+@test
+def test_duplicates_tolerance_and_planar_meshes():
+    """Un ruido de float por debajo de la tolerancia no separa las copias; una malla plana (un solo plano) se agrupa
+    aunque la copia esté girada 180° por el eje que la voltea (que para un plano es lo mismo que un espejo)."""
+    rng = np.random.RandomState(3)
+    sheet = grid(6, size=1.0)
+    points, faces = np.array(sheet.points, dtype=float), sheet.faces()
+    noisy = points + rng.normal(scale=1e-7, size=points.shape)
+    flipped = points * np.array([1.0, 1.0, -1.0]) + np.array([0.0, 0.0, 2.0])   # plano z=0: el espejo en z es la identidad
+    turned = points * np.array([-1.0, 1.0, 1.0])                                # espejo en X de un plano = giro de 180° en Y
+    groups = duplicates.group_identical([(points, faces), (noisy, faces), (flipped, faces), (turned, faces)])
+    assert [[i for i, _ in g] for g in groups] == [[0, 1, 2, 3]], groups
+
+
+@test
+def test_duplicates_grouping_is_fast_with_many_copies():
+    """20 copias de una pieza de unos 5.000 vértices se agrupan en una fracción de segundo."""
+    rng = np.random.RandomState(11)
+    base = uv_sphere(radius=1.0, rings=60, segments=80, triangulate=False)
+    points, faces = np.array(base.points, dtype=float), base.faces()
+    items = []
+    for _ in range(20):
+        rotation, shift = random_rigid(rng, 50.0)
+        items.append((points @ rotation.T + shift, faces))
+    start = time.time()
+    groups = duplicates.group_identical(items)
+    elapsed = time.time() - start
+    assert len(groups) == 1 and len(groups[0]) == 20, [len(g) for g in groups]
+    assert elapsed < 2.0, elapsed
 
 
 if __name__ == "__main__":

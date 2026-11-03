@@ -179,6 +179,11 @@ class RetopoUVWindow(QtWidgets.QDialog):
         w["retopo_relax"] = _spin(0, 100, 10, tip="Pasadas de relajación: iguala el tamaño de los quads deslizándolos "
                                                   "por la superficie del original. 0 = no relajar.")
         w["retopo_timeout"] = _spin(10, 36000, 600, 60, suffix=" s", tip="Tiempo máximo por malla.")
+        w["pipeline_reuse_duplicates"] = _check("Piezas repetidas: hacerlas una sola vez",
+                                                "Si seleccionas varias mallas idénticas (mismos vértices y caras, misma forma y "
+                                                "tamaño salvo giro y movimiento, como 20 tornillos copiados), el retopo y las UVs "
+                                                "se hacen de una y el resultado se copia a las demás, cada una en su sitio, con su "
+                                                "grupo y sus materiales. Solo con el paso Retopo marcado.")
         retopo_box = QtWidgets.QGroupBox("Retopo")
         form = QtWidgets.QFormLayout(retopo_box)
         w["mbl_variants"] = QtWidgets.QComboBox()
@@ -240,6 +245,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow("Ignorar piezas menores de", w["retopo_min_piece"])
         form.addRow("Rellenar agujeros de hasta", w["retopo_fill_holes"])
         form.addRow("Tiempo máximo", w["retopo_timeout"])
+        form.addRow(w["pipeline_reuse_duplicates"])
         w["retopo_engine"].currentIndexChanged.connect(self._update_engine_ui)
         # guías y pincel de detalle
         w["retopo_detail_density"] = _spin(1.5, 16.0, 4.0, 0.5, 1, "x",
@@ -344,6 +350,11 @@ class RetopoUVWindow(QtWidgets.QDialog):
         w["uv_udim"].toggled.connect(w["uv_udim_tiles"].setEnabled)
         w["uv_udim"].toggled.connect(self._update_density_enabled)
         w["uv_udim_tiles"].valueChanged.connect(self._update_density_enabled)
+        w["uv_common_texel"] = _check("Misma densidad de texel entre mallas",
+                                      "Con varias mallas a la vez (personaje, ropa, accesorios) todas quedan con los mismos "
+                                      "píxeles por unidad de escena: la densidad de la malla más grande, que es la que menos "
+                                      "textura da por unidad, y las demás se escalan a ella y ocupan solo parte de su textura. "
+                                      "Desmarcado: cada malla llena su textura por separado. Con una sola malla no cambia nada.")
         w["uv_max_faces"] = _spin(0, 10000000, 150000, 10000,
                                   tip="Si la malla tiene más caras, no se hacen UVs (podría agotar la memoria). 0 = sin límite.")
         uv_box = QtWidgets.QGroupBox("UVs")
@@ -366,6 +377,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_udim"])
         form.addRow("Nº de UDIMs", w["uv_udim_tiles"])
         form.addRow("Densidad de texel", w["uv_texel_density"])
+        form.addRow(w["uv_common_texel"])
         form.addRow("Máx. caras para UVs", w["uv_max_faces"])
         main_form.addRow("Resolución textura", w["uv_map_size"])
 

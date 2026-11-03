@@ -660,6 +660,52 @@ def _layout_udim(transform, settings, target, log=default_log):
     return tile
 
 
+# una malla que ya está a menos de esta fracción de la densidad común no se toca
+COMMON_TEXEL_TOLERANCE = 0.02
+
+
+def scale_to_density(transform, target, settings, log=default_log):
+    """Lleva las islas a `target` píxeles por unidad de escena sin cambiar cómo están cortadas: las escala y las vuelve a
+    colocar con su tamaño nuevo (u3dLayout sin escalar, con el mismo padding y los mismos giros de siempre). En 0-1 la
+    malla ocupa solo una parte de su textura; en UDIM, los tiles que necesite. Devuelve la densidad que queda."""
+    map_size = int(settings["uv_map_size"])
+    current = texel_density(transform, map_size)
+    if current <= 0 or target <= 0:
+        return current
+    if settings["uv_udim"]:
+        _layout_udim(transform, settings, target, log)
+    else:
+        factor = target / current
+        cmds.polyEditUV(transform + ".map[*]", pivotU=0.0, pivotV=0.0, scaleU=factor, scaleV=factor)
+        cmds.u3dLayout(transform, preScaleMode=0, layoutScaleMode=1, packBox=(0.0, 1.0, 0.0, 1.0),
+                       **_layout_kwargs(settings))
+    return texel_density(transform, map_size)
+
+
+def common_texel(meshes, settings, log=default_log):
+    """Misma densidad de texel en varias mallas ya desplegadas (personaje, ropa, accesorios). Cada una llenó su 0-1 por
+    separado, así que la más grande es la que menos píxeles da por unidad de escena: esa densidad es la común (la más
+    alta que le cabe en su textura) y las demás bajan a ella y ocupan solo la parte de su textura que les toca.
+    Devuelve {malla: densidad que quedó} de las que cambió; con menos de dos mallas no hace nada."""
+    map_size = int(settings["uv_map_size"])
+    densities = {mesh: texel_density(mesh, map_size) for mesh in meshes}
+    densities = {mesh: value for mesh, value in densities.items() if value > 0}
+    if len(densities) < 2:
+        return {}
+    reference = min(densities, key=densities.get)
+    target = densities[reference]
+    changed = {}
+    for mesh, density in densities.items():
+        if density <= target * (1.0 + COMMON_TEXEL_TOLERANCE):
+            continue
+        changed[mesh] = scale_to_density(mesh, target, settings, log)
+        log("{}: densidad de texel de {:.2f} a {:.2f} px/unidad ({}% de la textura).".format(
+            short_name(mesh), density, changed[mesh], int(round(100.0 * uv_area(mesh)))))
+    log("Densidad de texel común: {:.2f} px/unidad a {} px, la de {} (la que menos textura da por unidad). "
+        "Ajustadas {} de {} mallas.".format(target, map_size, short_name(reference), len(changed), len(densities)))
+    return changed
+
+
 def symmetric_seams(transform, graph=None):
     """Si la malla es simétrica en X, deja las costuras simétricas. Devuelve True si cambió algo."""
     from .uv_seams import symmetrize_seams

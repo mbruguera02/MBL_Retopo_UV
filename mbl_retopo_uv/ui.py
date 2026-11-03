@@ -396,6 +396,10 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_common_texel"])
         form.addRow("Máx. caras para UVs", w["uv_max_faces"])
         main_form.addRow("Resolución textura", w["uv_map_size"])
+        reset = QtWidgets.QPushButton("Valores por defecto")
+        reset.setToolTip("Devuelve TODOS los ajustes de la ventana a los valores de fábrica. Solo se conserva la ruta de Instant Meshes.")
+        reset.clicked.connect(self._reset_defaults)
+        main_form.addRow(reset)
 
         # todas las demás opciones, plegadas
         self.advanced_box = QtWidgets.QGroupBox("Avanzado")
@@ -709,6 +713,13 @@ class RetopoUVWindow(QtWidgets.QDialog):
         detail.start_paint(mesh)
         self.log("Pinta en rojo las zonas que necesitan más caras sobre {}. Cuando acabes, pulsa 'Retopo'."
                  .format(short_name(mesh)))
+
+    def _reset_defaults(self):
+        """Todos los ajustes vuelven a su valor de fábrica (menos la ruta de Instant Meshes, que es del equipo)."""
+        settings = dict(config.DEFAULTS, instant_meshes_path=self.widgets["instant_meshes_path"].text().strip())
+        self.apply_settings(settings)
+        self.save_settings()
+        self.log("Todos los ajustes vuelven a sus valores por defecto.")
 
     def _clear_detail(self):
         mesh = self._source_mesh()

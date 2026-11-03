@@ -440,6 +440,69 @@ Hallazgo fuera de esta tarea: **Rehacer (Ctrl+Y) tras deshacer el comando `mblCr
 cualquier `create_mesh` en mayapy, también en la rama base, sin tocar nada de esto). Deshacer funciona bien. Y `baseline.json` guarda
 `status.retopo = 0` para human/maya, de antes del juez en el semáforo; con el código actual (también en 4020e31 sin esta rama) sale 2.
 
+## Tamaño de trabajo de los motores y aristas duras de los escaneos (3 de noviembre)
+
+**Escala.** Los motores tienen números absolutos y el mismo modelo en centímetros, en metros o en milímetros no sale igual. Medido
+(sin pasar por el resto del proceso, `retopo.retopo` con el motor de Maya y el núcleo con los motores reales):
+
+| motor | modelo y escala | resultado antes |
+|---|---|---|
+| polyRetopo, 400 pedidas | toro regular, diagonal 1,1e5 | 3,4 s en vez de 0,3 s |
+| polyRetopo | el mismo toro, diagonal 1,1e6 | no termina (más de 5 minutos) |
+| polyRetopo | el mismo toro, diagonal 1,1e-4 | el resultado sale con el 45 % del tamaño del original |
+| polyRetopo, 800 pedidas | esfera con ondas, diagonal 1,2e5 | 1.031 caras, 104 polos y 10 s (con tamaño normal, 22 polos y 1 s) |
+| polyRetopo | la misma esfera, diagonal 1,2e-5 | el resultado se queda en un punto (1 % del tamaño) |
+| núcleo, QuadriFlow, 600 pedidas | esfera de diagonal 8 por 1, 0,01, 100, 0,0001 y 10.000 | 574, 621, 648, 617 y 696 caras |
+| núcleo, Instant Meshes, 600 pedidas | la misma | 628, 598, 567, 610 y 644 caras; 22 a 32 polos |
+
+Entre diagonales de 1e-3 y 1e4 polyRetopo no depende de la escala: lo que parecía un efecto de las unidades (esfera con ondas: 774,
+842 y 882 caras a x1, x0,01 y x100) era ruido, ver «Lo que no se arregla». Lo que sí falla son los extremos de la tabla. En el
+núcleo el OBJ que se escribe a los motores lleva 6 decimales fijos (`repair.write_obj`), un número absoluto que a escalas pequeñas
+pierde precisión; polyRetopo tiene tolerancias absolutas (`shortEdgeTolerance`, 0,0001), que es lo más probable que se note en los
+extremos, pero no lo he aislado.
+
+Arreglo: `mbl_engine/scale.py` (función pura, sin Maya). Antes del motor el modelo se multiplica por una potencia de 10 que lleva su
+diagonal a [30, 300) y al terminar se devuelve a su tamaño. Con la diagonal ya dentro de ese rango no se toca nada (identidad: ni
+siquiera se copian los puntos). El rango son justo 10 veces, así que el mismo modelo en cm, m o mm (cualquier relación de potencia de 10)
+llega al motor con exactamente el mismo tamaño; con un rango más ancho habría tamaños que se quedan como están mientras sus versiones
+x10 se llevan a otro sitio. La malla que se retopologiza en el banco, ya limpia (el transform congelado), mide: hardsurface 38,4
+(su caja de todas las piezas, 1.352, no es la que entra al motor), prop 55,6, midnight 247,1, criatura 251,8 y human 257,6: las cinco
+caen dentro y dan lo de siempre. Un primer rango [50, 2.000) cambiaba el hardsurface (38,4 quedaba fuera: 4.738 caras pasaron a 5.056).
+
+- Núcleo: decorador `@at_work_scale` en `retopo()` y `best_retopo()` de `mbl_engine/retopo.py` (tres líneas). Los dos entran por el
+  mismo sitio, así que las variantes, la referencia de error y el ajuste final ven siempre la misma escala; anidados (`best_retopo`
+  llama a `retopo`) la segunda vez no hacen nada. El informe lleva `scale` solo si hubo cambio.
+- Maya: `_maya_engine` mide la diagonal en el espacio de objeto (`MFnMesh.getPoints(kObject)`: `polyEvaluate -boundingBox` y
+  `xform -bb -os` incluyen el giro del transform y dan 18,1 en vez de 12,3 para el mismo modelo) y multiplica los puntos de la copia de
+  trabajo antes de `polyRetopo`; al terminar, los devuelve. Lo posterior (reproyección, optimización de cuadrados, simetría) ya se hace
+  con el modelo a su tamaño.
+- Después, en el núcleo con la misma esfera: QuadriFlow 648 caras y 8 polos en las cinco escalas; Instant Meshes 567 caras y 32 polos
+  en las cinco. En Maya (toro regular a x1, x0,01, x100 y x10.000): 392 caras y 0 polos las cuatro veces, y polyRetopo ve siempre la
+  diagonal 114,9. Con diagonales de 1e-3 a 1e7 sale lo mismo en 0,3 s; antes x1e5 no terminaba. Banco con `maya` (human, prop,
+  hardsurface): cero diferencias con `baseline.json` fuera de `status` y tiempos.
+
+**Lo que no se arregla.** (1) polyRetopo reacciona al ruido de float: con la esfera con ondas y los puntos con un ruido relativo de
+1e-7 (el de un float32) salen 850 o 913 caras (2 de cada 8 veces); con 1e-6, entre 790 y 907; incluso el toro regular da 406 caras
+en vez de 392 con unos puntos float32 que difieren en el último bit. Un modelo en cm y el mismo en m no tienen los mismos puntos
+float32, así que en Maya la igualdad exacta de caras entre unidades no se puede garantizar para cualquier malla con ninguna
+normalización (en el núcleo sí: la entrada es de doble precisión y llega idéntica al OBJ). Las pruebas construyen las mallas con
+`meshbuild.create_mesh` y no con `setPoints` sobre una primitiva, que deja un tweak de ~1e-7 absoluto (a escala 0,001 ya es el 3e-5 del
+tamaño y cambia el resultado). (2) Por debajo de una diagonal de ~1e-4 el resultado sigue saliendo deformado (tamaño 0,69 a x1e-5 y
+0 a x1e-6 en el toro) aunque polyRetopo ya trabaje a escala normal; no he localizado qué paso lo estropea y son tamaños sin uso real.
+(3) El motor de Instant Meshes del adaptador (`_instant_meshes_engine`, solo si se elige a mano) no se normaliza: exporta con
+`cmds.file` y habría que saber en qué espacio escribe el OBJ. (4) `cleanup_merge_distance` (0,001, en unidades de la escena) es un
+umbral absoluto del paso de limpieza: un modelo de 1 cm en una escena en metros tiene, a 5.000 caras, aristas de unos 0,0004 y la
+fusión de vértices lo destruiría. No se toca (es un ajuste del usuario con otro significado), pero conviene avisar o hacerlo relativo.
+
+**«Todo duro» de los escaneos.** El plugin no usa las marcas de dureza (normales duras) del modelo en ningún sitio del retopo:
+`polyRetopo` se llama sin `preserveHardEdges` (apagado por defecto; es el ajuste que, según el informe de investigación, se confunde
+con mallas con todas las aristas duras), Instant Meshes recibe un OBJ exportado con `smoothing=0;normals=0` y su `-c` es un ángulo
+diedro que calcula él con la geometría, `uv.hard_angle_edges` calcula el ángulo entre normales de cara (geométrico, como
+`polySelectConstraint`) y `_present` solo escribe `polySoftEdge` en el resultado. Medido: una esfera con ondas con todas las aristas
+duras (`polySoftEdge -angle 0`, 100 % duras) y con todas suaves (0 %) da exactamente los mismos puntos, caras y polos. Por eso no
+hay nada que detectar ni ignorar; la prueba `test_all_hard_edges_do_not_change_the_retopo` lo fija para que, si algún día se activa
+`preserveHardEdges`, se vea que hay que ignorar las marcas cuando pasan del 50 % de las aristas.
+
 ## Motores descartados
 
 Motores que se probaron, se midieron y se quitaron del plugin. Las cifras se guardan aquí por si hay que volver a decidir.

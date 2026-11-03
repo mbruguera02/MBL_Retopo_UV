@@ -741,6 +741,105 @@ def test_maya_engine():
         assert_good_uvs(result)
 
 
+def make_bumpy_sphere(name, scale=1.0, subdivisions=60):
+    """Esfera de radio 3 deformada con ondas (un escaneo orgánico pequeño), con los puntos multiplicados por `scale`.
+
+    Se construye con meshbuild (puntos exactos): modificar una primitiva con setPoints deja el error de la deformación
+    en un tweak de ~1e-7 que a escalas pequeñas ya es ruido visible y cambia el resultado de polyRetopo."""
+    from mbl_retopo_uv import meshbuild
+    base = cmds.polySphere(name="bumpyBase", radius=3, subdivisionsX=subdivisions, subdivisionsY=subdivisions,
+                           constructionHistory=False)[0]
+    points, faces = retopo.mesh_arrays(base)
+    cmds.delete(base)
+    bump = 1.0 + 0.08 * np.sin(points[:, 0] * 3.5) * np.cos(points[:, 1] * 2.8) + 0.05 * np.sin(points[:, 2] * 5.5)
+    return meshbuild.create_mesh(points * bump[:, None] * np.array([1.0, 1.3, 1.0]) * scale, faces, name)
+
+
+def world_box(node):
+    """(centro, diagonal) de la caja del objeto en el mundo."""
+    box = np.array(cmds.exactWorldBoundingBox(node), dtype=float)
+    return (box[:3] + box[3:]) / 2.0, float(np.linalg.norm(box[3:] - box[:3]))
+
+
+def make_scaled_torus(name, scale):
+    """Toro regular (48 x 24) con los puntos multiplicados por `scale`, construido con meshbuild (puntos exactos)."""
+    from mbl_retopo_uv import meshbuild
+    base = cmds.polyTorus(name="torusBase", radius=3, sectionRadius=1.0, subdivisionsX=48, subdivisionsY=24,
+                          constructionHistory=False)[0]
+    points, faces = retopo.mesh_arrays(base)
+    cmds.delete(base)
+    return meshbuild.create_mesh(points * scale, faces, name)
+
+
+@test
+def test_retopo_does_not_depend_on_the_units():
+    """El mismo modelo en cm, en m (x0,01), x10, x100 y x10.000 da con polyRetopo las mismas caras y polos (1 %) y cada resultado
+    queda con el tamaño y el sitio de su original. polyRetopo ve el modelo siempre a la escala de trabajo (mbl_engine/scale.py:
+    con diagonales de 1e5 se cuelga y por debajo de 1e-3 deforma el resultado) y con un tamaño razonable no se toca nada."""
+    seen = []
+    real = cmds.polyRetopo
+
+    def spy(node, *args, **kwargs):
+        seen.append(float(np.linalg.norm(np.ptp(retopo._object_points(node), axis=0))))
+        return real(node, *args, **kwargs)
+
+    outcomes = []
+    cmds.polyRetopo = spy
+    try:
+        for index, factor in enumerate((1.0, 0.01, 100.0, 1e4, 10.0)):
+            source = make_scaled_torus("units_{}".format(index), factor)
+            cmds.move(4 * factor, 1 * factor, -2 * factor, source)
+            cmds.rotate(20, 35, 0, source)
+            result = retopo.retopo(source, base_settings(retopo_engine="maya", retopo_target_faces=400), quiet_log)
+            stats = diagnostics.topology_stats(result)
+            (centre_a, size_a), (centre_b, size_b) = world_box(source), world_box(result)
+            assert 0.9 < size_b / size_a < 1.05, (factor, size_a, size_b)
+            assert np.linalg.norm(centre_a - centre_b) < 0.05 * size_a, (factor, centre_a, centre_b)
+            assert len(seen) == index + 1
+            outcomes.append((stats["faces"], stats["pole_count"], size_b / size_a, seen[-1]))
+    finally:
+        cmds.polyRetopo = real
+    base = outcomes[0]
+    for faces_count, poles, ratio, _ in outcomes[1:-1]:
+        assert abs(faces_count - base[0]) <= 0.01 * base[0] and abs(poles - base[1]) <= 0.01 * base[1], outcomes
+        assert abs(ratio / base[2] - 1.0) < 0.01, outcomes
+    # x10 llega a polyRetopo sin tocar y sus puntos float32 no son exactamente los de x1 por 10: polyRetopo reacciona a ese ruido
+    # de 1e-7 (392 caras con unos puntos, 406 con otros), así que aquí solo se pide que salga algo equivalente
+    assert abs(outcomes[-1][0] - base[0]) <= 0.05 * base[0] and outcomes[-1][1] == base[1], outcomes
+    # lo que vio polyRetopo: siempre el mismo tamaño (diagonal 114,9), sea cual sea la escala del original; x10 ya lo
+    # tenía y no se tocó
+    assert all(abs(o[3] / 114.9 - 1.0) < 0.01 for o in outcomes), outcomes
+
+
+def hard_edge_fraction(transform):
+    """Fracción de las aristas interiores de la malla marcadas como duras (normales duras)."""
+    it = om.MItMeshEdge(om.MSelectionList().add(transform).getDagPath(0))
+    inner = hard = 0
+    while not it.isDone():
+        if not it.onBoundary():
+            inner += 1
+            hard += 0 if it.isSmooth else 1
+        it.next()
+    return hard / float(max(inner, 1))
+
+
+@test
+def test_all_hard_edges_do_not_change_the_retopo():
+    """Los escaneos y las importaciones llegan con todas las aristas duras: el plugin no usa la dureza del modelo (polyRetopo
+    con preserveHardEdges apagado y nada más la lee), así que con todas duras sale lo mismo que con todas suaves."""
+    outcomes = {}
+    for mode, angle in (("soft", 180), ("hard", 0)):
+        source = make_bumpy_sphere("edges_" + mode, 1.0, 40)
+        cmds.polySoftEdge(source, angle=angle, constructionHistory=False)
+        assert hard_edge_fraction(source) == (1.0 if mode == "hard" else 0.0), mode
+        result = retopo.retopo(source, base_settings(retopo_engine="maya", retopo_target_faces=500), quiet_log)
+        stats = diagnostics.topology_stats(result)
+        points = np.array(cmds.xform(result + ".vtx[*]", query=True, translation=True, worldSpace=True)).reshape(-1, 3)
+        outcomes[mode] = (stats["faces"], stats["pole_count"], points)
+    assert outcomes["soft"][:2] == outcomes["hard"][:2], (outcomes["soft"][:2], outcomes["hard"][:2])
+    assert np.allclose(outcomes["soft"][2], outcomes["hard"][2], atol=1e-6)
+
+
 def make_dressed_model():
     """Esfera de 384 caras con dos materiales por zonas (arriba rojo, abajo azul), dentro de un grupo movido y
     girado, con el pivote fuera del centro y una transformación propia (trasladada, girada y escalada)."""

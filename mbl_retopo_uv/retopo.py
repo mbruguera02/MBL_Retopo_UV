@@ -27,6 +27,7 @@ from . import config, meshbuild
 from .common import RetopoError, components, dag_path, default_log, mesh_shape, short_name
 from mbl_engine import process as _process
 from mbl_engine import retopo as _core
+from mbl_engine import scale as _scale
 from mbl_engine.process import STALL_SECONDS  # noqa: F401
 from mbl_engine.process import _cpu_seconds  # noqa: F401
 from mbl_engine.repair import (  # noqa: F401  (núcleo del Motor MBL, sin Maya)
@@ -297,6 +298,19 @@ def _prepared_copy(transform, settings, log, tick):
     return prepared
 
 
+def _object_points(transform):
+    """Puntos de la malla en su espacio de objeto (array Nx3): lo que ve polyRetopo, sin giro ni traslación del transform."""
+    fn = om.MFnMesh(dag_path(mesh_shape(transform)))
+    return np.array([(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kObject)], dtype=float)
+
+
+def _scale_points(transform, factor):
+    """Multiplica por `factor` los puntos de la malla en su espacio de objeto (sin tocar el transform)."""
+    points = _object_points(transform) * factor
+    fn = om.MFnMesh(dag_path(mesh_shape(transform)))
+    fn.setPoints(om.MPointArray([om.MPoint(x, y, z) for x, y, z in points]), om.MSpace.kObject)
+
+
 def _maya_engine(transform, settings, log, tick):
     """polyRetopo de Maya. Con el águila de prueba (5.000 caras) dio 100% quads, 5 veces menos polos
     de 6+ aristas y 2,7 veces menos error medio que Instant Meshes. Devuelve (malla, arreglos)."""
@@ -315,9 +329,26 @@ def _maya_engine(transform, settings, log, tick):
     log("{}: retopo de Maya (polyRetopo) con {} caras objetivo...".format(name, target))
     source_border = border_points(prepared)
     source_openings = len(border_loops(prepared))
+    # polyRetopo da otro resultado según las unidades del modelo (mbl_engine/scale.py): se le da a la escala de trabajo
+    # y el resultado vuelve al tamaño del original. Con un tamaño razonable no se toca nada.
+    size = _scale.diagonal(_object_points(prepared))
+    factor = _scale.work_factor(size)
+    if factor != 1.0:
+        log("{}: modelo de diagonal {:.4g}; polyRetopo trabaja a escala x{:g} y el resultado vuelve a su tamaño."
+            .format(name, size, factor))
+
+    def poly_retopo(node, **extra):
+        if factor != 1.0:
+            cmds.delete(node, constructionHistory=True)
+            _scale_points(node, factor)
+        cmds.polyRetopo(node, targetFaceCount=target, replaceOriginal=True, **extra)
+        if factor != 1.0:
+            cmds.delete(node, constructionHistory=True)
+            _scale_points(node, 1.0 / factor)
+
     try:
         backup = cmds.duplicate(prepared)[0] if curves else None
-        cmds.polyRetopo(prepared, targetFaceCount=target, replaceOriginal=True, **kwargs)
+        poly_retopo(prepared, **kwargs)
         if backup:
             # con guías polyRetopo es a veces inestable (esfera cortada: 400 caras pedidas -> 1.323):
             # si se dispara, se repite sin guías
@@ -327,8 +358,7 @@ def _maya_engine(transform, settings, log, tick):
                     "warning")
                 cmds.delete(prepared)
                 prepared = backup
-                cmds.polyRetopo(prepared, targetFaceCount=target, replaceOriginal=True,
-                                topologyRegularity=MAYA_TOPOLOGY_REGULARITY)
+                poly_retopo(prepared, topologyRegularity=MAYA_TOPOLOGY_REGULARITY)
             else:
                 cmds.delete(backup)
         cmds.delete(prepared, constructionHistory=True)

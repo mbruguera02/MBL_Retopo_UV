@@ -19,6 +19,8 @@ from .mesh import Mesh
 from .process import EngineError, MemoryLow, _run_once, run_instant_meshes
 from .repair import (_dissolve_doublets, fill_new_holes, make_manifold, read_obj, repair_topology,
                      write_obj, write_ply, vertex_areas)
+from .scale import at_work_scale
+
 
 
 # Instant Meshes en modo solo quads subdivide al final: da ~3,15 veces las caras pedidas
@@ -355,6 +357,7 @@ def _ugliness(points, faces, source, grid):
                                 quality.defect_stats(mesh, source, grid), mesh.face_count)
 
 
+@at_work_scale
 def retopo(points, faces, target_faces, engine, executable, symmetric=None, timeout=600, tick=None,
            relax=10, pole_cleanup=True, min_piece=0.01, fill_holes=60, options=None, log=None):
     """Retopología de (points, faces). Devuelve (puntos, caras, informe).
@@ -623,6 +626,7 @@ def _choose_variant(variants, target_faces, require_pure=True):
     return max(close, key=lambda i: (variants[i].get("closed_percent", 0.0), -cost(i)))
 
 
+@at_work_scale
 def best_retopo(points, faces, target_faces, engine, executable, variants=3, time_budget=120.0, tick=None,
                 log=None, workers=None, good_enough=None, **kwargs):
     """La mejor de varias variantes de retopo(): menos error de forma sin pasarse de polos ni de caras.

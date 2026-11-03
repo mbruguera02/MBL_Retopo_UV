@@ -74,7 +74,9 @@ class SeamGraph:
         # área de cada cara (normal de Newell / 2)
         counts = np.array(counts, dtype=np.int64)
         flat = np.array(vertices, dtype=np.int64)
-        face_id = np.repeat(np.arange(self.face_count), counts)
+        # int64 explícito: en Windows con numpy 1.x np.arange da int32 y (cara * nº de vértices) se desbordaba con
+        # mallas de más de ~46.000 caras (índice fuera de rango en searchsorted y claves de esquina mal calculadas)
+        face_id = np.repeat(np.arange(self.face_count, dtype=np.int64), counts)
         ends = np.cumsum(counts) - 1
         following = np.arange(len(flat)) + 1
         following[ends] = ends - counts + 1

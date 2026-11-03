@@ -1373,6 +1373,141 @@ def test_symmetric_upright_uvs():
         assert not (dv < 0 and abs(dv) > abs(du)), "isla {} boca abajo".format(shell)
 
 
+def uv_arrays(mesh):
+    """(puntos, caras, puntos UV, caras UV) de la malla, como los espera mbl_engine.uv_quality."""
+    points, faces = retopo.mesh_arrays(mesh)
+    fn = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh)))
+    us, vs = fn.getUVs()
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    uv_faces, start = [], 0
+    for count in uv_counts:
+        uv_faces.append(list(uv_ids[start:start + count]))
+        start += count
+    return points, faces, np.column_stack([us, vs]), uv_faces
+
+
+@test
+def test_config_uv_padding_automatic():
+    """El padding por defecto es automático (0): 1/256 del lado de la textura. Quien tenía el 16 antiguo pasa a
+    automático y quien eligió otro número lo conserva."""
+    assert config.DEFAULTS["uv_padding_px"] == 0 and config.SETTINGS_VERSION >= 8
+    for size, expected in ((256, 2), (512, 2), (1024, 4), (2048, 8), (4096, 16), (8192, 32)):
+        assert config.padding_px({"uv_map_size": size, "uv_padding_px": 0}) == expected, size
+    assert config.padding_px({"uv_map_size": 8192, "uv_padding_px": 5}) == 5
+    path = os.path.join(tempfile.mkdtemp(), "settings.json")
+
+    def load_with(padding, version=None):
+        data = '"uv_padding_px": {}, "retopo_target_faces": 777'.format(padding)
+        if version is not None:
+            data = '"_version": {}, '.format(version) + data
+        with open(path, "w") as handle:
+            handle.write("{" + data + "}")
+        return config.load(path)
+
+    for version in (None, 2, 6, 7):
+        assert load_with(16, version)["uv_padding_px"] == 0, version
+        assert load_with(24, version)["uv_padding_px"] == 24, version
+        assert load_with(24, version)["retopo_target_faces"] == 777, version
+    # con la versión nueva, 16 es una elección del usuario
+    assert load_with(16, config.SETTINGS_VERSION)["uv_padding_px"] == 16
+    config.save(load_with(16, 7), path)
+    assert config.load(path)["uv_padding_px"] == 0
+
+
+@test
+def test_uv_padding_follows_resolution():
+    """Con el padding automático, las islas distintas quedan al menos a 1/256 del lado de la textura (8, 16 y 32 px a
+    2048, 4096 y 8192, con 1 px de tolerancia) y a 1/8 de la resolución (mipmap) siguen sin tocarse. Un valor
+    manual (24 px a 2048) se respeta."""
+    from mbl_engine import uv_quality
+    for size, manual in ((2048, 0), (4096, 0), (8192, 0), (2048, 24)):
+        pieces = [cmds.polySphere(radius=1.2, subdivisionsX=12, subdivisionsY=8, constructionHistory=False)[0],
+                  cmds.polyCube(width=2, height=3, depth=1, constructionHistory=False)[0],
+                  cmds.polyCylinder(radius=0.8, height=3, subdivisionsX=12, constructionHistory=False)[0]]
+        for i, piece in enumerate(pieces):
+            cmds.move(i * 4.0, 0, 0, piece)
+        mesh = cmds.ls(cmds.polyUnite(pieces, constructionHistory=False, name="padding{}_{}".format(size, manual))[0],
+                       long=True)[0]
+        settings = base_settings(uv_map_size=size, uv_padding_px=manual)
+        pad = config.padding_px(settings)
+        assert pad == (manual or size // 256), (size, pad)
+        report = uv.unwrap(mesh, settings, quiet_log)
+        assert report["overlapping_faces"] == 0 and report["flipped_faces"] == 0, (size, report)
+        margin = uv_quality.island_margin(*uv_arrays(mesh)[2:])
+        assert margin is not None, "la malla de prueba debería tener varias islas"
+        pixels = margin * size
+        print("    {} px: padding {} px, margen mínimo {:.2f} px ({:.2f} px a 1/8)".format(size, pad, pixels, pixels / 8))
+        assert pixels >= pad - 1.0, "{}: margen {:.2f} px, se pedían {} px".format(size, pixels, pad)
+        assert pixels / 8.0 >= 1.0, "{}: a 1/8 de la resolución el margen es {:.2f} px".format(size, pixels / 8)
+
+
+def make_material_sphere(name, octants=False):
+    """Esfera con tres materiales en bandas horizontales o, con `octants`, con ocho materiales (uno por octante)."""
+    mesh = cmds.ls(cmds.polySphere(name=name, radius=2, subdivisionsX=24, subdivisionsY=18,
+                                   constructionHistory=False)[0], long=True)[0]
+    points, faces = retopo.mesh_arrays(mesh)
+    centers = np.array([points[face].mean(axis=0) for face in faces])
+    if octants:
+        label = (centers[:, 0] > 0) * 1 + (centers[:, 1] > 0) * 2 + (centers[:, 2] > 0) * 4
+    else:
+        label = np.minimum((np.argsort(np.argsort(centers[:, 1])) * 3) // len(faces), 2)
+    for i in np.unique(label):
+        shader = cmds.shadingNode("lambert", asShader=True, name="{}Mat{}".format(name, i))
+        group = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=shader + "SG")
+        cmds.connectAttr(shader + ".outColor", group + ".surfaceShader", force=True)
+        cmds.sets(uv.components(mesh, "f", np.flatnonzero(label == i).tolist()), edit=True, forceElement=group)
+    return mesh
+
+
+@test
+def test_uv_material_borders_are_seams():
+    """Los bordes entre materiales distintos son costura (cada material con sus islas), sin solapes ni espejos: esfera
+    de tres bandas con el estilo de costuras normal y con el escondido, y esfera de ocho octantes (donde el optimizador
+    de costuras quitaba el 27 % de los bordes si no los trataba como fijos). Con un solo material las UVs salen
+    igual que sin la opción."""
+    from mbl_retopo_uv.uv_seams import SeamGraph
+    for style, octants in (("resolution", False), ("hidden", False), ("resolution", True)):
+        mesh = make_material_sphere("mat_{}_{}".format(style, int(octants)), octants)
+        borders = uv.material_edges(mesh)
+        assert borders, "la esfera de tres materiales debería tener bordes de material"
+        length = SeamGraph(mesh).length
+        total = float(sum(length[e] for e in borders))
+
+        def covered(settings):
+            report = uv.unwrap(mesh, settings, quiet_log)
+            seams = set(uv.uv_seam_edges(mesh))
+            return report, sum(length[e] for e in borders if e in seams) / total
+
+        report, share = covered(base_settings(uv_seam_style=style))
+        print("    {}{}: {} aristas de borde, {:.1f}% de su longitud es costura, {} islas".format(
+            style, " (octantes)" if octants else "", len(borders), 100.0 * share, report["shells"]))
+        assert share >= 0.95, (style, share)
+        assert_good_uvs(mesh)
+        # ninguna isla mezcla dos materiales
+        _, per_face = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh))).getConnectedShaders(0)
+        owners = {}
+        for face, shell, _ in uv._face_shell_areas(mesh):
+            owners.setdefault(shell, set()).add(per_face[face])
+        assert all(len(m) == 1 for m in owners.values()), owners
+        # sin la opción, los bordes de material no son costura (la prueba no pasaría por casualidad)
+        _, off = covered(base_settings(uv_seam_style=style, uv_material_seams=False))
+        assert off < 0.95, off
+
+    def uvs(mesh, settings):
+        uv.unwrap(mesh, settings, quiet_log)
+        fn = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh)))
+        us, vs = fn.getUVs()
+        return np.array(us), np.array(vs), np.array(fn.getAssignedUVs()[1])
+
+    plain = cmds.ls(cmds.polySphere(name="onePlain", radius=2, subdivisionsX=24, subdivisionsY=18,
+                                    constructionHistory=False)[0], long=True)[0]
+    assert uv.material_edges(plain) == []
+    with_option = uvs(plain, base_settings())
+    without = uvs(plain, base_settings(uv_material_seams=False))
+    for a, b in zip(with_option, without):
+        assert a.shape == b.shape and np.array_equal(a, b), "un solo material: las UVs deben salir iguales"
+
+
 @test
 def test_retopo_result_is_manifold():
     """Si el resultado del retopo trae no-manifold, se repara y las UVs funcionan sin limpiar a mano."""

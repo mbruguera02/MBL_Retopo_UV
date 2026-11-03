@@ -381,6 +381,37 @@ Para controlar de verdad dónde quedan los polos hace falta un campo de direccio
 ejemplo conexiones triviales, Crane 2010) o forzar bucles con las guías de flujo (motor de Maya). Con el estado actual, para animación
 sirven más las **guías de flujo** alrededor de las articulaciones y la cara, que el motor de Maya sigue, que un mapa de coste.
 
+## Optimizar el Motor MBL para equipos modestos (3 de noviembre): lo que se midió y por qué no llegó al −30 %
+
+Medido con `tests/bench.py --engines mbl` (5.000 caras, una medición cada una, PC de 16 núcleos y 15,7 GB sin otra carga; «main» y «optimizada» se midieron seguidas) y con un perfilador propio por etapas. Tiempos del paso de retopo, en segundos:
+
+| Modelo | línea base (baseline.json) | main | optimizada | pico de memoria main -> optimizada (MB) |
+|---|---|---|---|---|
+| humano | 29,3 | 21,1 | 17,3 (−18 %) | 1.229 -> 1.227 |
+| prop | 56,1 | 40,4 | 35,3 (−13 %) | 1.340 -> 1.342 |
+| hardsurface | 56,3 | 25,0 | 22,7 (−9 %) | 1.301 -> 1.298 |
+| criatura | 127,7 | 56,1 | 45,4 (−19 %) | 3.325 -> 3.298 |
+
+La línea base de `baseline.json` se midió con el PC ocupado; con el PC libre el paso ya tarda lo de la columna «main». El criterio (−30 % en 3 de 4 y memoria −15 % en la criatura) no se alcanza con cambios que dejen el resultado igual.
+
+**Dónde está el tiempo** (humano, sin perfilador de por medio: cProfile multiplica por ~7 el coste de las funciones recursivas y hacía creer que `clean_poles` costaba 1,4 s por variante; son 0,2 s):
+- QuadriFlow es la mayor parte: 12,7 s de 21 en el humano (3 ejecuciones de ~4 s), y ~80 % en hardsurface. Su tiempo depende de las caras PEDIDAS (la fase «index map» es el 55 %), no de la malla de entrada: el humano con 28.000, 26.000 y 13.000 triángulos de entrada tarda 3,69, 3,75 y 3,57 s. Por eso reducir la malla que ve el motor (`DECIMATE_TO`) no ahorra tiempo, y la memoria que ahorraría (~70 MB en la criatura) es poca.
+- Tres de los cuatro modelos gastan DOS ejecuciones de QuadriFlow por variante: la primera pasada (6.500 pedidas) da 6.400 caras en prop y hardsurface, 5.600-5.900 en la criatura, fuera de la tolerancia del 12 %, y hay que repetir. Solo el humano (4.700-5.400) acierta a la primera. Seis ejecuciones de QuadriFlow son 25 s de 35 en prop y 20 s de 25 en hardsurface.
+- QuadriFlow no se puede ejecutar a la vez en dos variantes sin pasar del pico de memoria de la línea base (cada proceso 0,36-0,54 GB).
+- La criatura, además, tarda en Python (~5 s por variante) y en `prepare` (~7 s) por sus 528.000 triángulos.
+
+**Memoria de la criatura**: el pico de 3,3 GB es mayapy 2,85 GB + QuadriFlow 0,43 GB + mbl_geom 0,04 GB. Antes de que el motor haga nada, mayapy ya está en 2,5 GB: 1,2 GB al abrir el modelo y +1,3 GB durante la limpieza (todo el pipeline va en un solo undo chunk y Maya guarda cada operación sobre la malla de medio millón de triángulos). La parte del motor es ~0,3 GB; con lo que se ha quitado queda en ~0,25. Bajar un 15 % (500 MB) pide actuar sobre la limpieza de Maya (`mbl_retopo_uv/pipeline.py`, fuera de esta tarea).
+
+**Qué se cambió (mismo resultado en humano, hardsurface y criatura; prop, ver más abajo)**:
+- `retopo()` se parte en `run_engine()` (motor) y `finish_retopo()` (Python): `best_retopo()` hace la segunda mitad de una variante en otro hilo mientras QuadriFlow ya trabaja en la siguiente. Es lo que más ahorra (−10-20 %).
+- `prepare()` sin listas de listas de Python para la malla (`compact_mesh`, `drop_small_pieces` en numpy, triángulos como array) y el original se comparte con la malla de trabajo cuando no se quitó nada: ~100-200 MB menos de objetos temporales y ~2,5 s menos en la criatura.
+- Caché de vecinos en `quadopt._Mesh`, sin contar polos si nadie lee el mensaje y `process.wait(timeout)` en vez de dormir 0,1 s de más.
+- Pruebas nuevas: `drop_small_pieces` frente a la implementación de referencia con mallas al azar, y el reparto de la petición entre variantes.
+
+**Probado y apagado: `LEARN_QUADRIFLOW_REQUEST`** (o `options["learn_request"]`). La primera variante cuenta lo que le hizo falta y las demás empiezan con esa petición: una ejecución menos por variante. Con bench (retopo, sobre «main»): prop −44 %, hardsurface −41 %, humano −18 % (no cambia), criatura −7 % (ahí manda el Python). Pero las variantes 2 y 3 salen distintas (otra muestra del motor caótico) y la calidad deja de cumplir: prop error medio 0,082 -> 0,114 %, hardsurface loops cerrados 16 -> 4,7 %, criatura fealdad 4,7 -> 8,4. Por eso va apagado.
+
+**Un aviso sobre el determinismo**: QuadriFlow SÍ es determinista (misma entrada y petición: 8 de 8 salidas idénticas, también con 16 procesos ocupando la CPU). Pero la variante 1 del prop no es reproducible entre ejecuciones del pipeline, tampoco con el código sin tocar: 4.793 caras/97 polos, 4.800/200, 4.788/116 (error 2,45 %) y 4.732/436 en cuatro ejecuciones; las variantes 2 y 3 sí salen siempre iguales. Algo anterior al motor (¿el orden de vértices que deja la separación de no-manifold de Maya?) cambia la entrada. Sin resolver; cuando pasa, gana otra variante y el prop sale con error 0,150 % en vez de 0,082 %.
+
 ## Motores descartados
 
 Motores que se probaron, se midieron y se quitaron del plugin. Las cifras se guardan aquí por si hay que volver a decidir.

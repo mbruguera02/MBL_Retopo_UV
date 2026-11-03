@@ -1116,6 +1116,117 @@ def test_status():
     assert status.cleanup_status(nonmanifold)["level"] == status.RED
 
 
+def make_uv_mesh(points, faces, uvs, uv_faces):
+    """Malla con las UVs exactas que se le dan (para probar el semáforo sin depender del despliegue de Unfold3D)."""
+    fn = om.MFnMesh()
+    fn.create([om.MPoint(*p) for p in points], [len(f) for f in faces], [i for f in faces for i in f])
+    fn.setUVs([u for u, _ in uvs], [v for _, v in uvs])
+    fn.assignUVs([len(f) for f in uv_faces], [i for f in uv_faces for i in f])
+    return cmds.listRelatives(fn.fullPathName(), parent=True, fullPath=True)[0]
+
+
+def make_uv_planes(rects, n=4):
+    """Un plano suelto de 1x1 (n x n quads) por rectángulo (u0, v0, u1, v1), con las UVs planares dentro de él.
+    Con u0 > u1 la isla sale en espejo."""
+    points, faces, uvs, uv_faces = [], [], [], []
+    for k, (u0, v0, u1, v1) in enumerate(rects):
+        base = len(points)
+        for j in range(n + 1):
+            for i in range(n + 1):
+                points.append((2.0 * k + i / float(n), j / float(n), 0.0))
+                uvs.append((u0 + (u1 - u0) * i / float(n), v0 + (v1 - v0) * j / float(n)))
+        for j in range(n):
+            for i in range(n):
+                a = base + j * (n + 1) + i
+                faces.append([a, a + 1, a + n + 2, a + n + 1])
+        uv_faces.extend(list(f) for f in faces[-n * n:])
+    return make_uv_mesh(points, faces, uvs, uv_faces)
+
+
+@test
+def test_status_uv_judge():
+    """Semáforo de UVs con el juez de UVs (uv_quality.grade): UVs buenas -> verde; solapadas, en espejo, con densidad distinta,
+    islas casi pegadas, costuras que no casan o poca textura -> no verde, con su consejo; nunca más verde que la nota del juez."""
+    from mbl_engine import uv_quality
+    left, right = (0.02, 0.02, 0.49, 0.98), (0.51, 0.02, 0.98, 0.98)
+
+    def judged(mesh, hidden_seams=False, report=None):
+        result = status.uv_status(mesh, report, 2048, hidden_seams)
+        grade = uv_quality.grade(uv_quality.report(*status.uv_arrays(mesh)))[0]
+        assert result["level"] >= grade, (result["level"], grade, result["checks"])
+        return result
+
+    def bad_checks(result):
+        return [c for c in result["checks"] if c["level"] != status.GREEN]
+
+    def lying_report(mesh):
+        """El informe de uv.check dice que no hay solapes ni espejos: solo el juez los puede ver."""
+        return dict(uv.check(mesh), overlapping_faces=0, flipped_faces=0)
+
+    # dos islas con la misma densidad, bien separadas y llenando la textura: verde, con la línea del juez
+    result = judged(make_uv_planes([left, right]))
+    assert result["level"] == status.GREEN, bad_checks(result)
+    assert any("Densidad de texel igual entre islas" in c["text"] for c in result["checks"]), result["checks"]
+    # una sola isla que llena el cuadro (sin margen ni costuras que medir): verde
+    assert judged(make_uv_planes([(0.0, 0.0, 1.0, 1.0)]))["level"] == status.GREEN
+    # UDIM: dos islas en dos tiles, sin falsa alarma de textura (la suma de áreas pasa de 100 %)
+    udim = make_uv_planes([(0.02, 0.02, 0.98, 0.98), (1.02, 0.02, 1.98, 0.98)])
+    assert uv.check(udim, udim=True)["shells"] == 2
+    assert judged(udim)["level"] == status.GREEN, bad_checks(judged(udim))
+
+    # una isla encima de la otra: rojo, y con el informe de Maya diciendo que no hay solapes lo ve el juez
+    overlapped = make_uv_planes([left, left])
+    result = judged(overlapped)
+    assert result["level"] == status.RED and any("solapadas" in c["text"] and c["advice"] for c in bad_checks(result)), result
+    result = judged(overlapped, report=lying_report(overlapped))
+    assert any(c["level"] == status.RED and "solapadas" in c["text"] and c["advice"] for c in bad_checks(result)), bad_checks(result)
+
+    # una isla en espejo: rojo (idem)
+    mirrored = make_uv_planes([left, (0.98, 0.02, 0.51, 0.98)])
+    result = judged(mirrored, report=lying_report(mirrored))
+    assert any(c["level"] == status.RED and "espejo" in c["text"] and c["advice"] for c in bad_checks(result)), bad_checks(result)
+
+    # una isla con la mitad de densidad que la otra: aviso de densidad (amarillo; con tanta diferencia también salta el estiramiento)
+    result = judged(make_uv_planes([left, (0.51, 0.02, 0.745, 0.5)]))
+    assert any(c["level"] == status.YELLOW and "Densidad de texel" in c["text"] and "Repite 'UVs'" in c["advice"]
+               for c in bad_checks(result)), bad_checks(result)
+
+    # islas separadas por 0,0005 en UV (1 px a 2048): amarillo, y el consejo habla del Padding
+    result = judged(make_uv_planes([(0.02, 0.02, 0.4998, 0.98), (0.5003, 0.02, 0.98, 0.98)]))
+    assert result["level"] == status.YELLOW, bad_checks(result)
+    assert any("casi pegadas" in c["text"] and "Padding" in c["advice"] for c in bad_checks(result)), bad_checks(result)
+
+    # con Costuras escondidas el umbral de textura aprovechada de antes (35 %) deja pasar un 38 %; el juez (40 %), no
+    small = make_uv_planes([(0.19, 0.19, 0.81, 0.81)])
+    assert status._grade(38.44, status.UV_COVERAGE_HIDDEN_PERCENT, higher_is_worse=False) == status.GREEN
+    result = judged(small, hidden_seams=True)
+    assert result["level"] == status.YELLOW, bad_checks(result)
+    assert any("textura aprovechada" in c["text"] and c["advice"] for c in bad_checks(result)), bad_checks(result)
+
+    # dos quads vecinos con el segundo girado 90 en UV: el corte no casa -> amarillo con consejo (no rojo: no es un fallo grave)
+    points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0)]
+    uvs = [(0.02, 0.02), (0.49, 0.02), (0.49, 0.49), (0.02, 0.49),
+           (0.98, 0.02), (0.98, 0.49), (0.51, 0.49), (0.51, 0.02)]
+    turned = make_uv_mesh(points, [[0, 1, 4, 3], [1, 2, 5, 4]], uvs, [[0, 1, 2, 3], [4, 5, 6, 7]])
+    result = judged(turned)
+    assert any(c["level"] == status.YELLOW and "no casan" in c["text"] and "Dividir islas" in c["advice"]
+               for c in bad_checks(result)), bad_checks(result)
+    # lo mismo con el segundo quad sin girar (UVs contiguas, una sola isla): sin avisos
+    flat = make_uv_mesh(points, [[0, 1, 4, 3], [1, 2, 5, 4]], [(0.02, 0.02), (0.49, 0.02), (0.98, 0.02), (0.02, 0.98),
+                                                              (0.49, 0.98), (0.98, 0.98)], [[0, 1, 4, 3], [1, 2, 5, 4]])
+    assert judged(flat)["level"] == status.GREEN, bad_checks(judged(flat))
+
+    # si el juez falla, el paso sale en amarillo con un aviso (nunca verde sin saberlo) y las comprobaciones de antes siguen
+    original = status.uv_quality.report
+    status.uv_quality.report = lambda *args: 1 / 0
+    try:
+        result = status.uv_status(make_uv_planes([left, right]), None, 2048, False)
+    finally:
+        status.uv_quality.report = original
+    assert result["level"] == status.YELLOW, result
+    assert any("No he podido calcular la calidad de las UVs" in c["text"] and c["advice"] for c in result["checks"]), result
+
+
 def make_cube_sphere(name, subdivisions=16, radius=1.0):
     """Esfera de solo quads (un cubo subdividido y redondeado): un retopo limpio, sin triángulos ni polos de 5."""
     cube = cmds.polyCube(width=2, height=2, depth=2, subdivisionsX=subdivisions, subdivisionsY=subdivisions,

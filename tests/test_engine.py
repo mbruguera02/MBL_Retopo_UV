@@ -17,6 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from mbl_engine import analyze, cleanup, closest, decimate, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry  # noqa: E402
+from mbl_engine import scale  # noqa: E402
 from mbl_engine.mesh import Mesh  # noqa: E402
 
 TESTS, RESULTS = [], []
@@ -973,6 +974,107 @@ def test_analyze_warns_about_thin_pieces_even_above_the_minimum():
     # una esfera maciza con caras de sobra no avisa
     ball = uv_sphere(rings=16, segments=24)
     assert analyze.recommend(ball.points, ball.triangles()[0], 3000)[1] is None
+
+
+# ------------------------------------------------------------------ escala de trabajo
+
+BIN = os.path.join(ROOT, "mbl_retopo_uv", "bin")
+
+
+def engines_available():
+    """[(motor, ejecutable)] de los que hay en este equipo (el de compilación del proyecto o el de bin/)."""
+    found = []
+    for engine, names in (("instant_meshes", (INSTANT_MESHES,)),
+                          ("quadriflow", (QUADRIFLOW, os.path.join(BIN, "quadriflow.exe")))):
+        path = next((name for name in names if os.path.isfile(name)), None)
+        if path:
+            found.append((engine, path))
+    return found
+
+
+def bumpy_sphere():
+    """Esfera deformada con ondas (algo parecido a un escaneo orgánico) de diagonal ~11: (puntos, caras)."""
+    sphere = uv_sphere(2.0, 40, 48)
+    points = np.array(sphere.points)
+    bump = 1.0 + 0.08 * np.sin(points[:, 0] * 2.1) * np.cos(points[:, 1] * 1.7) + 0.05 * np.sin(points[:, 2] * 3.3)
+    return points * bump[:, None] * np.array([1.0, 1.3, 1.0]), sphere.faces()
+
+
+@test
+def test_work_scale_factor():
+    """Con un tamaño razonable no se toca nada (identidad exacta); fuera, una potencia de 10 que lleva la diagonal al rango de
+    un decenio, así que el mismo modelo en cm, m o mm llega al motor con el mismo tamaño."""
+    for size in (38.364, 55.575, 251.8, 257.63, scale.DIAGONAL_MIN, 100.0, 299.9):    # mallas del banco y límites del rango
+        assert scale.work_factor(size) == 1.0, size
+    for size, factor in ((21.0, 10.0), (0.21, 1e3), (2100.0, 0.1), (300.0, 0.1), (29.99, 10.0), (1e5, 1e-3), (0.001, 1e5)):
+        assert abs(scale.work_factor(size) / factor - 1.0) < 1e-12, (size, scale.work_factor(size), factor)
+    for size in np.geomspace(1e-6, 1e5, 400):
+        factor = scale.work_factor(size)
+        assert scale.DIAGONAL_MIN * (1 - 1e-9) <= size * factor < scale.DIAGONAL_MAX * (1 + 1e-9), size
+        assert abs(np.log10(factor) - round(np.log10(factor))) < 1e-9, (size, factor)         # potencia de 10
+        assert scale.work_factor(size * factor) == 1.0, size                                    # idempotente
+        for unit in (0.01, 0.1, 10.0, 100.0, 1000.0):                                          # cm, m, mm...
+            other = size * unit
+            assert abs(other * scale.work_factor(other) / (size * factor) - 1.0) < 1e-9, (size, unit)
+    # sin sentido como tamaño: se deja como está
+    for size in (0.0, -3.0, float("nan"), float("inf"), 1e-20, 1e20):
+        assert scale.work_factor(size) == 1.0, size
+    assert scale.diagonal(np.zeros((0, 3))) == 0.0 and abs(scale.diagonal([[0, 0, 0], [3, 4, 12]]) - 13.0) < 1e-12
+
+
+@test
+def test_work_scale_decorator():
+    """at_work_scale: la función ve el modelo a la escala de trabajo, el resultado vuelve a la del modelo y, con un tamaño
+    razonable, recibe los mismos puntos tal cual."""
+    seen, messages = [], []
+
+    @scale.at_work_scale
+    def fake(points, faces, extra=None, log=None):
+        seen.append(np.array(points, dtype=float))
+        return np.array(points, dtype=float) * 0.5, faces, {"kept": True}
+
+    small = np.array([[0.0, 0.0, 0.0], [0.03, 0.04, 0.12], [0.01, 0.0, 0.0]])        # diagonal 0,13
+    new_points, faces, report = fake(small, [[0, 1, 2]], log=messages.append)
+    assert abs(scale.diagonal(seen[0]) - 130.0) < 1e-6, scale.diagonal(seen[0])
+    assert np.allclose(new_points, small * 0.5, rtol=1e-12, atol=0) and faces == [[0, 1, 2]]
+    assert report["kept"] and report["scale"] == 1e3, report
+    assert len(messages) == 1 and "escala x1000" in messages[0], messages
+    normal = np.array([[0.0, 0.0, 0.0], [30.0, 40.0, 120.0], [10.0, 0.0, 0.0]])      # diagonal 130
+    probe = {}
+
+    @scale.at_work_scale
+    def same(points, faces, log=None):
+        probe["points"] = points
+        return points, faces, {}
+    assert same(normal, [[0, 1, 2]], log=messages.append)[2] == {} and probe["points"] is normal and len(messages) == 1
+
+
+@test
+def test_core_retopo_does_not_depend_on_units():
+    """El mismo modelo en cm, en m (x0,01), x10 y x100 da en el núcleo las mismas caras y polos (1 %) y cada resultado
+    queda con el tamaño de su original; best_retopo igual."""
+    points, faces = bumpy_sphere()
+    engines = engines_available()
+    if not engines:
+        print("    (sin motores: se omite)")
+        return
+    for engine, executable in engines:
+        outcomes = []
+        for factor in (1.0, 0.01, 100.0, 10.0):
+            new_points, new_faces, report = retopo.retopo(points * factor, faces, 600, engine, executable, symmetric=False)
+            stats = metrics.topology_stats(Mesh(new_points, new_faces))
+            ratio = scale.diagonal(new_points) / scale.diagonal(points * factor)
+            assert 0.95 < ratio < 1.05, (engine, factor, ratio)
+            assert report.get("scale", 1.0) == scale.work_factor(scale.diagonal(points * factor)), (engine, factor, report)
+            assert ("scale" in report) == (factor != 10.0), (engine, factor, report)       # x10 ya tiene un tamaño razonable
+            outcomes.append((stats["faces"], stats["pole_count"], ratio))
+        base = outcomes[0]
+        for faces_count, poles, ratio in outcomes[1:]:
+            assert abs(faces_count - base[0]) <= 0.01 * base[0] and abs(poles - base[1]) <= 0.01 * base[1], (engine, outcomes)
+            assert abs(ratio / base[2] - 1.0) < 0.01, (engine, outcomes)
+    engine, executable = engines[-1]
+    new_points, new_faces, report = retopo.best_retopo(points * 0.01, faces, 600, engine, executable, variants=1)
+    assert report["scale"] == 1e3 and 0.95 < scale.diagonal(new_points) / scale.diagonal(points * 0.01) < 1.05, report["scale"]
 
 
 if __name__ == "__main__":

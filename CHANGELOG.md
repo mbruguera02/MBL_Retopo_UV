@@ -3,6 +3,12 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.2 (3 de noviembre de 2026)
+
+- **UDIM:** si tras empaquetar el margen entre islas queda por debajo del padding, se reempaqueta con más separación (hasta 2 veces).
+  No se ha podido comprobar con el retopo denso del usuario (no se reprodujo el margen de 0,5 px con mallas de prueba).
+- Sigue pendiente limitar la fragmentación en islas pequeñas de las mallas densas.
+
 ## 1.0.1 (3 de noviembre de 2026)
 
 - **Motor por defecto: Maya.** El Motor MBL queda como experimental; QuadWild se ha quitado. «Automático» e Instant Meshes siguen.

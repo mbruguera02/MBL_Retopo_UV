@@ -926,16 +926,143 @@ def _symmetric_retopo(transform, settings, log, tick, mean, p95):
     return _present(transform, new, settings, log, tick)
 
 
+# atributos del transform que dicen dónde está una malla y cómo gira y escala (con el orden de giro y el
+# "hereda transformación"; cada pivote es local, relativo al origen del transform)
+PLACEMENT_ATTRS = ("translate", "rotate", "scale", "shear", "rotateAxis", "rotatePivot", "scalePivot",
+                   "rotatePivotTranslate", "scalePivotTranslate")
+PIVOT_ATTRS = PLACEMENT_ATTRS[5:]
+
+
+def _parent_of(node):
+    return (cmds.listRelatives(node, parent=True, fullPath=True) or [None])[0]
+
+
+def _placement_values(node):
+    values = [cmds.getAttr(node + ".rotateOrder"), cmds.getAttr(node + ".inheritsTransform")]
+    for attr in PLACEMENT_ATTRS:
+        values.extend(cmds.getAttr(node + "." + attr)[0])
+    return np.array(values, dtype=float)
+
+
+def _same_placement(source, new):
+    """Mismo grupo, misma transformación y mismos pivotes (el caso del motor de Maya cuando no rehizo la malla)."""
+    return (_parent_of(source) == _parent_of(new)
+            and np.allclose(_placement_values(source), _placement_values(new), rtol=0, atol=1e-9))
+
+
+def _at_origin(node):
+    """Sin padre ni transformación: los puntos de la malla ya son los del mundo (así sale de meshbuild)."""
+    if _parent_of(node):
+        return False
+    rest = {"translate": 0.0, "rotate": 0.0, "scale": 1.0, "shear": 0.0, "rotateAxis": 0.0}
+    return all(abs(value - rest[attr]) < 1e-9 for attr in rest for value in cmds.getAttr(node + "." + attr)[0])
+
+
+def _freeze(node):
+    cmds.makeIdentity(node, apply=True, translate=True, rotate=True, scale=True, normal=0, preserveNormals=True)
+
+
+def _match_placement(source, new, log=default_log):
+    """Deja `new` en el grupo de `source`, con su transformación y sus pivotes, sin mover un vértice en el mundo.
+
+    meshbuild (y con él casi todos los pasos del retopo) rehace la malla en la raíz, sin transformación y con el
+    pivote en el origen: se perdía el grupo, el movimiento y el pivote que el artista había puesto. Se hace con
+    comandos (parent, makeIdentity, setAttr) para que un solo Ctrl+Z lo deshaga y Rehacer lo repita igual.
+    Devuelve el transform de `new`: su ruta larga cambia al cambiar de grupo."""
+    if _same_placement(source, new):
+        return new
+    name = short_name(source)
+    world = np.array(cmds.xform(source, query=True, matrix=True, worldSpace=True), dtype=float).reshape(4, 4)
+    if abs(np.linalg.det(world)) < 1e-12:
+        log("{}: el original tiene escala cero; el retopo no hereda su transformación.".format(name), "warning")
+        return new
+    uuid = cmds.ls(new, uuid=True)[0]
+    before = mesh_arrays(new)[0]
+    # 1) puntos del mundo, en la raíz y con el transform limpio
+    if not _at_origin(new):
+        if _parent_of(new):
+            cmds.parent(new, world=True)
+            new = cmds.ls(uuid, long=True)[0]
+        _freeze(new)
+    # 2) puntos en el espacio de objeto del original: se multiplican por la inversa de su matriz de mundo
+    for attr in PIVOT_ATTRS:
+        cmds.setAttr(new + "." + attr, 0, 0, 0, type="double3")
+    cmds.setAttr(new + ".rotateOrder", 0)
+    cmds.xform(new, matrix=np.linalg.inv(world).flatten().tolist())
+    _freeze(new)
+    if np.linalg.det(world) < 0:
+        # original con escala negativa (espejo): el sentido de las caras se invierte al pasar al espacio de objeto
+        cmds.polyNormal(new, normalMode=0, userNormalMode=0, constructionHistory=False)
+    # 3) en el grupo del original (a continuación de él) y con su transformación y sus pivotes
+    parent = _parent_of(source)
+    if parent:
+        cmds.parent(new, parent, relative=True)
+        new = cmds.ls(uuid, long=True)[0]
+        siblings = cmds.listRelatives(parent, children=True, type="transform", fullPath=True) or []
+        source_long = cmds.ls(source, long=True)[0]
+        if source_long in siblings and new in siblings:
+            offset = siblings.index(source_long) + 1 - siblings.index(new)
+            if offset < 0:
+                cmds.reorder(new, relative=offset)
+    for attr in ("rotateOrder", "inheritsTransform"):
+        try:
+            cmds.setAttr(new + "." + attr, cmds.getAttr(source + "." + attr))
+        except RuntimeError:
+            pass
+    for attr in PLACEMENT_ATTRS:
+        cmds.setAttr(new + "." + attr, *cmds.getAttr(source + "." + attr)[0], type="double3")
+    # comprobación: ningún vértice debe haberse movido en el mundo
+    drift = float(np.abs(mesh_arrays(new)[0] - before).max())
+    if drift > 1e-4 * max(float(np.ptp(before, axis=0).max()), 1e-9):
+        log("{}: al heredar la transformación del original el retopo se desplazó {:.4g}; revisa su posición."
+            .format(name, drift), "warning")
+    log("{}: el retopo hereda el grupo, la transformación y el pivote del original.".format(name))
+    return new
+
+
+def _copy_materials(source, new):
+    """Materiales del original en `new`: cada cara recibe el de la cara más cercana del original (un modelo con
+    dos o más materiales conserva cada uno en su zona); con uno solo, todo el objeto. Devuelve cuántos reparte."""
+    path = dag_path(mesh_shape(source))
+    shaders, per_face = om.MFnMesh(path).getConnectedShaders(path.instanceNumber())
+    names = [om.MFnDependencyNode(shaders[i]).name() for i in range(len(shaders))]
+    per_face = np.array(per_face, dtype=int)
+    used = sorted(set(per_face[per_face >= 0].tolist()))
+    if not used:
+        return 0
+    if len(used) == 1:
+        cmds.sets(new, edit=True, forceElement=names[used[0]])
+        return 1
+    points, faces = mesh_arrays(new)
+    intersector = om.MMeshIntersector()
+    intersector.create(path.node(), path.inclusiveMatrix())
+    owner = np.empty(len(faces), dtype=int)
+    for i, face in enumerate(faces):
+        x, y, z = points[face].mean(axis=0)
+        owner[i] = per_face[intersector.getClosestPoint(om.MPoint(x, y, z)).face]
+    # las caras sin material en el original se quedan con el de serie
+    groups = {index: (names[index] if index >= 0 else "initialShadingGroup") for index in set(owner.tolist())}
+    biggest = max(groups, key=lambda index: int(np.count_nonzero(owner == index)))
+    cmds.sets(new, edit=True, forceElement=groups[biggest])
+    for index, group in groups.items():
+        if index != biggest:
+            cmds.sets(components(new, "f", np.flatnonzero(owner == index).tolist()), edit=True, forceElement=group)
+    return len(groups)
+
+
 def _present(transform, new, settings, log, tick):
-    """Aristas suaves, material del original, original oculto, enlace y diagnóstico."""
+    """Aristas suaves, grupo/transformación/pivote/materiales del original, original oculto, enlace y diagnóstico."""
     name = short_name(transform)
     angle = settings["retopo_crease_angle"] if settings["retopo_crease_angle"] > 0 else 180
     cmds.polySoftEdge(new, angle=angle, constructionHistory=False)
 
-    # mismo material que el original
-    shading_groups = cmds.listConnections(mesh_shape(transform), type="shadingEngine") or []
-    if shading_groups:
-        cmds.sets(new, edit=True, forceElement=shading_groups[0])
+    # lo que el artista tenía puesto en el original: grupo, transformación, pivote y materiales
+    # (la mitad de un modelo simétrico es un resto que se tira: no hace falta)
+    if not settings.get("_symmetry_half"):
+        new = _match_placement(transform, new, log)
+        materials = _copy_materials(transform, new)
+        if materials > 1:
+            log("{}: {} materiales del original repartidos por zonas.".format(name, materials))
 
     try:
         cmds.setAttr(transform + ".visibility", 0)

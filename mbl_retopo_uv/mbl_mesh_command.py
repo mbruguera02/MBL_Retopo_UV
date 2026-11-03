@@ -21,6 +21,7 @@ class CreateMeshCommand(om.MPxCommand):
         self._data = None
         self._node_name = ""
         self._node = None
+        self._deleted = None
 
     @staticmethod
     def creator():
@@ -44,6 +45,12 @@ class CreateMeshCommand(om.MPxCommand):
         self.redoIt()
 
     def redoIt(self):
+        if self._deleted is not None:
+            # rehacer tras deshacer: vuelve el MISMO nodo. Crear otro hacía que lo que se rehace después (asignar
+            # el material, ocultar el original...) apuntara a un nodo que ya no existe y Maya se cerraba
+            self._deleted.undoIt()
+            self._deleted = None
+            return
         points, counts, connects = self._data
         transform = om.MFnMesh().create(points, counts, connects)
         dag = om.MFnDagNode(transform)
@@ -57,6 +64,7 @@ class CreateMeshCommand(om.MPxCommand):
             modifier = om.MDagModifier()
             modifier.deleteNode(self._node.object())
             modifier.doIt()
+            self._deleted = modifier
 
 
 def initializePlugin(plugin):

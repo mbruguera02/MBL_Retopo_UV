@@ -433,6 +433,177 @@ def test_hidden_seams():
     assert graph.all_disks(set(new))[0] and info["cost_after"] <= info["cost_before"] + 1e-9, info
 
 
+def _reference_charts(graph, seams):
+    """charts() de siempre (union-find en Python), para comparar con la versión de numpy."""
+    parent = list(range(graph.face_count))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for e, faces in enumerate(graph.edge_f):
+        if len(faces) == 2 and e not in seams:
+            a, b = find(faces[0]), find(faces[1])
+            if a != b:
+                parent[a] = b
+    roots = {}
+    return [roots.setdefault(find(f), len(roots)) for f in range(graph.face_count)], len(roots)
+
+
+def _reference_euler(graph, seams):
+    """all_disks() de siempre (recorrido por caras, aristas y vértices): característica de Euler de cada isla."""
+    chart, count = _reference_charts(graph, seams)
+    euler = [0] * count
+    seam_vertices = {v for e in seams for v in graph.edge_v[e]}
+    for loop in graph.loops:
+        if loop & seam_vertices:
+            continue
+        edge = next(e for e in graph.vertex_edges[next(iter(loop))] if e in graph.border)
+        euler[chart[graph.edge_f[edge][0]]] += 1
+    for f in range(graph.face_count):
+        euler[chart[f]] += 1
+    for e, faces in enumerate(graph.edge_f):
+        if len(faces) == 2 and e not in seams:
+            euler[chart[faces[0]]] -= 1
+        else:
+            for f in faces:
+                euler[chart[f]] -= 1
+    for v, edges in enumerate(graph.vertex_edges):
+        faces = set()
+        for e in edges:
+            faces.update(graph.edge_f[e])
+        parent = {f: f for f in faces}
+
+        def find(x):
+            while parent[x] != x:
+                x = parent[x]
+            return x
+        for e in edges:
+            ef = graph.edge_f[e]
+            if len(ef) == 2 and e not in seams:
+                a, b = find(ef[0]), find(ef[1])
+                if a != b:
+                    parent[a] = b
+        for root in {find(f) for f in faces}:
+            euler[chart[root]] += 1
+    return euler, count
+
+
+def _reference_paths(graph, start, blocked_vertices, blocked_edges):
+    """_paths() de siempre (Dijkstra completo, sin parada anticipada)."""
+    import heapq
+    starts = set(start) if isinstance(start, (set, frozenset, list, tuple)) else {start}
+    best = {(v, -1): 0.0 for v in starts}
+    prev, dist, arrival = {}, {v: 0.0 for v in starts}, {v: (v, -1) for v in starts}
+    heap = [(0.0, v, -1) for v in starts]
+    heapq.heapify(heap)
+    while heap:
+        d, v, came = heapq.heappop(heap)
+        if d > best.get((v, came), math.inf):
+            continue
+        if v in blocked_vertices and v not in starts:
+            continue
+        came_faces = set(graph.edge_f[came]) if came >= 0 else ()
+        for e in graph.vertex_edges[v]:
+            if e in blocked_edges or e == came:
+                continue
+            a, b = graph.edge_v[e]
+            w = b if a == v else a
+            step = graph.cost[e]
+            if came_faces and came_faces.intersection(graph.edge_f[e]):
+                step += graph.TURN_PENALTY * graph.cost[e]
+            nd = d + step
+            if nd < best.get((w, e), math.inf):
+                best[(w, e)] = nd
+                prev[(w, e)] = (v, came)
+                heapq.heappush(heap, (nd, w, e))
+                if nd < dist.get(w, math.inf):
+                    dist[w] = nd
+                    arrival[w] = (w, e)
+    return dist, (prev, arrival)
+
+
+@test
+def test_uv_seam_graph_matches_reference():
+    """charts, all_disks y _paths (con y sin parada anticipada) dan lo mismo que los recorridos en Python de siempre,
+    en un cubo, un toro y una esfera con agujero."""
+    import random
+    from mbl_retopo_uv import uv_seams
+    rng = random.Random(11)
+    sphere = cmds.polySphere(subdivisionsX=12, subdivisionsY=8, constructionHistory=False)[0]
+    cmds.delete(sphere + ".f[20:22]")
+    meshes = [cmds.polyCube(constructionHistory=False)[0],
+              cmds.polyTorus(radius=3, sectionRadius=1, subdivisionsX=16, subdivisionsY=8, constructionHistory=False)[0],
+              sphere]
+    for mesh in meshes:
+        graph = uv_seams.SeamGraph(mesh)
+        edges = list(range(len(graph.edge_v)))
+        for _ in range(30):
+            seams = set(rng.sample(edges, rng.randint(0, max(1, len(edges) // 3))))
+            chart, count = graph.charts(seams)
+            ref_chart, ref_count = _reference_charts(graph, seams)
+            assert count == ref_count and list(chart) == ref_chart, (mesh, "charts")
+            ok, n = graph.all_disks(seams)
+            euler, ref_n = _reference_euler(graph, seams)
+            assert n == ref_n and list(graph._euler) == euler, (mesh, "euler", list(graph._euler), euler)
+            assert ok == (sum(1 for x in euler if x != 1) <= graph.tolerated)
+        vertices = range(len(graph.points))
+        for _ in range(20):
+            picked = rng.sample(vertices, min(6, len(vertices)))
+            sources, targets = set(picked[:2]), set(picked[2:])
+            blocked = set(rng.sample(vertices, 3)) - sources
+            blocked_edges = set(rng.sample(edges, len(edges) // 6))
+            ref_dist, ref_trail = _reference_paths(graph, sources, blocked, blocked_edges)
+            dist, trail = graph._paths(sources, blocked, blocked_edges)
+            assert dist == ref_dist, (mesh, "dijkstra")
+            allowed = [e not in blocked_edges for e in edges]
+            dist_stop, trail_stop = graph._paths(sources, blocked, (), allowed, targets)
+            reach = [v for v in targets if v in ref_dist]
+            assert [v for v in targets if v in dist_stop] or not reach, (mesh, "parada: sin destino")
+            if not reach:
+                continue
+            end = min(reach, key=ref_dist.get)
+            end_stop = min([v for v in targets if v in dist_stop], key=dist_stop.get)
+            assert end_stop == end and dist_stop[end] == ref_dist[end], (mesh, "parada: otro destino")
+            assert graph._trace(trail_stop, None, end) == graph._trace(ref_trail, None, end), (mesh, "parada: otro camino")
+
+
+@test
+def test_uv_seam_edges_and_areas_match_reference():
+    """uv_seam_edges (con SeamGraph) y _face_shell_areas dan lo mismo que los recorridos por caras de siempre,
+    también con caras sin UVs."""
+    from mbl_retopo_uv import uv_seams
+    for make in (lambda: cmds.polyTorus(radius=3, sectionRadius=1, subdivisionsX=12, subdivisionsY=8,
+                                        constructionHistory=False)[0],
+                 lambda: cmds.polySphere(subdivisionsX=10, subdivisionsY=6, constructionHistory=False)[0]):
+        mesh = make()
+        cmds.polyAutoProjection(mesh + ".f[*]", planes=6, layoutMethod=0, layout=0, optimize=1, percentageSpace=0.0,
+                                constructionHistory=False)
+        graph = uv_seams.SeamGraph(mesh)
+        assert uv.uv_seam_edges(mesh, graph) == uv.uv_seam_edges(mesh) and uv.uv_seam_edges(mesh), mesh
+        # caras sin UVs: el recorrido de siempre las trata como una UV distinta de cualquiera
+        cmds.polyMapDel(mesh + ".f[3:5]")
+        assert uv.uv_seam_edges(mesh, graph) == uv.uv_seam_edges(mesh), mesh
+    # área con signo por cara, como se calculaba con un bucle de Python
+    fn = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh)))
+    _, shell_ids = fn.getUvShellsIds()
+    us, vs = fn.getUVs()
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    expected, offset = [], 0
+    for face, count in enumerate(uv_counts):
+        ids = uv_ids[offset:offset + count]
+        offset += count
+        if count < 3:
+            continue
+        area = 0.0
+        for i in range(count):
+            a, b = ids[i], ids[(i + 1) % count]
+            area += us[a] * vs[b] - us[b] * vs[a]
+        expected.append((face, shell_ids[ids[0]], area * 0.5))
+    assert uv._face_shell_areas(mesh) == expected
+
+
 @test
 def test_pole_cleanup():
     """Un giro de arista en una rejilla crea 4 polos; la limpieza los quita."""
@@ -506,6 +677,92 @@ def test_maya_engine():
         error = diagnostics.surface_error(original, result)
         assert error["mean_percent"] < 1.0, (result, error)
         assert_good_uvs(result)
+
+
+def make_dressed_model():
+    """Esfera de 384 caras con dos materiales por zonas (arriba rojo, abajo azul), dentro de un grupo movido y
+    girado, con el pivote fuera del centro y una transformación propia (trasladada, girada y escalada)."""
+    sphere = cmds.polySphere(name="vestida", radius=1.5, subdivisionsX=24, subdivisionsY=16,
+                             constructionHistory=False)[0]
+    groups = {}
+    for name, color in (("rojo", (1, 0, 0)), ("azul", (0, 0, 1))):
+        shader = cmds.shadingNode("lambert", asShader=True, name=name)
+        cmds.setAttr(shader + ".color", *color, type="double3")
+        groups[name] = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=name + "SG")
+        cmds.connectAttr(shader + ".outColor", groups[name] + ".surfaceShader")
+    it = om.MItMeshPolygon(om.MSelectionList().add(sphere).getDagPath(0))
+    top, bottom = [], []
+    while not it.isDone():
+        (top if it.center(om.MSpace.kObject).y > 0 else bottom).append("{}.f[{}]".format(sphere, it.index()))
+        it.next()
+    cmds.sets(top, forceElement=groups["rojo"])
+    cmds.sets(bottom, forceElement=groups["azul"])
+    group = cmds.group(sphere, name="grupoVestida")
+    cmds.xform(group, translation=(10, 0, 0), rotation=(0, 45, 0))
+    cmds.xform(sphere, translation=(3, 1, -2), rotation=(20, 35, 10), scale=(1, 1.5, 1))
+    cmds.xform(sphere, worldSpace=True, pivots=(0.5, -1, 0.2))
+    return cmds.ls(sphere, long=True)[0]
+
+
+def material_zones(result, original):
+    """{material: (caras, fracción de ellas en su zona)}: arriba (y local del original > -0,2) el rojo, abajo el azul."""
+    path = retopo.dag_path(retopo.mesh_shape(result))
+    shaders, per_face = om.MFnMesh(path).getConnectedShaders(0)
+    names = [om.MFnDependencyNode(shaders[i]).name() for i in range(len(shaders))]
+    points, faces = retopo.mesh_arrays(result)
+    inverse = np.linalg.inv(np.array(cmds.xform(original, query=True, matrix=True, worldSpace=True)).reshape(4, 4))
+    out = {}
+    for name in ("rojoSG", "azulSG"):
+        mine = [f for f, s in enumerate(per_face) if s >= 0 and names[s] == name]
+        local_y = [(np.append(points[faces[f]].mean(axis=0), 1.0) @ inverse)[1] for f in mine]
+        inside = [(y > -0.2) if name == "rojoSG" else (y < 0.2) for y in local_y]
+        out[name] = (len(mine), float(np.mean(inside)) if mine else 0.0)
+    return out
+
+
+def assert_same_placement(original, result):
+    """Mismo grupo, mismos pivotes y transformación y misma caja envolvente del mundo."""
+    assert cmds.listRelatives(result, parent=True, fullPath=True) == cmds.listRelatives(original, parent=True,
+                                                                                         fullPath=True), result
+    for attr in ("translate", "rotate", "scale", "rotatePivot", "scalePivot"):
+        assert np.allclose(cmds.getAttr(original + "." + attr)[0], cmds.getAttr(result + "." + attr)[0],
+                           atol=1e-6), (attr, cmds.getAttr(original + "." + attr), cmds.getAttr(result + "." + attr))
+    for flag in ("rotatePivot", "scalePivot"):
+        assert np.allclose(cmds.xform(original, query=True, worldSpace=True, **{flag: True}),
+                           cmds.xform(result, query=True, worldSpace=True, **{flag: True}), atol=1e-6), flag
+    a, b = retopo.mesh_arrays(original)[0], retopo.mesh_arrays(result)[0]
+    diagonal = float(np.linalg.norm(np.ptp(a, axis=0)))
+    assert np.abs(a.min(axis=0) - b.min(axis=0)).max() < 0.02 * diagonal, (a.min(axis=0), b.min(axis=0))
+    assert np.abs(a.max(axis=0) - b.max(axis=0)).max() < 0.02 * diagonal, (a.max(axis=0), b.max(axis=0))
+
+
+def assert_keeps_everything(original, result):
+    """El _retopo no pierde nada del original: nombre base, grupo, transformación, pivote y materiales por zonas."""
+    assert result.split("|")[-1] == "vestida_retopo", result
+    assert_same_placement(original, result)
+    zones = material_zones(result, original)
+    total = cmds.polyEvaluate(result, face=True)
+    for name, (count, inside) in zones.items():
+        assert count > 0.25 * total, "el material {} casi no está en el retopo: {}".format(name, zones)
+        assert inside > 0.95, "el material {} se salió de su zona: {}".format(name, zones)
+
+
+@test
+def test_retopo_keeps_materials_pivot_transform_and_group():
+    """El _retopo hereda del original los dos materiales (cada uno en su zona), el pivote, la transformación y el grupo;
+    con el motor de Maya (que rehace la malla en la raíz al limpiar polos) y con un solo Ctrl+Z."""
+    original = make_dressed_model()
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    outcome = pipeline.run([original], ["retopo"], base_settings(retopo_engine="maya", retopo_target_faces=300),
+                           quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    result = outcome["results"][0]
+    assert_keeps_everything(original, result)
+    assert diagnostics.find_source(result) == original
+    cmds.undo()
+    assert not cmds.ls("vestida_retopo*"), "quedó el retopo tras deshacer"
+    assert cmds.getAttr(original + ".visibility"), "el original sigue oculto tras deshacer"
 
 
 @test
@@ -1034,6 +1291,27 @@ def test_diagnostics():
     assert diagnostics.clear_pole_colors(cube)
     assert not cmds.polyColorSet(cube, query=True, allColorSets=True)
     assert report["pole_count"] == 8
+
+
+@test
+def test_redo_after_undo_keeps_the_scene():
+    """Ctrl+Z y Ctrl+Y alrededor de un retopo: vuelve la misma malla (antes Maya se cerraba al rehacer)."""
+    mesh = make_dense_mesh()
+    settings = base_settings(retopo_engine="maya", retopo_target_faces=800)
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    meshes_before = sorted(cmds.ls(type="mesh", long=True))
+    outcome = pipeline.run([mesh], ["retopo"], settings, lambda m, level="info": None)
+    assert not outcome["errors"], outcome["errors"]
+    meshes_after = sorted(cmds.ls(type="mesh", long=True))
+    for _ in range(2):
+        cmds.undo()
+        assert sorted(cmds.ls(type="mesh", long=True)) == meshes_before, "quedaron mallas tras deshacer"
+        cmds.redo()
+        assert sorted(cmds.ls(type="mesh", long=True)) == meshes_after, "no volvió la malla al rehacer"
+    result = outcome["results"][0]
+    assert cmds.objExists(result) and cmds.getAttr(mesh + ".visibility") is False
+    assert cmds.listConnections(result, type="shadingEngine") or cmds.listConnections(cmds.listRelatives(result, shapes=True)[0], type="shadingEngine")
 
 
 @test

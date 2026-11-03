@@ -412,6 +412,34 @@ La línea base de `baseline.json` se midió con el PC ocupado; con el PC libre e
 
 **Un aviso sobre el determinismo**: QuadriFlow SÍ es determinista (misma entrada y petición: 8 de 8 salidas idénticas, también con 16 procesos ocupando la CPU). Pero la variante 1 del prop no es reproducible entre ejecuciones del pipeline, tampoco con el código sin tocar: 4.793 caras/97 polos, 4.800/200, 4.788/116 (error 2,45 %) y 4.732/436 en cuatro ejecuciones; las variantes 2 y 3 sí salen siempre iguales. Algo anterior al motor (¿el orden de vértices que deja la separación de no-manifold de Maya?) cambia la entrada. Sin resolver; cuando pasa, gana otra variante y el prop sale con error 0,150 % en vez de 0,082 %.
 
+## El _retopo conserva materiales, pivote, transformación y grupo (3 de noviembre)
+
+`meshbuild.create_mesh` crea la malla en la raíz, sin transformación y con el pivote en el origen, con los puntos en mundo. Casi todos
+los pasos del retopo rehacen la malla así (agujeros nuevos, limpieza de polos y relajación, `make_unfoldable`, Motor MBL, Instant
+Meshes, simetría), de modo que el `_retopo` salía fuera del grupo, sin el movimiento ni el pivote del original y con un solo material
+(el primero que devolvía `listConnections`). Con el modelo de prueba (esfera de 384 caras, grupo girado, trasladada/girada/escalada,
+pivote movido, dos materiales) y el motor de Maya el `_retopo` salía en `|vestida_retopo`, pivote (0,0,0) y todo azul.
+
+`_present` llama ahora a dos funciones de `retopo.py`:
+
+- `_match_placement(original, nuevo)`: si grupo, atributos del transform y pivotes ya coinciden (motor de Maya sin rehacer la malla) no
+  hace nada. Si no: lleva la malla a la raíz y congela (puntos en mundo), la multiplica por la inversa de la matriz de mundo del original
+  (`xform -matrix` + `makeIdentity`), la mete en el grupo a continuación del original y copia `rotateOrder`, `translate`, `rotate`,
+  `scale`, `shear`, `rotateAxis` y los cuatro pivotes. Solo comandos de `cmds`: un Ctrl+Z lo deshace con el resto. `MFnMesh.setPoints`
+  no sirve porque no entra en el deshacer. Si el original tiene escala negativa se invierten las caras (el sentido se da la vuelta al
+  pasar al espacio de objeto). Comprueba al final que ningún vértice se movió en mundo y avisa si no.
+- `_copy_materials(original, nuevo)`: `MFnMesh.getConnectedShaders` del original y, con 2 o más materiales, cada cara del retopo toma el
+  de la cara más cercana del original (`MMeshIntersector`, `.face`); el más repetido va al objeto entero y el resto por caras.
+
+Comprobado en mayapy con `maya`, `instant_meshes` (sustituto), `mbl`, `auto` y simetría `x`: grupo, pivotes, caja envolvente (menos del
+2 % de la diagonal) y materiales (más del 95 % de las caras de cada uno en su zona), también con shear, orden de giro distinto, pivotes
+de escala, grupos anidados con escala no uniforme y sin grupo. Sin cambios en caras, polos ni error del banco (human, `maya`: 5.095
+caras, 174 polos, igual que `baseline.json`).
+
+Hallazgo fuera de esta tarea: **Rehacer (Ctrl+Y) tras deshacer el comando `mblCreateMesh` cierra Maya** (fallo fatal en `redoIt`; pasa con
+cualquier `create_mesh` en mayapy, también en la rama base, sin tocar nada de esto). Deshacer funciona bien. Y `baseline.json` guarda
+`status.retopo = 0` para human/maya, de antes del juez en el semáforo; con el código actual (también en 4020e31 sin esta rama) sale 2.
+
 ## Motores descartados
 
 Motores que se probaron, se midieron y se quitaron del plugin. Las cifras se guardan aquí por si hay que volver a decidir.
@@ -446,3 +474,60 @@ Motores que se probaron, se midieron y se quitaron del plugin. Las cifras se gua
 - **Polos:** en QuadWild dependen casi solo de la forma del modelo, no del número de caras. Por eso compensaba con muchas caras y en mallas limpias, y perdía con pocas.
 - **Agujeros:** con mallas sucias (el águila) algunos parches no se cuadraban y quedaban agujeros que el original no tiene. Rellenarlos metía n-gons y polos de 6+ aristas y el error de forma se triplicaba: error máximo 5,2 % y 0,5 % de polos de 6+ (el semáforo del retopo avisa de ese caso).
 - **Tiempo:** entre 20 y 90 s.
+
+## Tiempo del paso de UVs (3 de noviembre)
+
+**Dónde se iba el tiempo.** Perfil (`cProfile` con mayapy, retopo de Maya a 5.000 caras, humano / prop / hardsurface). Dos tercios del paso
+no eran Maya sino Python puro de `uv_seams.py` (las costuras de sastre):
+
+| | humano | prop | hardsurface |
+|---|---|---|---|
+| paso de UVs con el perfilador | 32,8 s | 23,4 s | 8,9 s |
+| comandos de Unfold3D (`u3dUnfold`, `u3dOptimize`, `u3dLayout`, `u3dAutoSeam`) | 7,0 s | 7,1 s | 3,8 s |
+| `optimize_seams` (Python) | 22,4 s | 14,1 s | 1,0 s |
+| de ello `charts()` (union-find, 838 llamadas en el humano) | 11,3 s | 5,9 s | |
+| de ello `all_disks()` (135 llamadas) | 7,5 s | 4,9 s | |
+| de ello Dijkstra `_paths()` (345 llamadas) | 3,1 s | 1,6 s | |
+| rayos de visibilidad (`anyIntersection`, 2 grafos en el humano) | 2,6 s | 2,4 s | 1,0 s |
+
+**Qué se cambió (mismo resultado):** las UVs salen iguales que antes en humano y hardsurface (idénticas bit a bit) y en el prop (solo
+difieren en el sexto decimal; Unfold3D ya no repite a ese nivel ni consigo mismo).
+
+- `charts()` y `all_disks()` con numpy: componentes por salto de punteros; la característica de Euler se saca de tablas
+  (esquinas, enlaces entre caras, agujeros) y no recorriendo caras y vértices. Resultado guardado por conjunto de costuras.
+- `reroute_slits()` mide las islas una vez por vuelta (las costuras no cambian dentro de ella) y arma las máscaras con numpy.
+- `_paths()` para al terminar la capa del primer destino alcanzado: distancias y camino de los destinos son los del recorrido completo
+  (costes positivos), y quien llama solo mira los destinos.
+- Un solo `SeamGraph` por desplegado (antes 5-6): la visibilidad por rayos y el espejo se calculan una vez.
+- `uv_seam_edges` (con el grafo) y `_face_shell_areas` con numpy.
+- Pruebas: `test_uv_seam_graph_matches_reference` y `test_uv_seam_edges_and_areas_match_reference` comparan con los recorridos de siempre.
+
+**Medidas** (`tests/bench.py`, motor `maya`, 5.000 caras, segundos del paso de UVs; misma sesión, una detrás de otra):
+
+| modelo | línea base | `main` ahora | esta rama | calidad |
+|---|---|---|---|---|
+| humano | 32,8 | 19,0 | 9,5 (-50 %) | igual (28 islas, 60,3 % usado, 3,5 % > 1,5x, racord 27,5) |
+| prop | 16,5 | 13,2 | 8,9 (-33 %) | igual |
+| hardsurface | 6,8 | 6,9 | 5,3 (-23 %) | igual |
+| criatura | 43,2 | | 22,4 | usado 64,59 -> 64,8; > 1,5x 7,41 -> 7,43; racord 23,1 -> 23,9; 68 islas |
+| midnight | 37,4 | | 21,7 | igual |
+
+La línea base se midió con el equipo más cargado que ahora; la columna `main` es la comparación justa. Lo que queda es casi todo Unfold3D
+(humano: 7,4 s de los 9 s; prop: 6,2 s) más 1,3 s de rayos de visibilidad en el prop.
+
+**Probado y descartado:**
+
+- Visibilidad por rayos calculada solo en los vértices que hacen falta: en el prop se acaba usando casi toda la malla (159.454 rayos
+  igual que antes), 0 s de ganancia.
+- Volver a desplegar solo las islas que cambian en el segundo intento de las costuras de sastre (en vez de rehacer la copia): el humano pasaba
+  de 28 a 30 islas, > 1,5x de 3,51 a 3,81 % y el tiempo casi no bajaba (9,2 s frente a 8,9 s).
+- Candidatos del empaquetado final (`best_layout`, `uv_pack_tries` = 3), textura aprovechada de cada uno y lo que tarda:
+
+| modelo | base (512, 5 pasadas) | 1024, 5 pasadas | 512, 10 pasadas |
+|---|---|---|---|
+| humano | 60,258 (0,24 s) | 60,258 (0,69 s) | 60,258 (0,45 s) |
+| prop | 59,135 (0,20 s) | 59,137 (0,56 s) | 60,288 (0,37 s) |
+| hardsurface | 56,010 (0,19 s) | 56,030 (0,50 s) | 56,010 (0,36 s) |
+
+  El candidato de 1024 es el más caro y en estos tres modelos no aporta nada (+0,002 y +0,02 puntos); el de 10 pasadas solo gana en el
+  prop (+1,15). No se ha tocado (afectaría a otras mallas, como el águila, que no están en el banco); quitarlo ahorraría 0,5-0,7 s.

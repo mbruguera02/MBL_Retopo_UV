@@ -1037,6 +1037,27 @@ def test_diagnostics():
 
 
 @test
+def test_redo_after_undo_keeps_the_scene():
+    """Ctrl+Z y Ctrl+Y alrededor de un retopo: vuelve la misma malla (antes Maya se cerraba al rehacer)."""
+    mesh = make_dense_mesh()
+    settings = base_settings(retopo_engine="maya", retopo_target_faces=800)
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    meshes_before = sorted(cmds.ls(type="mesh", long=True))
+    outcome = pipeline.run([mesh], ["retopo"], settings, lambda m, level="info": None)
+    assert not outcome["errors"], outcome["errors"]
+    meshes_after = sorted(cmds.ls(type="mesh", long=True))
+    for _ in range(2):
+        cmds.undo()
+        assert sorted(cmds.ls(type="mesh", long=True)) == meshes_before, "quedaron mallas tras deshacer"
+        cmds.redo()
+        assert sorted(cmds.ls(type="mesh", long=True)) == meshes_after, "no volvió la malla al rehacer"
+    result = outcome["results"][0]
+    assert cmds.objExists(result) and cmds.getAttr(mesh + ".visibility") is False
+    assert cmds.listConnections(result, type="shadingEngine") or cmds.listConnections(cmds.listRelatives(result, shapes=True)[0], type="shadingEngine")
+
+
+@test
 def test_undo_restores_scene():
     cube = cmds.ls(cmds.polyCube(constructionHistory=False)[0], long=True)[0]
     cmds.move(1, 1, 1, cube)

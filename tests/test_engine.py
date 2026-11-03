@@ -1249,6 +1249,14 @@ def test_uv_quality_is_fast_and_grades_the_baseline_as_acceptable():
                         seam_percent=seam, islands=30, margin_min=0.004, texel_variation_percent=10.0)
             level, reasons = uv_quality.grade(case)
             assert level < 2, (used, over, mean, rot, reasons)
+    # lo que dio uv_quality.report sobre el prop, el humano y el hardsurface (retopo de Maya a 5.000 caras): nota 0
+    # (usado, > 1,5x, estiramiento, continuidad, costuras, margen, variación de texel)
+    measured = [(60.2777, 1.228, 1.0687, 10.8952, 5.9499, 0.0052, 0.1421), (60.3128, 3.5132, 1.0772, 17.0262, 7.2752, 0.0053, 0.0811),
+                (56.0299, 9.7298, 1.1413, 0.2417, 3.8445, 0.0061, 0.0039)]
+    for used, over, mean, racord, seam, margin, texel in measured:
+        case = dict(rep, used_percent=used, over_1_5_percent=over, stretch_mean=mean, racord_percent=racord,
+                    seam_percent=seam, islands=20, margin_min=margin, texel_variation_percent=texel)
+        assert uv_quality.grade(case) == (0, []), (uv_quality.grade(case), case)
 
 
 if __name__ == "__main__":

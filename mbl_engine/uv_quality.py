@@ -386,17 +386,19 @@ def report(points, faces, uv_points, uv_faces):
 
 
 # umbral (revisar, malo) de cada cifra, PROPIOS y provisionales (la nota usa >= en los que suben con lo feo y <= en
-# LOWER_IS_WORSE). None = esa cifra no llega nunca a "malo" por sí sola. Cómo se eligieron: ver docs/notas-tecnicas.md
+# LOWER_IS_WORSE). None = esa cifra no llega nunca a "malo" por sí sola. Se eligieron dejando por encima de "revisar" el
+# peor resultado de la línea base del banco (tests/baseline.json, 10 resultados) con holgura, y a las que el banco no
+# medía se les puso margen sobre lo que da el plugin (ver docs/notas-tecnicas.md).
 LIMITS = {
-    "overlapping_percent": (1e-9, 0.5),    # cualquier cara solapada avisa; desde 0,5 % de las caras, mal
+    "overlapping_percent": (1e-9, 0.5),    # el plugin no deja ninguna: cualquier cara solapada avisa; desde 0,5 %, mal
     "flipped_percent": (1e-9, 0.5),        # caras en espejo: igual (darían normal maps invertidos)
     "unmapped_percent": (1e-9, 1.0),       # caras sin UVs: un hueco en la textura
-    "stretch_mean": (1.30, 1.60),          # la línea base: 1,07 a 1,19
-    "over_1_5_percent": (12.0, 30.0),      # la línea base: 1,2 a 9,7 %
-    "texel_variation_percent": (30.0, 60.0),
-    "used_percent": (40.0, 20.0),          # la línea base: 49 a 65 %
-    "racord_percent": (1.0, None),         # la línea base: giro < 15 grados entre 2,9 y 27,8 %; solo avisa
-    "margin_min": (0.001, None),           # unidades UV (2 px a 2048): lo que pide el empaquetado es 8 a 16 px
+    "stretch_mean": (1.30, 1.60),          # línea base: 1,07 a 1,19
+    "over_1_5_percent": (12.0, 30.0),      # línea base: 1,2 a 9,7 %
+    "texel_variation_percent": (25.0, 60.0),  # el plugin da 0 a 0,14 %
+    "used_percent": (40.0, 20.0),          # línea base: 49 a 65 %
+    "racord_percent": (0.1, None),         # giro y escala a la vez: 0,24 a 17 % medido; en piezas duras casi no hay
+    "margin_min": (0.001, None),           # unidades UV; el plugin deja 0,0039 a 0,0061 (relleno de 16 px a 4096)
 }
 LOWER_IS_WORSE = ("used_percent", "racord_percent", "margin_min")
 

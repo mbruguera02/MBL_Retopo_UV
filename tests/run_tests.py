@@ -155,7 +155,8 @@ def test_config_roundtrip():
 
 @test
 def test_config_removed_engine():
-    """Ajustes guardados con un motor que ya no existe (QuadWild) pasan a Automático; las demás elecciones se respetan."""
+    """Ajustes guardados con un motor que ya no existe (QuadWild) pasan al motor por defecto (Maya, tras pasar por
+    Automático, que era el defecto cuando se quitó); las demás elecciones se respetan."""
     path = os.path.join(tempfile.mkdtemp(), "settings.json")
 
     def load_with(engine, version=None):
@@ -172,16 +173,55 @@ def test_config_removed_engine():
     # cualquier versión anterior a la que lo quitó (sin versión = 1), también las que ya conservaban el motor elegido (3 a 6)
     for version in (None, 3, 4, 5, 6):
         loaded = load_with("quadwild", version)
-        assert loaded["retopo_engine"] == "auto", (version, loaded["retopo_engine"])
+        assert loaded["retopo_engine"] == config.DEFAULTS["retopo_engine"] == "maya", (version, loaded["retopo_engine"])
         assert loaded["retopo_target_faces"] == 777, version
-    # los motores que siguen existiendo se quedan como los eligió el usuario
-    for engine in ("maya", "mbl", "instant_meshes", "auto"):
+    # los motores que siguen existiendo se quedan como los eligió el usuario (Automático, desde la versión que cambió el defecto)
+    for engine in ("maya", "mbl", "instant_meshes"):
         assert load_with(engine, 6)["retopo_engine"] == engine, engine
+    assert load_with("auto", config.SETTINGS_VERSION)["retopo_engine"] == "auto"
     # tras guardar con la versión nueva el JSON ya no tiene el motor viejo y se lee igual
     config.save(load_with("quadwild", 6), path)
     with open(path, "r", encoding="utf-8") as handle:
         assert '"quadwild"' not in handle.read()
+    assert config.load(path)["retopo_engine"] == "maya"
+
+
+@test
+def test_config_default_engine_migration():
+    """El motor por defecto pasó de Automático a Maya (el banco: Maya rinde mejor que el Motor MBL): quien tenía el valor
+    de antes pasa a Maya; quien eligió otro motor a mano conserva el suyo; a partir de la versión nueva Automático se respeta."""
+    path = os.path.join(tempfile.mkdtemp(), "settings.json")
+
+    def load_with(version, engine=None):
+        data = '"_version": {}, "retopo_target_faces": 777'.format(version) if version is not None else '"retopo_target_faces": 777'
+        if engine is not None:
+            data += ', "retopo_engine": "{}"'.format(engine)
+        with open(path, "w") as handle:
+            handle.write("{" + data + "}")
+        return config.load(path)
+
+    assert config.DEFAULTS["retopo_engine"] == "maya" and config.SETTINGS_VERSION >= 8
+    assert config.REPLACED_VALUES[8]["retopo_engine"] == {"auto": "maya"}
+    # sin archivo, o con un archivo sin el motor: el defecto nuevo
+    assert config.load(os.path.join(os.path.dirname(path), "no_existe.json"))["retopo_engine"] == "maya"
+    assert load_with(7)["retopo_engine"] == "maya"
+    # el defecto de antes (Automático), en cualquier versión anterior: Maya, y el resto de los ajustes se queda
+    for version in (None, 3, 5, 6, 7):
+        loaded = load_with(version, "auto")
+        assert loaded["retopo_engine"] == "maya", (version, loaded["retopo_engine"])
+        assert loaded["retopo_target_faces"] == 777, version
+    # quien eligió otro motor a mano lo conserva
+    for version in (6, 7):
+        for engine in ("maya", "mbl", "instant_meshes"):
+            assert load_with(version, engine)["retopo_engine"] == engine, (version, engine)
+    # con la versión nueva, Automático es una elección y se respeta; al guardar y cargar la migración no se repite
+    assert load_with(config.SETTINGS_VERSION, "auto")["retopo_engine"] == "auto"
+    config.save(dict(config.DEFAULTS, retopo_engine="auto"), path)
     assert config.load(path)["retopo_engine"] == "auto"
+    config.save(load_with(7, "auto"), path)
+    with open(path, "r", encoding="utf-8") as handle:
+        assert '"retopo_engine": "maya"' in handle.read()
+    assert config.load(path)["retopo_engine"] == "maya"
 
 
 @test

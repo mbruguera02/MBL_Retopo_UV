@@ -257,6 +257,86 @@ def test_fill_new_holes():
     assert not len(Mesh(points, faces).boundary_loops()) == 2
 
 
+def unfold_defects(points, faces):
+    """(aristas con más de 2 caras, quads con una diagonal que ya es arista): lo que Unfold3D no acepta."""
+    mesh = Mesh(points, faces)
+    edges = {tuple(e) for e in mesh.edges.tolist()}
+    chords = 0
+    for face in faces:
+        n = len(face)
+        chords += sum(1 for i in range(n) for j in range(i + 2, n) if not (i == 0 and j == n - 1)
+                      and (min(face[i], face[j]), max(face[i], face[j])) in edges)
+    return int((mesh.edge_face_count > 2).sum()), chords
+
+
+@test
+def test_make_manifold_removes_fins():
+    """Una aleta (dos triángulos con los mismos vértices y la orientación contraria) pegada a una arista de la
+    superficie cae entera y la superficie queda como estaba. Quitar solo "las caras de después" arrancaba un quad de
+    la esfera y dejaba la aleta (pasaba tras colapsar una cara diminuta de polyRetopo: criatura y midnight)."""
+    sphere = uv_sphere(1.0, 8, 12, triangulate=False)
+    faces = sphere.faces()
+    quad = next(f for f in faces if len(f) == 4)
+    a, b = quad[0], quad[1]
+    tip = 1.1 * (sphere.points[a] + sphere.points[b]) / 2
+    points = np.vstack([sphere.points, tip])
+    bad = faces + [[a, b, len(points) - 1], [b, a, len(points) - 1]]
+    assert unfold_defects(points, bad) == (1, 0)
+    new_points, new_faces, report = repair.make_manifold(points, bad)
+    assert report["fins"] == 2 and not report["bowties"] and not report["chords"], report
+    assert sorted(map(sorted, new_faces)) == sorted(map(sorted, faces))
+    assert unfold_defects(new_points, new_faces) == (0, 0)
+
+
+# los cuatro quads donde el Motor MBL dejó la figura de dedos juntos (midnight) con un quad cuyas esquinas opuestas 0 y
+# 5 ya estaban unidas por una arista de otro quad: Unfold3D falló con "Mesh has non-manifold UVs"
+CHORD_POINTS = [(-6.852, -3.066, -5.872), (-7.089, -2.727, -4.985), (-5.174, -1.223, -5.69), (-5.343, -2.697, -7.536),
+                (-5.872, -2.266, -8.828), (-6.634, -3.769, -7.311), (-7.906, -4.691, -6.327), (-8.574, -3.001, -6.942)]
+CHORD_FACES = [[0, 1, 2, 3], [3, 5, 6, 0], [0, 5, 7, 1], [3, 4, 7, 5]]
+
+
+@test
+def test_make_manifold_breaks_chords():
+    """Un quad cuya diagonal ya es arista de otra cara se parte en dos triángulos por la otra diagonal."""
+    assert unfold_defects(CHORD_POINTS, CHORD_FACES) == (0, 1)
+    points, faces, report = repair.make_manifold(CHORD_POINTS, CHORD_FACES)
+    assert report == {"fins": 0, "doublets": 0, "bowties": 0, "chords": 1}, report
+    assert sorted(len(f) for f in faces) == [3, 3, 4, 4, 4], faces
+    assert len(points) == len(CHORD_POINTS) and unfold_defects(points, faces) == (0, 0)
+    # el resto de caras no se toca y la orientación se conserva (los triángulos recorren la arista como el quad)
+    assert [f for f in faces if len(f) == 4] == [f for f in CHORD_FACES if f != [3, 5, 6, 0]]
+    area = Mesh(points, faces).face_areas.sum() / Mesh(CHORD_POINTS, CHORD_FACES).face_areas.sum()
+    assert 0.95 < area < 1.05, area
+
+
+@test
+def test_make_manifold_center_vertex_when_both_diagonals_are_edges():
+    """Si las dos diagonales del quad son aristas, o la cara tiene más de 4 lados, se abre en triángulos hacia un
+    vértice nuevo en su centro (partirlo por una diagonal repetiría una arista)."""
+    # (la malla de prueba no es una superficie: se llama al paso de las diagonales solo)
+    points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0.5, -1, 0.2), (0.5, 2, 0.2)]
+    faces = [[0, 1, 2, 3], [0, 2, 4], [1, 3, 5]]
+    assert unfold_defects(points, faces) == (0, 2)
+    new_points, new_faces, fixed = repair._break_chords(points, faces)
+    assert fixed == 1 and len(new_points) == 7 and len(new_faces) == 6, (fixed, new_faces)
+    assert unfold_defects(new_points, new_faces) == (0, 0)
+    assert np.allclose(new_points[-1], (0.5, 0.5, 0))
+    # un pentágono con una diagonal repetida también
+    points = [(0, 0, 0), (2, 0, 0), (3, 1.5, 0), (1, 3, 0), (-1, 1.5, 0), (1.5, 1.5, 1)]
+    faces = [[0, 1, 2, 3, 4], [0, 2, 5]]
+    new_points, new_faces, fixed = repair._break_chords(points, faces)
+    assert fixed == 1 and sum(1 for f in new_faces if len(f) == 3) == 6, (fixed, new_faces)
+
+
+@test
+def test_make_manifold_leaves_a_clean_mesh_alone():
+    """Sin nada que arreglar devuelve las mismas listas: los resultados que ya funcionaban no cambian ni un vértice."""
+    for mesh in (uv_sphere(1.0, 8, 12, triangulate=False), uv_sphere(1.0, 8, 12), cube(), tube(), grid(5, hole=(1, 2, 1, 2))):
+        points, faces = mesh.points, mesh.faces()
+        out = repair.make_manifold(points, faces)
+        assert out[0] is points and out[1] is faces and not any(out[2].values()), out[2]
+
+
 # ------------------------------------------------------------------ retopo
 
 INSTANT_MESHES = os.path.join(ROOT, "mbl_retopo_uv", "bin", "Instant Meshes.exe")
@@ -277,6 +357,7 @@ def test_core_retopo():
                                               symmetric=False if engine == "quadriflow" else None)
         result = Mesh(points, faces)
         stats = metrics.topology_stats(result)
+        assert unfold_defects(points, faces) == (0, 0), (engine, "topología que Unfold3D rechaza")
         assert not len(result.boundary_edges), (engine, "agujeros")
         assert stats["quad_percent"] > 95, (engine, stats["quad_percent"])
         assert 400 < stats["faces"] < 1000, (engine, stats["faces"])

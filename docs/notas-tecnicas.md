@@ -324,6 +324,32 @@ Pruebas: `tests/test_safety.py` (sin Maya ni modelos; se simula QuadriFlow): el 
 10 veces menos, la variante mala se descarta, una malla que no cabe en memoria no lanza ningún motor y la vigilancia detiene un proceso
 en menos de unos segundos sin dejar nada colgado.
 
+## Retopo sin no-manifold (2 de noviembre)
+
+Línea base (5.000 caras, ajustes por defecto): `criatura` y `midnight` con Maya se negaban a desplegar UVs («1 aristas y 2 vértices
+no-manifold») y `midnight` con el Motor MBL fallaba en Unfold3D («Mesh has non-manifold UVs»). Se midió la topología tras cada etapa
+(salida de polyRetopo, `orient_pieces_like`, `collapse_tiny_edges`, `fix_nonmanifold`, `optimize_quads`) y salieron dos causas:
+
+- **Aletas tras `collapse_tiny_edges` (Maya).** `polyCollapseEdge` de una cara diminuta dejó, en `criatura` y `midnight`, dos triángulos con
+  los mismos vértices y orientación contraria pegados a una arista de la superficie. Para Maya son aristas distintas y `polyInfo` da
+  `(0, 0)`; al reconstruir la malla desde sus caras (`optimize_quads` -> `create_mesh`) la arista queda con 4 caras (1 arista y 2
+  vértices no-manifold) y además aparece un vértice de 2 aristas.
+- **Quads con la diagonal repetida (Maya y Motor MBL).** Un quad cuyas esquinas opuestas ya están unidas por una arista de otra cara (un
+  triángulo de aristas que no es una cara). `midnight` tenía 1 con Maya (ya en la salida directa de polyRetopo) y 2 con el Motor MBL;
+  `human`, `prop`, `hardsurface` y `criatura` con Maya, ninguno. Unfold3D triangula el quad por esa diagonal y deja la arista en tres
+  caras: «non-manifold UVs», aunque `polyInfo` (mallas y UVs) no marque nada y `fix_nonmanifold_uvs` no encuentre nada. Reducido por
+  bisección de caras a 4 quads (8 vértices); partiendo los 2 quads por la otra diagonal, las UVs de `midnight` con el Motor MBL salen.
+
+Arreglo (`mbl_engine/repair.py: make_manifold`): quita las aletas (cae la cara con menos aristas compartidas, no «la de después»), disuelve
+vértices de 2 aristas, separa pajaritas y parte los quads con diagonal repetida en dos triángulos por la otra diagonal (un vértice en el
+centro si las dos lo son o la cara tiene más de 4 lados). Si no hay nada devuelve las mismas listas. Se aplica al final de `retopo()` del
+núcleo (todas las variantes del Motor MBL, también tras soldar la simetría) y en `_finish` / `_symmetric_retopo` del adaptador (después
+de `optimize_quads`, antes de reproyectar). Cuesta 2 triángulos por quad partido.
+
+Resultado con el banco: `midnight` con Maya (5.355 caras, 258 polos, error medio 0,138 %) y con el Motor MBL (5.004 caras, 368 polos, 0,101 %) y `criatura` con Maya (5.721 caras, 363 polos, 0,129 %) completan Limpiar + Retopo + UVs; `human`, `prop` y `hardsurface` con Maya dan las
+mismas caras, polos, fealdad y error que la línea base. Pendiente: una comprobación previa en `uv.unwrap` que explique este fallo en mallas
+del usuario que no pasan por el retopo (hoy sale el mensaje de Unfold3D tal cual).
+
 ## Mapa de coste de polos para animación (2 de noviembre): probado y descartado
 
 Idea: un valor por punto del original (alto en articulaciones y cara, sacado del skin o de un pincel) que pondera la energía de

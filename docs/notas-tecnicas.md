@@ -531,3 +531,89 @@ La línea base se midió con el equipo más cargado que ahora; la columna `main`
 
   El candidato de 1024 es el más caro y en estos tres modelos no aporta nada (+0,002 y +0,02 puntos); el de 10 pasadas solo gana en el
   prop (+1,15). No se ha tocado (afectaría a otras mallas, como el águila, que no están en el banco); quitarlo ahorraría 0,5-0,7 s.
+
+## Medidas de UV en el núcleo y una nota única de UVs (3 de noviembre)
+
+**Qué había.** Las UVs solo se medían dentro de Maya (`uv.py`: `stretch`, `uv_area`, `check`) y en el banco (`seam_continuity`, dentro del trabajador
+de `tests/bench.py`). `quality.py` mide el retopo, no las UVs. Para juzgar UVs fuera de Maya, o reutilizar las medidas, hacían falta sobre arrays.
+
+**Qué hay.** `mbl_engine/uv_quality.py` (solo numpy, nada de Maya). Entrada: `points` (N x 3), `faces` (índices de punto por cara), `uv_points` (M x 2) y
+`uv_faces` (por cara, los índices de UV de sus esquinas en el mismo orden; vacía si la cara no tiene UVs). Es lo que dan `getUVs` y `getAssignedUVs`, o los
+`vt` de un OBJ. `report()` devuelve:
+
+| cifra | qué es | de dónde sale la definición |
+|---|---|---|
+| `overlapping_faces` | caras cuyo interior en UV entra más de 1e-6 en el de otra (tocarse por arista o esquina no cuenta) | `polyUVOverlap` de Maya (`uv.check`) |
+| `flipped_faces` | caras con área UV con signo negativo (en espejo) | `uv.flipped_faces` |
+| `stretch_mean`, `over_1_5_percent` | distorsión de área de cada cara frente a 3D, relativa a la densidad media; media ponderada por área 3D (tope 4x por cara) y % de caras con más de 1,5x | `uv.stretch`, igual |
+| `used_percent` | suma de las áreas UV frente al cuadrado 0-1 | `uv.uv_area` |
+| `islands` | caras unidas por UVs compartidas, como las islas de Maya | `getUvShellsIds` |
+| `texel_variation_percent` | desviación típica / media (ponderada por área 3D) de la densidad de texel (raíz de área UV / área 3D) de cada isla | nueva |
+| `margin_min` | distancia mínima en UV entre las orillas de dos islas distintas (`None` con una sola isla; se busca hasta 0,02 y más lejos da 0,02) | nueva |
+| `seam_percent`, `racord_rot_lt_15`, `racord_scale_lt_10`, `racord_percent` | longitud de cortes y % de ella donde las dos orillas casan: giro < 15 grados, escala dentro del 10 %, y las dos cosas a la vez | `seam_continuity` del banco, igual |
+
+`grade(rep)` da `(nota 0/1/2, razones)` con las constantes `LIMITS`, propias del módulo (no son las de `quality.py`, que no se tocó).
+
+**Cómo se calcula lo que no es una suma.** Los solapes: cada cara se parte en triángulos (los quads por la diagonal que queda dentro, por si son cóncavos), una
+rejilla uniforme reparte las cajas de los triángulos y solo se comparan los que comparten celda (cada par sale una vez, en la celda de su esquina común más
+baja); entre ellos, ejes separadores con tolerancia. 40.000 caras en un plano: 0,3 s. El margen: las aristas UV de una sola cara son las orillas; la misma
+rejilla da los pares de orillas de islas distintas a menos de 0,02 y se mide la distancia entre segmentos. Las islas: componentes conexas por salto de
+punteros con numpy, como en `uv_seams.py`.
+
+**Validación contra Maya** (`test_uv_quality_matches_maya`, mallas de 6 a 140 caras desplegadas con `uv.unwrap`, y tres modelos del banco con el retopo de Maya a 5.000 caras
+y el paso de UVs completo, medidos con un script aparte bajo el bloqueo del banco):
+
+| malla | estiramiento medio (núcleo / Maya) | > 1,5x | aprovechado | islas |
+|---|---|---|---|---|
+| esfera 140 caras | 1,16594 / 1,16594 | 0 / 0 | 43,4081 / 43,4081 | 3 / 3 |
+| toro 112 caras | 1,01623 / 1,01623 | 0 / 0 | 54,1503 / 54,1503 | 5 / 5 |
+| cubo 6 caras | 1,03798 / 1,03798 | 0 / 0 | 54,5093 / 54,5093 | 3 / 3 |
+| prop 5.049 caras | 1,0687 / 1,0687 | 1,228 / 1,228 | 60,2777 / 60,278 | 21 / 21 |
+| humano 5.095 caras | 1,0772 / 1,0772 | 3,513 / 3,513 | 60,3128 / 60,313 | 28 / 28 |
+| hardsurface 4.738 caras | 1,1413 / 1,1413 | 9,730 / 9,730 | 56,0299 / 56,030 | 6 / 6 |
+
+0 solapes y 0 espejos cuando `uv.check` da 0. Con una isla de la esfera puesta encima de otra, `polyUVOverlap` cuenta 129 caras y el núcleo 129; con otra
+isla en espejo, las caras en espejo coinciden. La continuidad en los cortes da lo mismo que el banco: giro < 15 grados 15,73 / 27,46 / 2,91 %
+(prop, humano, hardsurface) y costuras 5,95 / 7,28 / 3,84 %, igual que `baseline.json`. La medida entera tarda 0,09 a 0,14 s con 5.000 caras.
+
+**Umbrales (`LIMITS`, provisionales).** Se eligieron para que lo que ya hace bien el plugin quede en 0 o 1, y nada de la línea base en 2 salvo que tenga
+solapes o espejo (no tiene ninguno). Con las cifras de `tests/baseline.json` (2 de noviembre, 10 resultados) y las del núcleo sobre el prop, la esfera, el toro y el cubo:
+
+| cifra | línea base / medido | revisar | malo |
+|---|---|---|---|
+| solapadas, espejo | 0 | cualquiera | 0,5 % de las caras |
+| caras sin UVs | 0 | cualquiera | 1 % |
+| estiramiento medio | 1,07 a 1,19 | >= 1,30 | >= 1,60 |
+| caras > 1,5x | 1,2 a 9,7 % | >= 12 % | >= 30 % |
+| variación de texel entre islas | 0 a 0,14 % (núcleo, 3 modelos) | >= 25 % | >= 60 % |
+| aprovechado | 49 a 65 % | <= 40 % | <= 20 % |
+| continuidad (giro y escala) | 0,24 a 17 % (núcleo; giro solo: 2,9 a 27,8 % en la línea base) | <= 0,1 % | no hay |
+| margen entre islas (UV) | 0,0039 a 0,0061 | <= 0,001 | no hay |
+
+Con ellos, el prop, el humano y el hardsurface salen con nota 0 (y la esfera, el toro y el cubo de las pruebas, con 0 o 1: el cubo y la esfera tienen 0 % de
+continuidad).
+
+Las que no se medían en el banco (solapes, espejos, densidad de texel entre islas, margen) se calibraron con lo que da el plugin sobre las mallas de arriba y el
+sentido común: Maya reparte la densidad igual en todas las islas (variación 0 a 0,14 %), deja de 0,0039 a 0,0060 de margen (relleno de 16 px a 4096 = 0,0039),
+y no deja solapes ni espejos (`assert_good_uvs`). Por eso un solo solape o espejo ya avisa (nota 1) y desde el 0,5 % de las caras es malo (nota 2).
+La continuidad en los cortes no es un defecto en piezas duras (giros de 90 grados entre caras de una caja: el hardsurface de la línea base tiene un 2,9 % de
+giro y solo un 0,24 % con giro y escala a la vez), así que solo avisa si casi nada continúa (<= 0,1 %) y nunca da nota 2 por sí sola; el margen, igual
+(un margen de cero tampoco rompe nada, solo mancha el borde con mipmaps).
+`test_uv_quality_is_fast_and_grades_the_baseline_as_acceptable` repite las cifras de la línea base contra `grade()` para que un cambio de umbral que los
+mande a 2 salte.
+
+**Lo que no se ha hecho / dudoso.**
+
+- No se ha conectado al semáforo ni al banco (lo decide el probador). Los nombres de las cifras (`used_percent`, `over_1_5_percent`, `racord_*`, `islands`,
+  `stretch_mean`) son los de `uv` en `baseline.json`, para poder compararlas directamente.
+- `used_percent` suma áreas, como `uv.uv_area`: con solapes pasa de lo que cubre de verdad la textura, y con UDIM pasa de 100. Calcular la unión (rasterizando)
+  no encaja con la validación de ±0,5 puntos frente a `uv.uv_area`.
+- Los solapes cuentan caras con interior compartido; si `polyUVOverlap` cuenta también caras que solo se tocan, en casos raros (islas pegadas sin margen) Maya
+  daría más. En las pruebas coinciden (129 y 129).
+- La continuidad en los cortes compara UVs por índice, como el banco: dos UV con las mismas coordenadas pero distinto índice cuentan como corte.
+- El margen se mide solo hasta 0,02: más allá da 0,02.
+- Los umbrales de densidad de texel entre islas (25 %, 60 %), margen y espejos no tienen ninguna malla mala medida con la que contrastarlos: solo se sabe
+  lo que da el plugin cuando va bien.
+- Con la línea base solo se pudo medir de nuevo el prop, el humano y el hardsurface (retopo de Maya); de los otros siete resultados (criatura, midnight y el Motor MBL)
+  solo hay las cifras que guarda `baseline.json`, que se pasan por `grade()` en la prueba rápida (sin margen ni texel, puestos como los del plugin).
+- Un único enfoque (cajas por rejilla + ejes separadores para solapes, segmentos para el margen): no hizo falta probar otro, no se llegó al criterio de abandono.

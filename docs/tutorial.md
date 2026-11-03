@@ -111,7 +111,7 @@ Es un grupo plegado dentro de *2. Retopología*: pulsa su título para abrirlo.
 | **Costuras de sastre** | Cortes rectos y lógicos, como un patrón de ropa | Torso cortado por la espalda, nada por delante |
 | **Islas rectas y de pie** | Ninguna isla torcida ni boca abajo | Que el «arriba» del modelo sea el arriba de la textura |
 | **Optimize** | Reduce la distorsión | Más alto = un poco mejor y más lento |
-| **Resolución textura** / **Padding** | Tamaño de textura y separación entre islas | 4096 y 16 px van bien para casi todo |
+| **Resolución textura** / **Padding** | Tamaño de textura y separación entre islas. Con el padding en 0 (automático) se usa 1/256 del lado: 8 px a 2048, 16 a 4096, 32 a 8192 | 4096 con el padding automático va bien para casi todo |
 | **Permitir rotar islas** | Deja tumbar islas 90° para aprovechar más | Desmarcado (recomendado): las vetas y rayones siguen la misma dirección a los dos lados de un corte |
 | **Calidad de layout** / **Intentos de empaquetado** | Precisión al colocar las islas | Más = más textura aprovechada, más tiempo |
 | **UDIM**, **Nº de UDIMs**, **Densidad de texel** | Repartir en varias texturas. Con *Nº de UDIMs* en 0 usa la densidad de texel que pongas; con un número, la calcula el plugin | VFX con texturas 4K por zona: UDIM con 4–10 tiles |

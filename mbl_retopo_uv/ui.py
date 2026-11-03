@@ -323,6 +323,11 @@ class RetopoUVWindow(QtWidgets.QDialog):
         w["uv_straight_islands"] = _check("Islas rectas y de pie",
                                           "Cada isla con el arriba del modelo hacia arriba (o tumbada 90°), "
                                           "nunca torcida ni boca abajo.")
+        w["uv_straighten_strips"] = _check("Enderezar tubos (brazos, piernas...)",
+                                           "Las islas que son tubos cortados a lo largo (brazos, piernas, dedos, cables) "
+                                           "se enderezan para que las dos orillas del corte sean paralelas y el dibujo de "
+                                           "la textura (vetas, rayones) siga la misma dirección al cruzar la costura. Solo "
+                                           "se toca una isla si no estira más que antes.")
         w["uv_optimize_iterations"] = _spin(0, 100, 5, tip="Iteraciones de Optimize (reduce distorsión).")
         w["uv_map_size"] = QtWidgets.QComboBox()
         for size in config.MAP_SIZES:
@@ -369,6 +374,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_symmetric"])
         form.addRow(w["uv_tailor_seams"])
         form.addRow(w["uv_straight_islands"])
+        form.addRow(w["uv_straighten_strips"])
         form.addRow("Optimize", w["uv_optimize_iterations"])
         form.addRow("Padding (0 = automático)", w["uv_padding_px"])
         form.addRow(w["uv_allow_rotation"])

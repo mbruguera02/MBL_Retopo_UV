@@ -483,6 +483,44 @@ def orient_upright(transform):
     return turned
 
 
+def straighten_islands(transform, log=default_log):
+    """Endereza las islas que son tubos cortados a lo largo (brazos, piernas, dedos, cables, colas): las dos orillas de
+    cada corte pasan a ser paralelas y de la misma longitud, y el dibujo de una textura (vetas, rayones) sigue la misma
+    dirección al cruzar la costura. Solo se tocan las islas que no estiran más que antes (ver mbl_engine.uv_straighten).
+    Devuelve cuántas islas se enderezaron."""
+    from mbl_engine import uv_straighten
+    path = dag_path(mesh_shape(transform))
+    fn = om.MFnMesh(path)
+    if fn.numUVs() == 0:
+        return 0
+    points = np.array([(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)], dtype=float)
+    counts, vertices = fn.getVertices()
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    us, vs = fn.getUVs()
+    faces, uv_faces, start, uv_start = [], [], 0, 0
+    for count, uv_count in zip(counts, uv_counts):
+        faces.append(list(vertices[start:start + count]))
+        uv_faces.append(list(uv_ids[uv_start:uv_start + uv_count]))
+        start += count
+        uv_start += uv_count
+    new, done = uv_straighten.straighten(points, faces, np.column_stack([us, vs]), uv_faces)
+    if not done:
+        return 0
+    # las UVs de una malla con historial no se pueden escribir directamente: se escriben en una copia y se pasan
+    copy = cmds.ls(cmds.duplicate(transform, name="mblStraightenTry")[0], long=True)[0]
+    try:
+        om.MFnMesh(dag_path(mesh_shape(copy))).setUVs(om.MFloatArray(new[:, 0].tolist()), om.MFloatArray(new[:, 1].tolist()))
+        cmds.polyTransfer(transform, uvSets=True, vertices=False, vertexColor=False, alternateObject=copy)
+    finally:
+        cmds.delete(copy)
+    total = sum(d["length"] for d in done) or 1.0
+    log("{}: {} isla(s) enderezadas (tubos cortados a lo largo): las orillas del corte casan {:.0f}% -> {:.0f}% "
+        "de su longitud, sin estirar más.".format(
+            short_name(transform), len(done), sum(d["matched"][0] * d["length"] for d in done) / total,
+            sum(d["matched"][1] * d["length"] for d in done) / total))
+    return len(done)
+
+
 def layout_0_1(transform, settings):
     cmds.u3dLayout(transform, preScaleMode=1, packBox=(0.0, 1.0, 0.0, 1.0), **_layout_kwargs(settings))
 
@@ -956,6 +994,11 @@ def _unwrap(transform, settings, log, tick):
         known_overlaps = _tailor_seams(transform, unfold_and_split, known_overlaps, log, symmetric, hidden,
                                        seam_graph())
 
+    straightened = 0
+    if settings.get("uv_straighten_strips", True):
+        straightened = straighten_islands(transform, log)
+        if straightened:
+            known_overlaps = None
     if settings.get("uv_straight_islands", True):
         turned = orient_upright(transform)
         if turned:
@@ -969,6 +1012,9 @@ def _unwrap(transform, settings, log, tick):
         known_overlaps = None
         if tick:
             tick()
+    elif straightened:
+        # sin empaquetado final: lo enderezado puede pisar a las islas vecinas
+        layout_0_1(transform, settings)
 
     # borra el historial de UVs pero conserva deformadores (skin, blendshapes) si los hubiera
     cmds.bakePartialHistory(transform, prePostDeformers=True)

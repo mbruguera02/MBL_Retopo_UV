@@ -679,6 +679,92 @@ def test_maya_engine():
         assert_good_uvs(result)
 
 
+def make_dressed_model():
+    """Esfera de 384 caras con dos materiales por zonas (arriba rojo, abajo azul), dentro de un grupo movido y
+    girado, con el pivote fuera del centro y una transformación propia (trasladada, girada y escalada)."""
+    sphere = cmds.polySphere(name="vestida", radius=1.5, subdivisionsX=24, subdivisionsY=16,
+                             constructionHistory=False)[0]
+    groups = {}
+    for name, color in (("rojo", (1, 0, 0)), ("azul", (0, 0, 1))):
+        shader = cmds.shadingNode("lambert", asShader=True, name=name)
+        cmds.setAttr(shader + ".color", *color, type="double3")
+        groups[name] = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=name + "SG")
+        cmds.connectAttr(shader + ".outColor", groups[name] + ".surfaceShader")
+    it = om.MItMeshPolygon(om.MSelectionList().add(sphere).getDagPath(0))
+    top, bottom = [], []
+    while not it.isDone():
+        (top if it.center(om.MSpace.kObject).y > 0 else bottom).append("{}.f[{}]".format(sphere, it.index()))
+        it.next()
+    cmds.sets(top, forceElement=groups["rojo"])
+    cmds.sets(bottom, forceElement=groups["azul"])
+    group = cmds.group(sphere, name="grupoVestida")
+    cmds.xform(group, translation=(10, 0, 0), rotation=(0, 45, 0))
+    cmds.xform(sphere, translation=(3, 1, -2), rotation=(20, 35, 10), scale=(1, 1.5, 1))
+    cmds.xform(sphere, worldSpace=True, pivots=(0.5, -1, 0.2))
+    return cmds.ls(sphere, long=True)[0]
+
+
+def material_zones(result, original):
+    """{material: (caras, fracción de ellas en su zona)}: arriba (y local del original > -0,2) el rojo, abajo el azul."""
+    path = retopo.dag_path(retopo.mesh_shape(result))
+    shaders, per_face = om.MFnMesh(path).getConnectedShaders(0)
+    names = [om.MFnDependencyNode(shaders[i]).name() for i in range(len(shaders))]
+    points, faces = retopo.mesh_arrays(result)
+    inverse = np.linalg.inv(np.array(cmds.xform(original, query=True, matrix=True, worldSpace=True)).reshape(4, 4))
+    out = {}
+    for name in ("rojoSG", "azulSG"):
+        mine = [f for f, s in enumerate(per_face) if s >= 0 and names[s] == name]
+        local_y = [(np.append(points[faces[f]].mean(axis=0), 1.0) @ inverse)[1] for f in mine]
+        inside = [(y > -0.2) if name == "rojoSG" else (y < 0.2) for y in local_y]
+        out[name] = (len(mine), float(np.mean(inside)) if mine else 0.0)
+    return out
+
+
+def assert_same_placement(original, result):
+    """Mismo grupo, mismos pivotes y transformación y misma caja envolvente del mundo."""
+    assert cmds.listRelatives(result, parent=True, fullPath=True) == cmds.listRelatives(original, parent=True,
+                                                                                         fullPath=True), result
+    for attr in ("translate", "rotate", "scale", "rotatePivot", "scalePivot"):
+        assert np.allclose(cmds.getAttr(original + "." + attr)[0], cmds.getAttr(result + "." + attr)[0],
+                           atol=1e-6), (attr, cmds.getAttr(original + "." + attr), cmds.getAttr(result + "." + attr))
+    for flag in ("rotatePivot", "scalePivot"):
+        assert np.allclose(cmds.xform(original, query=True, worldSpace=True, **{flag: True}),
+                           cmds.xform(result, query=True, worldSpace=True, **{flag: True}), atol=1e-6), flag
+    a, b = retopo.mesh_arrays(original)[0], retopo.mesh_arrays(result)[0]
+    diagonal = float(np.linalg.norm(np.ptp(a, axis=0)))
+    assert np.abs(a.min(axis=0) - b.min(axis=0)).max() < 0.02 * diagonal, (a.min(axis=0), b.min(axis=0))
+    assert np.abs(a.max(axis=0) - b.max(axis=0)).max() < 0.02 * diagonal, (a.max(axis=0), b.max(axis=0))
+
+
+def assert_keeps_everything(original, result):
+    """El _retopo no pierde nada del original: nombre base, grupo, transformación, pivote y materiales por zonas."""
+    assert result.split("|")[-1] == "vestida_retopo", result
+    assert_same_placement(original, result)
+    zones = material_zones(result, original)
+    total = cmds.polyEvaluate(result, face=True)
+    for name, (count, inside) in zones.items():
+        assert count > 0.25 * total, "el material {} casi no está en el retopo: {}".format(name, zones)
+        assert inside > 0.95, "el material {} se salió de su zona: {}".format(name, zones)
+
+
+@test
+def test_retopo_keeps_materials_pivot_transform_and_group():
+    """El _retopo hereda del original los dos materiales (cada uno en su zona), el pivote, la transformación y el grupo;
+    con el motor de Maya (que rehace la malla en la raíz al limpiar polos) y con un solo Ctrl+Z."""
+    original = make_dressed_model()
+    cmds.undoInfo(state=True)
+    cmds.flushUndo()
+    outcome = pipeline.run([original], ["retopo"], base_settings(retopo_engine="maya", retopo_target_faces=300),
+                           quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    result = outcome["results"][0]
+    assert_keeps_everything(original, result)
+    assert diagnostics.find_source(result) == original
+    cmds.undo()
+    assert not cmds.ls("vestida_retopo*"), "quedó el retopo tras deshacer"
+    assert cmds.getAttr(original + ".visibility"), "el original sigue oculto tras deshacer"
+
+
 @test
 def test_loops_and_curvature():
     """Métrica de loops y direcciones de curvatura del Motor MBL."""

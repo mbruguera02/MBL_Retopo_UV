@@ -14,7 +14,7 @@ Tienes un modelo «sucio» (de IA, escaneo o sculpt) con miles de triángulos de
 2. **Retopo:** crea una malla nueva de cuadrados (quads) ordenados, con las caras que pidas, pegada a la forma del original.
 3. **UVs:** abre esa malla en un plano para poder pintarla o texturizarla.
 
-El resultado es una malla nueva que termina en `_retopo`. **El original no se toca**: queda oculto en la escena.
+El resultado es una malla nueva que termina en `_retopo`. **El original no se toca**: queda oculto en la escena. El `_retopo` conserva lo que tenías puesto en él: sus materiales (si tiene varios, cada zona del `_retopo` recibe el de la zona más cercana del original), el pivote, la posición/rotación/escala y el grupo donde estaba, así que cae justo encima del original.
 
 ---
 

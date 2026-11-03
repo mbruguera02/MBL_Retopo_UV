@@ -381,6 +381,34 @@ Para controlar de verdad dónde quedan los polos hace falta un campo de direccio
 ejemplo conexiones triviales, Crane 2010) o forzar bucles con las guías de flujo (motor de Maya). Con el estado actual, para animación
 sirven más las **guías de flujo** alrededor de las articulaciones y la cara, que el motor de Maya sigue, que un mapa de coste.
 
+## El _retopo conserva materiales, pivote, transformación y grupo (3 de noviembre)
+
+`meshbuild.create_mesh` crea la malla en la raíz, sin transformación y con el pivote en el origen, con los puntos en mundo. Casi todos
+los pasos del retopo rehacen la malla así (agujeros nuevos, limpieza de polos y relajación, `make_unfoldable`, Motor MBL, Instant
+Meshes, simetría), de modo que el `_retopo` salía fuera del grupo, sin el movimiento ni el pivote del original y con un solo material
+(el primero que devolvía `listConnections`). Con el modelo de prueba (esfera de 384 caras, grupo girado, trasladada/girada/escalada,
+pivote movido, dos materiales) y el motor de Maya el `_retopo` salía en `|vestida_retopo`, pivote (0,0,0) y todo azul.
+
+`_present` llama ahora a dos funciones de `retopo.py`:
+
+- `_match_placement(original, nuevo)`: si grupo, atributos del transform y pivotes ya coinciden (motor de Maya sin rehacer la malla) no
+  hace nada. Si no: lleva la malla a la raíz y congela (puntos en mundo), la multiplica por la inversa de la matriz de mundo del original
+  (`xform -matrix` + `makeIdentity`), la mete en el grupo a continuación del original y copia `rotateOrder`, `translate`, `rotate`,
+  `scale`, `shear`, `rotateAxis` y los cuatro pivotes. Solo comandos de `cmds`: un Ctrl+Z lo deshace con el resto. `MFnMesh.setPoints`
+  no sirve porque no entra en el deshacer. Si el original tiene escala negativa se invierten las caras (el sentido se da la vuelta al
+  pasar al espacio de objeto). Comprueba al final que ningún vértice se movió en mundo y avisa si no.
+- `_copy_materials(original, nuevo)`: `MFnMesh.getConnectedShaders` del original y, con 2 o más materiales, cada cara del retopo toma el
+  de la cara más cercana del original (`MMeshIntersector`, `.face`); el más repetido va al objeto entero y el resto por caras.
+
+Comprobado en mayapy con `maya`, `instant_meshes` (sustituto), `mbl`, `auto` y simetría `x`: grupo, pivotes, caja envolvente (menos del
+2 % de la diagonal) y materiales (más del 95 % de las caras de cada uno en su zona), también con shear, orden de giro distinto, pivotes
+de escala, grupos anidados con escala no uniforme y sin grupo. Sin cambios en caras, polos ni error del banco (human, `maya`: 5.095
+caras, 174 polos, igual que `baseline.json`).
+
+Hallazgo fuera de esta tarea: **Rehacer (Ctrl+Y) tras deshacer el comando `mblCreateMesh` cierra Maya** (fallo fatal en `redoIt`; pasa con
+cualquier `create_mesh` en mayapy, también en la rama base, sin tocar nada de esto). Deshacer funciona bien. Y `baseline.json` guarda
+`status.retopo = 0` para human/maya, de antes del juez en el semáforo; con el código actual (también en 4020e31 sin esta rama) sale 2.
+
 ## Motores descartados
 
 Motores que se probaron, se midieron y se quitaron del plugin. Las cifras se guardan aquí por si hay que volver a decidir.

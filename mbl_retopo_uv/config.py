@@ -91,7 +91,7 @@ DEFAULTS = {
     "uv_straighten_strips": True,
     # islas con más del 10 % de caras estiradas más de 1,5x (o estiramiento medio > 1,3): se prueba Optimize más fuerte solo en
     # esa isla y, si no basta, un corte extra hacia la costura más cercana; solo se acepta si la isla mejora sin solapes ni espejos
-    "uv_fix_stretch": True,
+    "uv_fix_stretch": False,
     # en "resolution", las islas con más de esta fracción del área se vuelven a cortar (0 = nunca).
     # Águila: tres islas con el 90% del área -> textura aprovechada 42% -> 68%, estiramiento 8% -> 4%
     "uv_split_big_shells": 0.12,

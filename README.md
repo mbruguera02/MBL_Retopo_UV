@@ -43,6 +43,8 @@ import runpy; runpy.run_path(r"C:\Users\tu_usuario\Downloads\MBL_Retopo_UV\insta
 4. Cuando acabe, mira el **semáforo** del panel *Estado* (más abajo). Si está en verde, ya está.
 5. Exporta la malla nueva (termina en `_retopo`) a Substance Painter. La original sigue en la escena, oculta.
 
+Si seleccionas varias mallas idénticas (20 tornillos copiados), el retopo y las UVs se hacen una sola vez y el resultado se copia a las demás, cada una en su sitio (opción *Piezas repetidas*, en *Avanzado*). Con *Misma densidad de texel entre mallas* (en *Avanzado*, apartado *UVs*) personaje, ropa y accesorios quedan con la misma nitidez de textura.
+
 Un solo **Ctrl+Z** deshace todo el proceso. Mientras trabaja, la ventana de Maya puede quedarse quieta unos minutos: es normal. Arriba tienes la barra de progreso y el botón **Cancelar**, y el log escribe qué hace y a qué hora.
 
 También puedes hacer cada paso por separado con los botones **Limpiar**, **Retopo** y **UVs**. Por ejemplo, solo **UVs** si la malla ya tiene buena topología. **Analizar y seleccionar problemas** (en *Avanzado*, apartado *Limpieza*) no cambia nada: solo marca en la escena lo que está mal.

@@ -1917,7 +1917,7 @@ def counting_retopo():
     return calls, lambda: setattr(retopo, "retopo", real)
 
 
-def uv_arrays(mesh):
+def assigned_uvs(mesh):
     fn = om.MFnMesh(retopo.dag_path(retopo.mesh_shape(mesh)))
     us, vs = fn.getUVs()
     counts, ids = fn.getAssignedUVs()
@@ -1973,13 +1973,13 @@ def test_duplicates_are_retopologized_once_and_copied():
     assert len(results) == 5 and len(set(results)) == 5, results
     first = results[0]
     faces = retopo.mesh_arrays(first)[1]
-    uvs = uv_arrays(first)
+    uvs = assigned_uvs(first)
     for source, result in zip(sources, results):
         assert diagnostics.find_source(result) == source and not cmds.getAttr(source + ".visibility"), result
         assert result.split("|")[-1].startswith(source.split("|")[-1] + "_retopo"), result
         assert_same_placement(source, result)
         assert retopo.mesh_arrays(result)[1] == faces, "otras caras en " + result
-        other = uv_arrays(result)
+        other = assigned_uvs(result)
         assert np.array_equal(other[0], uvs[0]) and other[1:] == uvs[1:], "otras UVs en " + result
         assert uv.check(result)["overlapping_faces"] == 0, result
         assert outward_fraction(result) > 0.99, result
@@ -2129,6 +2129,109 @@ def test_config_reuse_duplicates_and_common_texel_defaults():
     config.save(dict(config.DEFAULTS, pipeline_reuse_duplicates=False, uv_common_texel=True), path)
     loaded = config.load(path)
     assert loaded["pipeline_reuse_duplicates"] is False and loaded["uv_common_texel"] is True
+
+
+# ---------------------------------------------------------------- densidad de texel común (B6)
+
+def make_sized_toruses(sizes, spacing=400.0):
+    """Un toro por tamaño (diagonal ~ 3,2 x tamaño unidades de escena), separados para que no se pisen."""
+    meshes = []
+    for i, size in enumerate(sizes):
+        torus = cmds.polyTorus(name="toro{}".format(i), radius=0.5 * size, sectionRadius=0.2 * size, subdivisionsX=24,
+                               subdivisionsY=12, constructionHistory=False)[0]
+        cmds.move(i * spacing, 0, 0, torus)
+        meshes.append(cmds.ls(torus, long=True)[0])
+    return meshes
+
+
+def densities_of(meshes, settings):
+    return [uv.texel_density(m, settings["uv_map_size"]) for m in meshes]
+
+
+@test
+def test_common_texel_density_between_meshes():
+    """Tres mallas de 1, 10 y 100 unidades de tamaño procesadas juntas: con la opción, la misma densidad de texel (±10 %),
+    sin solapes y dentro del 0-1, y la más grande (la que fija la densidad) queda igual que sin la opción; apagada, cada
+    una llena su textura y las densidades se separan por el tamaño."""
+    sizes = (1, 10, 100)
+    outcomes = {}
+    for common in (False, True):
+        cmds.file(new=True, force=True)
+        settings = base_settings(uv_common_texel=common, uv_map_size=2048, uv_padding_px=8)
+        meshes = make_sized_toruses(sizes)
+        outcome = pipeline.run(meshes, ["uv"], settings, quiet_log)
+        assert not outcome["errors"], outcome["errors"]
+        results = outcome["results"]
+        densities = densities_of(results, settings)
+        outcomes[common] = (densities, assigned_uvs(results[2])[0])
+        if not common:
+            assert max(densities) > 50 * min(densities), densities
+            continue
+        assert max(densities) <= 1.10 * min(densities), densities
+        for mesh, report in zip(results, (outcome["reports"][m]["uv"] for m in results)):
+            check = uv.check(mesh)
+            assert check["overlapping_faces"] == 0 and not check["outside_0_1"], (mesh, check)
+            assert abs(report["texel_density"] - uv.texel_density(mesh, 2048)) < 0.01, report["texel_density"]
+        used = [100.0 * uv.uv_area(m) for m in results]
+        assert used[0] < used[1] < used[2], used            # la pequeña usa mucha menos textura
+        # el semáforo no avisa de "poca textura aprovechada" en las que bajaron a la densidad común a propósito
+        for mesh in results[:2]:
+            for item in outcome["status"][mesh]:
+                for entry in item["checks"]:
+                    assert "aprovechad" not in entry["text"] or entry["level"] == 0, (mesh, entry)
+    assert np.allclose(outcomes[False][1], outcomes[True][1], atol=1e-9), "la malla de referencia cambió"
+    assert abs(outcomes[False][0][2] - outcomes[True][0][2]) < 1e-6
+
+
+@test
+def test_common_texel_density_single_mesh_changes_nothing():
+    """Con una sola malla, encender la opción no cambia ni una UV."""
+    arrays = {}
+    for common in (False, True):
+        cmds.file(new=True, force=True)
+        settings = base_settings(uv_common_texel=common)
+        mesh = make_sized_toruses([5])[0]
+        outcome = pipeline.run([mesh], ["uv"], settings, quiet_log)
+        assert not outcome["errors"], outcome["errors"]
+        arrays[common] = assigned_uvs(outcome["results"][0])
+    assert np.array_equal(arrays[False][0], arrays[True][0]) and arrays[False][1:] == arrays[True][1:]
+
+
+@test
+def test_common_texel_density_with_udim():
+    """En UDIM, con un número de tiles por malla, las tres mallas de tamaños distintos bajan a la misma densidad."""
+    settings = base_settings(uv_common_texel=True, uv_udim=True, uv_udim_tiles=1, uv_map_size=2048, uv_padding_px=8)
+    meshes = make_sized_toruses((1, 10, 100))
+    outcome = pipeline.run(meshes, ["uv"], settings, quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    densities = densities_of(outcome["results"], settings)
+    assert max(densities) <= 1.10 * min(densities), densities
+    for mesh in outcome["results"]:
+        check = uv.check(mesh, udim=True)
+        assert check["overlapping_faces"] == 0 and not check["crossing_tiles"], (mesh, check)
+
+
+@test
+def test_common_texel_density_with_repeated_pieces():
+    """Dos piezas pequeñas idénticas y una grande, con retopo y UVs: la repetida se copia (un solo retopo para las dos
+    pequeñas), lleva las mismas UVs que su pieza y las tres quedan a la misma densidad."""
+    small, other, big = make_sized_toruses((2, 2, 20), spacing=100.0)
+    cmds.xform(other, rotation=(30, 40, 50))
+    settings = base_settings(retopo_engine="maya", retopo_target_faces=400, uv_common_texel=True, uv_map_size=2048,
+                             uv_padding_px=8)
+    calls, restore = counting_retopo()
+    try:
+        outcome = pipeline.run([small, other, big], ["retopo", "uv"], settings, quiet_log)
+    finally:
+        restore()
+    assert not outcome["errors"], outcome["errors"]
+    assert calls == [small, big], calls
+    results = outcome["results"]
+    densities = densities_of(results, settings)
+    assert max(densities) <= 1.10 * min(densities), densities
+    first, second = assigned_uvs(results[0]), assigned_uvs(results[1])
+    assert np.allclose(first[0], second[0], atol=1e-9) and first[1:] == second[1:]
+    assert uv.check(results[1])["overlapping_faces"] == 0
 
 
 @test

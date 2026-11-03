@@ -97,6 +97,7 @@ También están en **Avanzado**, apartado *Retopo*.
 | **Ignorar piezas menores de** | Descarta restos flotantes pequeños | Un modelo de IA con «migas» sueltas alrededor: las ignora |
 | **Rellenar agujeros de hasta** | Cierra agujeros pequeños del resultado | Agujeros diminutos que no estaban en el original |
 | **Tiempo máximo** | Tope por malla | Para no quedarte esperando sin fin |
+| **Piezas repetidas: hacerlas una sola vez** | Si seleccionas varias mallas idénticas (mismos vértices y caras y mismo tamaño; solo cambia dónde están y cómo giran), el retopo y las UVs se hacen de una y el resultado se copia a las demás, cada una en su sitio, con su grupo y sus materiales. Una copia a otra escala, reflejada o con un vértice distinto cuenta como otra pieza. Solo con el paso *Retopo* marcado | 20 tornillos copiados: tardan como uno |
 
 > Al elegir el motor **Instant Meshes** aparecen, dentro de *Avanzado*, sus opciones propias (suavizado, solo quads, determinista, alinear a los bordes, densidad por curvatura) y el recuadro *Instant Meshes* con la ruta del programa (si no lo encuentra solo, *Avanzado* se abre para que la indiques). Con los demás motores no se ven: no hace falta tocarlas.
 
@@ -130,6 +131,7 @@ Están en **Avanzado**, apartado *UVs* (la **Resolución textura** está a la vi
 | **Permitir rotar islas** | Deja tumbar islas 90° para aprovechar más | Desmarcado (recomendado): las vetas y rayones siguen la misma dirección a los dos lados de un corte |
 | **Calidad de layout** / **Intentos de empaquetado** | Precisión al colocar las islas | Más = más textura aprovechada, más tiempo |
 | **UDIM**, **Nº de UDIMs**, **Densidad de texel** | Repartir en varias texturas. Con *Nº de UDIMs* en 0 usa la densidad de texel que pongas; con un número, la calcula el plugin | VFX con texturas 4K por zona: UDIM con 4–10 tiles |
+| **Misma densidad de texel entre mallas** | Con varias mallas a la vez (personaje, ropa, accesorios) todas quedan con los mismos píxeles por unidad de escena: la de la malla más grande, y las demás se escalan a ella y usan solo parte de su textura. Desmarcado, cada una llena la suya. Con una sola malla no cambia nada | Una bota y un personaje con las mismas texturas a la misma nitidez |
 | **Máx. caras para UVs** | No hace UVs en mallas con más caras que esto (150.000 por defecto; 0 = sin límite) | Protege la memoria: haz siempre el retopo antes |
 
 ### 4.6. Los botones de abajo y el semáforo

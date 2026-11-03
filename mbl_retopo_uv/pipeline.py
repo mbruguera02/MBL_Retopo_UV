@@ -178,6 +178,9 @@ def run(meshes, steps, settings, log=default_log, progress=None, is_cancelled=No
     outcome = {"results": [], "errors": [], "reports": {}, "status": {}, "timings": {}}
     copies = find_copies(meshes, steps, settings)
     finished = {}       # malla original -> su resultado, para copiarlo a sus piezas repetidas
+    copied_from = {}    # resultado copiado -> resultado de la pieza de la que se copió
+    # misma densidad de texel entre mallas: se necesitan las UVs de todas, así que el semáforo espera a ese ajuste
+    common = bool(settings.get("uv_common_texel")) and "uv" in steps and len(meshes) > 1
 
     def tick():
         if progress:
@@ -205,12 +208,48 @@ def run(meshes, steps, settings, log=default_log, progress=None, is_cancelled=No
                 "warning")
             return None
         seconds = time.time() - began
-        log("{}: misma pieza que {}; se copia su {} en vez de repetirlo ({}).".format(
-            short_name(result), short_name(twin), " y ".join(STEP_LABELS[s].lower() for s in steps if s != "cleanup"),
+        log("{}: misma pieza que {}; se copia su resultado ({}) en vez de repetirlo ({}).".format(
+            short_name(result), short_name(twin), " + ".join(STEP_LABELS[s].lower() for s in steps if s != "cleanup"),
             format_duration(seconds)))
-        if original in outcome["status"]:
-            outcome["status"][result] = copy.deepcopy(outcome["status"][original])
+        copied_from[result] = original
         return result, copy.deepcopy(outcome["reports"].get(original, {})), {"copia": seconds, "total": seconds}
+
+    def judge(result):
+        """Semáforo del resultado (el de la pieza de la que se copió, si es una copia) y su resumen en el log."""
+        if result in outcome["status"]:
+            return
+        twin = copied_from.get(result)
+        if twin in outcome["status"]:
+            outcome["status"][result] = copy.deepcopy(outcome["status"][twin])
+            return
+        try:
+            results = status.evaluate(result, steps, outcome["reports"].get(result) or {}, settings)
+            outcome["status"][result] = results
+            status.log_status(result, results, log)
+        except Exception:
+            # el semáforo es informativo: si falla no estropea un resultado bueno
+            traceback.print_exc()
+
+    def match_texel_density():
+        """Misma densidad de texel en todas las mallas con UVs (uv_common_texel). Las copias de una pieza repetida se
+        quedan con las UVs de su pieza, que tienen la misma topología."""
+        unique = [m for m in outcome["results"] if m not in copied_from and "uv" in outcome["reports"].get(m, {})]
+        if len(unique) < 2:
+            return
+        try:
+            changed = uv.common_texel(unique, settings, log)
+        except (MBLError, RuntimeError) as exc:
+            log("No se pudo igualar la densidad de texel entre las mallas: {}".format(exc), "warning")
+            return
+        for mesh, density in changed.items():
+            report = outcome["reports"][mesh]["uv"]
+            report.update(uv.check(mesh, udim=bool(settings["uv_udim"])))
+            report["texel_density"] = density
+            report["common_texel"] = True
+        for result, twin in copied_from.items():
+            if twin in changed:
+                cmds.polyTransfer(result, uvSets=True, vertices=False, vertexColor=False, alternateObject=twin)
+                outcome["reports"][result]["uv"] = copy.deepcopy(outcome["reports"][twin]["uv"])
 
     with undo_chunk(), viewport_paused():
         for mesh in meshes:
@@ -245,15 +284,10 @@ def run(meshes, steps, settings, log=default_log, progress=None, is_cancelled=No
                         ", ".join("{} {}".format(STEP_LABELS[s].lower(), format_duration(timings[s])) for s in steps)))
                 outcome["timings"][current] = timings
                 outcome["results"].append(current)
+                outcome["reports"][current] = reports
                 finished[mesh] = current
-                if current not in outcome["status"]:
-                    try:
-                        results = status.evaluate(current, steps, reports, settings)
-                        outcome["status"][current] = results
-                        status.log_status(current, results, log)
-                    except Exception:
-                        # el semáforo es informativo: si falla no estropea un resultado bueno
-                        traceback.print_exc()
+                if not common:
+                    judge(current)
             except Cancelled:
                 log("Proceso cancelado. Lo ya hecho se puede deshacer con Ctrl+Z.", "warning")
                 outcome["errors"].append((mesh, "Cancelado"))
@@ -270,6 +304,12 @@ def run(meshes, steps, settings, log=default_log, progress=None, is_cancelled=No
                 outcome["errors"].append((mesh, message))
                 done = (meshes.index(mesh) + 1) * len(steps)
             outcome["reports"][current] = reports
+
+        if common:
+            if not any(message == "Cancelado" for _, message in outcome["errors"]):
+                match_texel_density()
+            for result in outcome["results"]:
+                judge(result)
 
         # dentro del chunk: si no, el primer Ctrl+Z solo desharía esta selección
         existing = [m for m in outcome["results"] if cmds.objExists(m)]

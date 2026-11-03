@@ -26,10 +26,12 @@ DEFAULTS = {
     "cleanup_conform_normals": True,
     "cleanup_fix_nonmanifold": True,
     # Retopo
-    # "auto", "maya" (polyRetopo), "mbl" o "instant_meshes". Maya frente a Instant Meshes (águila):
-    # 100% quads, 5 veces menos polos de 6+ aristas y 2,7 veces menos error medio. "auto" hace Maya y
-    # el Motor MBL y se queda el de menor coste (forma, polos y caras que no son quads)
-    "retopo_engine": "auto",
+    # "maya" (polyRetopo), "auto", "mbl" o "instant_meshes". Maya frente a Instant Meshes (águila):
+    # 100% quads, 5 veces menos polos de 6+ aristas y 2,7 veces menos error medio. En el banco (humano,
+    # prop, hardsurface, criatura y Midnight) Maya rinde mejor que el Motor MBL (fealdad del humano 1,70
+    # frente a 5,76), así que es el motor por defecto. "auto" hace Maya y el Motor MBL y se queda el de
+    # menor coste (forma, polos y caras que no son quads); "mbl" queda como experimental
+    "retopo_engine": "maya",
     "retopo_target_faces": 5000,
     # Motor MBL: variantes que prueba (3 = una ronda; 6 = calidad alta, el doble de tiempo) y segundos máximos
     "mbl_variants": 3,
@@ -109,7 +111,7 @@ DEFAULTS = {
 # Versión de los ajustes. Cuando cambia un valor por defecto porque las pruebas demostraron que el
 # nuevo es mejor, se sube la versión y se añade aquí la clave: los JSON guardados con una versión
 # anterior vuelven a usar el valor nuevo en esa clave (el resto de lo que eligió el usuario se respeta).
-SETTINGS_VERSION = 7
+SETTINGS_VERSION = 8
 UPGRADED_KEYS = {
     2: ("uv_seam_angle", "uv_optimize_iterations", "uv_split_shells"),
     3: ("retopo_engine",),
@@ -117,11 +119,15 @@ UPGRADED_KEYS = {
     5: ("mbl_time_budget",),
     6: ("uv_allow_rotation",),
 }
-# Valores que ya no existen porque se quitó un motor del plugin: los JSON guardados con una versión anterior
-# pasan al valor que lo sustituye. A diferencia de UPGRADED_KEYS, el resto de lo que eligió el usuario en esa
-# clave se respeta (quien tenía Maya sigue con Maya).
+# Valores que ya no existen porque se quitó un motor del plugin (7) o que eran el valor por defecto de antes (8): los
+# JSON guardados con una versión anterior pasan al valor que lo sustituye. A diferencia de UPGRADED_KEYS, el resto de lo
+# que eligió el usuario en esa clave se respeta (quien tenía Maya, Instant Meshes o el Motor MBL se queda con el suyo).
+# Se aplican en orden: QuadWild (6 o menos) pasa a Automático y de ahí a Maya. El 8 no distingue a quien eligió
+# «Automático» a mano antes de la 8 de quien lo tenía por ser el valor por defecto: los dos pasan a Maya y pueden
+# volver a elegirlo en el desplegable (a partir de la 8 se respeta).
 REPLACED_VALUES = {
     7: {"retopo_engine": {"quadwild": "auto"}},
+    8: {"retopo_engine": {"auto": "maya"}},
 }
 
 

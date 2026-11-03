@@ -22,7 +22,7 @@ Qué se comprueba:
 |---|---|---|
 | Limpieza | geometría no-manifold sin reparar | caras de área cero, láminas, vértices sueltos o de 2 aristas |
 | Retopo | no-manifold; menos del 85 % de vértices regulares; error de forma medio > 0,6 % o máximo > 5 %; nota 2 del juez (agujeros nuevos; ≥ 0,5 % de caras dadas la vuelta o dobladas; ≥ 10 % de quads deformados; ≥ 15 % de saltos de tamaño; ≥ 5 % de triángulos o n-gons) | agujeros que el original no tiene; < 98 % quads; < 92 % de vértices regulares; > 0,25 % de polos de 6+ aristas; error medio > 0,25 % o máximo > 2,5 %; nota 1 del juez (≥ 0,05 % de caras dadas la vuelta o dobladas; ≥ 3 % de quads deformados; ≥ 5 % de saltos de tamaño; ≥ 1 % de triángulos o n-gons) |
-| UVs | sin UVs o caras sin UVs; solapes; UVs en espejo; fuera del cuadro 0-1 (o islas cruzando UDIMs); < 35 % de textura aprovechada; > 20 % de caras estiradas | < 50 % de textura aprovechada; > 10 % de caras estiradas más de 1,5x |
+| UVs | sin UVs o caras sin UVs; solapes; UVs en espejo; fuera del cuadro 0-1 (o islas cruzando UDIMs); < 35 % de textura aprovechada; > 20 % de caras estiradas; nota 2 del juez de UVs (≥ 0,5 % de caras solapadas o en espejo; ≥ 1 % sin UVs; estiramiento medio ≥ 1,6x; ≥ 30 % de caras de más de 1,5x; densidad de texel entre islas ≥ 60 %; ≤ 20 % de textura aprovechada) | < 50 % de textura aprovechada; > 10 % de caras estiradas más de 1,5x; nota 1 del juez de UVs (cualquier cara solapada, en espejo o sin UVs; estiramiento medio ≥ 1,3x; ≥ 12 % de caras de más de 1,5x; densidad de texel entre islas ≥ 25 %; ≤ 40 % de textura aprovechada, también con Costuras escondidas; margen entre islas ≤ 0,001 en UV; ≤ 0,1 % de los cortes que casan) |
 
 Los umbrales salen de las pruebas con el humano y el águila: con los ajustes por defecto, los dos salen en verde.
 
@@ -61,10 +61,10 @@ Los consejos «→ qué tocar» de caras dadas la vuelta y dobladas (más caras,
 
 **Retopología**
 - *Motor*:
-  - **Automático** (por defecto): hace el retopo con Maya y con el Motor MBL y se queda con el de menor coste (forma, polos y caras que no son quads; ver *En el plugin (30/10)* más abajo). El log muestra las cifras de los dos y cuál se ha elegido. Tarda lo que los dos juntos (de 30 s a 2 min). Cuando el Motor MBL no entra (guías de flujo, detalle pintado o sin QuadriFlow) es solo Maya.
-    - Si tenías los ajustes guardados de una versión anterior, el motor pasa a Automático una vez; después se respeta lo que elijas.
-    - Los ajustes guardados con el motor por parches que se quitó (ver «Motores descartados») también pasan a Automático (versión 7 de los ajustes).
-  - **Maya (polyRetopo)**: el más rápido de los buenos.
+  - **Automático**: hace el retopo con Maya y con el Motor MBL y se queda con el de menor coste (forma, polos y caras que no son quads; ver *En el plugin (30/10)* más abajo). El log muestra las cifras de los dos y cuál se ha elegido. Tarda lo que los dos juntos (de 30 s a 2 min). Cuando el Motor MBL no entra (guías de flujo, detalle pintado o sin QuadriFlow) es solo Maya.
+    - Hasta la versión 7 de los ajustes era el motor por defecto; en la 8 pasó a ser Maya (ver «El motor por defecto pasa a Maya y la ventana se ordena»). Si lo tenías guardado de una versión anterior pasas a Maya una vez; después se respeta lo que elijas, también Automático.
+    - Los ajustes guardados con el motor por parches que se quitó (ver «Motores descartados») también pasan al motor por defecto (Automático en la versión 7, Maya desde la 8).
+  - **Maya (polyRetopo)** (por defecto desde la versión 8 de los ajustes): el más rápido de los buenos.
     - Va con *regularidad de topología* 1 (Maya trae 0,5). Se eligió con un barrido de sus parámetros:
       - **Humano a 2.000 caras:** polos de 157 a 142 y error medio del 0,207 % al 0,195 %. Las aristas en loops cerrados suben del 15 % al 25 %.
       - **Águila a 5.000 caras:** polos de 593 a 560 y polos de 6+ de 20 a 13.
@@ -667,7 +667,7 @@ mande a 2 salte.
 
 **Lo que no se ha hecho / dudoso.**
 
-- No se ha conectado al semáforo ni al banco (lo decide el probador). Los nombres de las cifras (`used_percent`, `over_1_5_percent`, `racord_*`, `islands`,
+- No se ha conectado al semáforo ni al banco (lo decide el probador; el semáforo lo conectó después la tarea U2, ver «El semáforo de UVs pasa por el juez de UVs»). Los nombres de las cifras (`used_percent`, `over_1_5_percent`, `racord_*`, `islands`,
   `stretch_mean`) son los de `uv` en `baseline.json`, para poder compararlas directamente.
 - `used_percent` suma áreas, como `uv.uv_area`: con solapes pasa de lo que cubre de verdad la textura, y con UDIM pasa de 100. Calcular la unión (rasterizando)
   no encaja con la validación de ±0,5 puntos frente a `uv.uv_area`.
@@ -680,3 +680,92 @@ mande a 2 salte.
 - Con la línea base solo se pudo medir de nuevo el prop, el humano y el hardsurface (retopo de Maya); de los otros siete resultados (criatura, midnight y el Motor MBL)
   solo hay las cifras que guarda `baseline.json`, que se pasan por `grade()` en la prueba rápida (sin margen ni texel, puestos como los del plugin).
 - Un único enfoque (cajas por rejilla + ejes separadores para solapes, segmentos para el margen): no hizo falta probar otro, no se llegó al criterio de abandono.
+
+## El semáforo de UVs pasa por el juez de UVs (3 de noviembre, tarea U2)
+
+**Qué cambia.** `status.uv_status` calcula también `uv_quality.report` y `uv_quality.grade` con las UVs de la malla, y el nivel del paso UVs es el peor entre lo que ya
+calculaba y la nota del juez (0 verde, 1 amarillo, 2 rojo). Los umbrales son los de `uv_quality.LIMITS`, sin tocarlos. El semáforo nunca sale más verde que `grade()`.
+
+**Cómo.**
+
+- `status.uv_arrays(transform)` saca los arrays que pide `report()`: puntos y caras en mundo (`retopo.mesh_arrays`) y `getUVs` / `getAssignedUVs` de `MFnMesh`
+  (el mismo formato que usa `test_uv_quality_matches_maya`). `status.uv_judge_report` llama a `report()`.
+- Cada cifra de `LIMITS` sale como un aviso con su nivel y su «→ qué tocar», con nombres que existen en la ventana (la mayoría están ahora dentro de *Avanzado*):
+
+  | cifra del juez | aviso | qué tocar |
+  |---|---|---|
+  | solapadas / en espejo / sin UVs | n.º de caras y % | repetir *UVs*; Costuras *Máxima resolución* o subir *Dividir islas* |
+  | estiramiento medio | `Estiramiento medio de 1,xx x` | subir *Optimize* o *Dividir islas*, o Costuras *Máxima resolución* |
+  | densidad de texel entre islas | `% de variación` | repetir *UVs* (el plugin da la misma densidad a todas; escalar islas a mano la rompe) |
+  | textura aprovechada | `Solo el x % ...` | subir *Intentos de empaquetado* o *Calidad de layout*, bajar *Padding*, marcar *UDIM* |
+  | cortes que no casan | `solo el x % de su longitud continúa` | bajar *Dividir islas* o elegir *Costuras escondidas*; dejar marcado *Islas rectas y de pie* y desmarcado *Permitir rotar islas* |
+  | margen entre islas | margen mínimo en px a la resolución elegida | subir *Padding* y repetir *UVs* |
+
+- Solo se añade un aviso del juez si es **más duro** que lo que `uv_status` ya avisaba con sus comprobaciones (así no sale dos veces). Solapes, espejos y caras sin UVs de
+  Maya ya son rojo con una sola cara, así que el juez solo aporta si Maya (`polyUVOverlap`) y el núcleo no coinciden. El estiramiento de antes (10 % / 20 % de caras de más
+  de 1,5x) ya es más duro que el del juez (12 % / 30 %). La textura aprovechada de antes (50 % / 35 %) también, salvo con *Costuras escondidas* (35 % / 25 %): ahí un 35-40 %
+  lo deja pasar el semáforo de antes y no el juez, y sale amarillo. Son nuevos el estiramiento medio, la densidad de texel entre islas, el margen y la continuidad de los cortes.
+- Como en el retopo, si `grade()` diera más nota que todos los avisos juntos se añade un aviso con sus razones (red de seguridad), y si el cálculo falla el paso sale en
+  amarillo con un aviso (traza en el Script Editor) y las comprobaciones de antes siguen.
+- Con UDIM, `used_percent` suma áreas (cada tile es un cuadrado 0-1) y pasaría de 100: se reparte entre los tiles que ocupan las islas.
+- Coste: 0,19 s el juez y 0,23 s `uv_status` entero con una malla de 4.704 caras (esfera de cubo desplegada con `uv.unwrap`); 0,05 s el juez con 4.900 caras en un plano. Con 152.100
+  caras (el máximo para UVs es 150.000) el juez tarda 2,1 s; el `uv_status` entero 38 s, casi todo en las comprobaciones de antes (`uv.check` con `polyUVOverlap`), no en el juez.
+
+**Pruebas nuevas** (`test_status_uv_judge`, sobre mallas con las UVs exactas que se les da, sin depender de Unfold3D): dos islas con la misma densidad, separadas y llenando la
+textura, una sola isla que llena el cuadro y dos islas en dos tiles UDIM salen en verde; una isla sobre otra, una en espejo (también con el informe de Maya diciendo que no hay
+nada, para que solo pueda verlo el juez), una con mitad de densidad, dos separadas por 0,0005 en UV, un 38 % de textura con *Costuras escondidas* y un corte con la segunda isla girada
+90 grados salen en no verde con su consejo; si el juez lanza una excepción sale amarillo. En todos, el nivel es >= `uv_quality.grade()`.
+
+**Banco** (`python tests\bench.py --models <bench_models.json> --only human,prop,hardsurface,criatura,midnight --engines maya --out %TEMP%\u2_1.json --compare tests\baseline.json`,
+5.000 caras, motor Maya, unos 2,5 min): el paso UVs de los cinco sigue en verde (0), como en la línea base; ninguno tiene nota 1 o 2 del juez (el prop, el humano y el hardsurface ya se
+sabía que daban 0; la criatura y Midnight, que solo se habían pasado por `grade()` con las cifras guardadas, también). Es decir: ninguno de los verdes de hoy pasa a amarillo.
+
+**Lo que no se ha hecho / dudoso.**
+
+- La densidad de texel entre islas y el estiramiento van muy ligados: con dos islas de la misma área 3D, llegar al 25 % de variación (amarillo) obliga a que la mitad de las caras pasen del
+  1,5x de estiramiento (rojo por el aviso de antes). El aviso de densidad solo sale sin el de estiramiento cuando las islas tienen áreas muy distintas; en la prueba salen los dos.
+- Los umbrales de `LIMITS` son los del probador y no se han tocado. `racord_percent` <= 0,1 % da amarillo: una esfera desplegada en tres islas puede tener 0 % de continuidad
+  y no hay forma de dejarlo verde salvo dar otro corte; la esfera de `test_status` (3 islas) sale en verde; en la esfera de cubo de 4.704 caras de las medidas la continuidad (17 %) no da aviso (la dejó en rojo la textura aprovechada, un 30 % con los ajustes rápidos de esa prueba, no el juez).
+- En UDIM no se mide la textura aprovechada de antes (no tiene sentido con varios tiles): solo la del juez, repartida entre los tiles ocupados.
+
+## El motor por defecto pasa a Maya y la ventana se ordena (3 de noviembre, tarea U2)
+
+**Decisión del proyecto.** El Motor MBL no pasa a ser el motor único: queda visible solo como experimental y no se quita ningún otro motor. En el banco (`tests/baseline.json`,
+5 modelos a 5.000 caras, fealdad = `defect_score` del juez de retopo) Maya rinde mejor que el Motor MBL en cuatro de los cinco:
+
+| modelo | fealdad Maya | fealdad Motor MBL |
+|---|---|---|
+| humano | 1,70 | 5,76 |
+| prop | 0,92 | 5,66 |
+| criatura | 3,90 | 4,68 |
+| midnight | 3,15 | 5,79 |
+| hardsurface | 0,91 | 0,00 |
+
+Con quads deformados del 1,5 % (Maya) frente al 12,0 % (Motor MBL) en el humano, y 0,3 % frente a 2,5 % en el prop. El hardsurface es la excepción (el Motor MBL sale con nota 0 y Maya con 1).
+
+**Motor por defecto.** `config.DEFAULTS["retopo_engine"]` pasa de `"auto"` a `"maya"`. `SETTINGS_VERSION` sube a 8 y `REPLACED_VALUES[8] = {"retopo_engine": {"auto": "maya"}}`: los JSON
+guardados con una versión anterior que tenían Automático pasan a Maya una vez; quien eligió Maya, Instant Meshes o el Motor MBL conserva el suyo; con la versión 8 Automático se respeta. Los
+valores de `REPLACED_VALUES` se aplican en orden, así que QuadWild (versión 6 o menos) pasa por Automático y acaba en Maya. **No se puede distinguir** a quien eligió Automático a mano
+antes de la 8 de quien lo tenía por ser el defecto (el JSON guarda todas las claves): los dos pasan a Maya y pueden volver a elegirlo.
+
+**Ventana.**
+
+- A la vista, en *Ajustes principales*: **Motor** (con su nota), **Caras objetivo**, **Recomendar caras** y **Resolución textura**. Debajo, siempre visibles, los botones (*Todo* arriba, y *Limpiar*,
+  *Retopo*, *UVs*), la barra de progreso, el semáforo y el log.
+- Plegado en un único grupo **Avanzado** (casilla en el título, cerrado por defecto) y con subgrupos: *Limpieza*; *Retopo* (simetría, opciones del Motor MBL y de Instant Meshes, ángulo de aristas duras,
+  reproyección, polos, relajado, piezas pequeñas, agujeros, tiempo máximo, *Diagnóstico*); *Instant Meshes* (ruta del programa, solo con ese motor); *Guías de flujo*; *Pincel de detalle*; *UVs* (todas menos la resolución).
+  Los 45 widgets de `self.widgets` siguen con su nombre (`collect_settings` y las pruebas dependen de ellos); no se quitó ninguna opción.
+- El desplegable: Maya (polyRetopo, recomendado), Automático, Motor MBL (experimental), Instant Meshes. La nota del Motor MBL empieza por «EXPERIMENTAL, no recomendado para trabajar» y la de Maya dice que es el recomendado.
+  Se quitó del Motor MBL el texto de «la mejor fidelidad de forma» (la línea base ya no lo respalda: error medio de forma 0,155 % frente a 0,084 % en el humano).
+- Con Instant Meshes elegido y su programa sin encontrar, *Avanzado* se abre solo (la ruta está dentro).
+- Los consejos del semáforo que decían «(en 'Más opciones')» dicen ahora «(en 'Avanzado')» (y ya no nombran a QuadWild, que se quitó).
+
+**Pruebas.** `test_ui_builds` cambia lo que comprueba el orden del desplegable (`["maya", "auto", "mbl", "instant_meshes"]`) y el motor al que cae un valor desconocido (`"maya"`, el nuevo defecto) y
+añade: la nota experimental, que ningún widget se quitó, que solo motor / caras / resolución quedan fuera de *Avanzado* y que *Avanzado* se abre con Instant Meshes sin programa.
+`test_config_removed_engine` espera `"maya"` en vez de `"auto"` (QuadWild pasa por Automático hasta Maya; Automático guardado con la versión actual se respeta) y la nueva
+`test_config_default_engine_migration` prueba la migración (versiones sin número, 3, 5, 6 y 7 con `auto` a `maya`; `maya`, `mbl` e `instant_meshes` se conservan; `auto` con la versión 8 se conserva; guardar y volver a cargar no repite la migración).
+
+**Banco con el motor por defecto** (el mismo comando de arriba; `bench.py` copia `config.DEFAULTS` y pone el motor de `--engines`, así que con el defecto en Maya y con `--engines maya` es lo mismo).
+Humano: 5.095 caras, 99,8 % quads, 174 polos, error de forma 0,084 %, fealdad 1,701, UV 60,3 % usado, igual que la línea base. El prop (5.049 caras, 53 polos, 0,087 %, 0,915), el hardsurface (4.738, 34, 0,019 %, 0,908),
+la criatura (5.721, 363, 0,129 %, 3,901) y Midnight (5.355, 258, 0,138 %, 3,148) también. Las únicas diferencias con `baseline.json` son el paso Retopo del semáforo (hardsurface 0 a 1, humano 0 a 2, prop 1 a 2: viene del
+juez de retopo, anterior a esta tarea) y dos centésimas de `over_1_5_percent` (Midnight 6,52 a 6,54, prop 1,23 a 1,25; `uv.py` no se tocó).

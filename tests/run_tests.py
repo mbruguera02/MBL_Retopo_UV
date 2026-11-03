@@ -155,7 +155,8 @@ def test_config_roundtrip():
 
 @test
 def test_config_removed_engine():
-    """Ajustes guardados con un motor que ya no existe (QuadWild) pasan a Automático; las demás elecciones se respetan."""
+    """Ajustes guardados con un motor que ya no existe (QuadWild) pasan al motor por defecto (Maya, tras pasar por
+    Automático, que era el defecto cuando se quitó); las demás elecciones se respetan."""
     path = os.path.join(tempfile.mkdtemp(), "settings.json")
 
     def load_with(engine, version=None):
@@ -172,16 +173,55 @@ def test_config_removed_engine():
     # cualquier versión anterior a la que lo quitó (sin versión = 1), también las que ya conservaban el motor elegido (3 a 6)
     for version in (None, 3, 4, 5, 6):
         loaded = load_with("quadwild", version)
-        assert loaded["retopo_engine"] == "auto", (version, loaded["retopo_engine"])
+        assert loaded["retopo_engine"] == config.DEFAULTS["retopo_engine"] == "maya", (version, loaded["retopo_engine"])
         assert loaded["retopo_target_faces"] == 777, version
-    # los motores que siguen existiendo se quedan como los eligió el usuario
-    for engine in ("maya", "mbl", "instant_meshes", "auto"):
+    # los motores que siguen existiendo se quedan como los eligió el usuario (Automático, desde la versión que cambió el defecto)
+    for engine in ("maya", "mbl", "instant_meshes"):
         assert load_with(engine, 6)["retopo_engine"] == engine, engine
+    assert load_with("auto", config.SETTINGS_VERSION)["retopo_engine"] == "auto"
     # tras guardar con la versión nueva el JSON ya no tiene el motor viejo y se lee igual
     config.save(load_with("quadwild", 6), path)
     with open(path, "r", encoding="utf-8") as handle:
         assert '"quadwild"' not in handle.read()
+    assert config.load(path)["retopo_engine"] == "maya"
+
+
+@test
+def test_config_default_engine_migration():
+    """El motor por defecto pasó de Automático a Maya (el banco: Maya rinde mejor que el Motor MBL): quien tenía el valor
+    de antes pasa a Maya; quien eligió otro motor a mano conserva el suyo; a partir de la versión nueva Automático se respeta."""
+    path = os.path.join(tempfile.mkdtemp(), "settings.json")
+
+    def load_with(version, engine=None):
+        data = '"_version": {}, "retopo_target_faces": 777'.format(version) if version is not None else '"retopo_target_faces": 777'
+        if engine is not None:
+            data += ', "retopo_engine": "{}"'.format(engine)
+        with open(path, "w") as handle:
+            handle.write("{" + data + "}")
+        return config.load(path)
+
+    assert config.DEFAULTS["retopo_engine"] == "maya" and config.SETTINGS_VERSION >= 8
+    assert config.REPLACED_VALUES[8]["retopo_engine"] == {"auto": "maya"}
+    # sin archivo, o con un archivo sin el motor: el defecto nuevo
+    assert config.load(os.path.join(os.path.dirname(path), "no_existe.json"))["retopo_engine"] == "maya"
+    assert load_with(7)["retopo_engine"] == "maya"
+    # el defecto de antes (Automático), en cualquier versión anterior: Maya, y el resto de los ajustes se queda
+    for version in (None, 3, 5, 6, 7):
+        loaded = load_with(version, "auto")
+        assert loaded["retopo_engine"] == "maya", (version, loaded["retopo_engine"])
+        assert loaded["retopo_target_faces"] == 777, version
+    # quien eligió otro motor a mano lo conserva
+    for version in (6, 7):
+        for engine in ("maya", "mbl", "instant_meshes"):
+            assert load_with(version, engine)["retopo_engine"] == engine, (version, engine)
+    # con la versión nueva, Automático es una elección y se respeta; al guardar y cargar la migración no se repite
+    assert load_with(config.SETTINGS_VERSION, "auto")["retopo_engine"] == "auto"
+    config.save(dict(config.DEFAULTS, retopo_engine="auto"), path)
     assert config.load(path)["retopo_engine"] == "auto"
+    config.save(load_with(7, "auto"), path)
+    with open(path, "r", encoding="utf-8") as handle:
+        assert '"retopo_engine": "maya"' in handle.read()
+    assert config.load(path)["retopo_engine"] == "maya"
 
 
 @test
@@ -1116,6 +1156,117 @@ def test_status():
     assert status.cleanup_status(nonmanifold)["level"] == status.RED
 
 
+def make_uv_mesh(points, faces, uvs, uv_faces):
+    """Malla con las UVs exactas que se le dan (para probar el semáforo sin depender del despliegue de Unfold3D)."""
+    fn = om.MFnMesh()
+    fn.create([om.MPoint(*p) for p in points], [len(f) for f in faces], [i for f in faces for i in f])
+    fn.setUVs([u for u, _ in uvs], [v for _, v in uvs])
+    fn.assignUVs([len(f) for f in uv_faces], [i for f in uv_faces for i in f])
+    return cmds.listRelatives(fn.fullPathName(), parent=True, fullPath=True)[0]
+
+
+def make_uv_planes(rects, n=4):
+    """Un plano suelto de 1x1 (n x n quads) por rectángulo (u0, v0, u1, v1), con las UVs planares dentro de él.
+    Con u0 > u1 la isla sale en espejo."""
+    points, faces, uvs, uv_faces = [], [], [], []
+    for k, (u0, v0, u1, v1) in enumerate(rects):
+        base = len(points)
+        for j in range(n + 1):
+            for i in range(n + 1):
+                points.append((2.0 * k + i / float(n), j / float(n), 0.0))
+                uvs.append((u0 + (u1 - u0) * i / float(n), v0 + (v1 - v0) * j / float(n)))
+        for j in range(n):
+            for i in range(n):
+                a = base + j * (n + 1) + i
+                faces.append([a, a + 1, a + n + 2, a + n + 1])
+        uv_faces.extend(list(f) for f in faces[-n * n:])
+    return make_uv_mesh(points, faces, uvs, uv_faces)
+
+
+@test
+def test_status_uv_judge():
+    """Semáforo de UVs con el juez de UVs (uv_quality.grade): UVs buenas -> verde; solapadas, en espejo, con densidad distinta,
+    islas casi pegadas, costuras que no casan o poca textura -> no verde, con su consejo; nunca más verde que la nota del juez."""
+    from mbl_engine import uv_quality
+    left, right = (0.02, 0.02, 0.49, 0.98), (0.51, 0.02, 0.98, 0.98)
+
+    def judged(mesh, hidden_seams=False, report=None):
+        result = status.uv_status(mesh, report, 2048, hidden_seams)
+        grade = uv_quality.grade(uv_quality.report(*status.uv_arrays(mesh)))[0]
+        assert result["level"] >= grade, (result["level"], grade, result["checks"])
+        return result
+
+    def bad_checks(result):
+        return [c for c in result["checks"] if c["level"] != status.GREEN]
+
+    def lying_report(mesh):
+        """El informe de uv.check dice que no hay solapes ni espejos: solo el juez los puede ver."""
+        return dict(uv.check(mesh), overlapping_faces=0, flipped_faces=0)
+
+    # dos islas con la misma densidad, bien separadas y llenando la textura: verde, con la línea del juez
+    result = judged(make_uv_planes([left, right]))
+    assert result["level"] == status.GREEN, bad_checks(result)
+    assert any("Densidad de texel igual entre islas" in c["text"] for c in result["checks"]), result["checks"]
+    # una sola isla que llena el cuadro (sin margen ni costuras que medir): verde
+    assert judged(make_uv_planes([(0.0, 0.0, 1.0, 1.0)]))["level"] == status.GREEN
+    # UDIM: dos islas en dos tiles, sin falsa alarma de textura (la suma de áreas pasa de 100 %)
+    udim = make_uv_planes([(0.02, 0.02, 0.98, 0.98), (1.02, 0.02, 1.98, 0.98)])
+    assert uv.check(udim, udim=True)["shells"] == 2
+    assert judged(udim)["level"] == status.GREEN, bad_checks(judged(udim))
+
+    # una isla encima de la otra: rojo, y con el informe de Maya diciendo que no hay solapes lo ve el juez
+    overlapped = make_uv_planes([left, left])
+    result = judged(overlapped)
+    assert result["level"] == status.RED and any("solapadas" in c["text"] and c["advice"] for c in bad_checks(result)), result
+    result = judged(overlapped, report=lying_report(overlapped))
+    assert any(c["level"] == status.RED and "solapadas" in c["text"] and c["advice"] for c in bad_checks(result)), bad_checks(result)
+
+    # una isla en espejo: rojo (idem)
+    mirrored = make_uv_planes([left, (0.98, 0.02, 0.51, 0.98)])
+    result = judged(mirrored, report=lying_report(mirrored))
+    assert any(c["level"] == status.RED and "espejo" in c["text"] and c["advice"] for c in bad_checks(result)), bad_checks(result)
+
+    # una isla con la mitad de densidad que la otra: aviso de densidad (amarillo; con tanta diferencia también salta el estiramiento)
+    result = judged(make_uv_planes([left, (0.51, 0.02, 0.745, 0.5)]))
+    assert any(c["level"] == status.YELLOW and "Densidad de texel" in c["text"] and "Repite 'UVs'" in c["advice"]
+               for c in bad_checks(result)), bad_checks(result)
+
+    # islas separadas por 0,0005 en UV (1 px a 2048): amarillo, y el consejo habla del Padding
+    result = judged(make_uv_planes([(0.02, 0.02, 0.4998, 0.98), (0.5003, 0.02, 0.98, 0.98)]))
+    assert result["level"] == status.YELLOW, bad_checks(result)
+    assert any("casi pegadas" in c["text"] and "Padding" in c["advice"] for c in bad_checks(result)), bad_checks(result)
+
+    # con Costuras escondidas el umbral de textura aprovechada de antes (35 %) deja pasar un 38 %; el juez (40 %), no
+    small = make_uv_planes([(0.19, 0.19, 0.81, 0.81)])
+    assert status._grade(38.44, status.UV_COVERAGE_HIDDEN_PERCENT, higher_is_worse=False) == status.GREEN
+    result = judged(small, hidden_seams=True)
+    assert result["level"] == status.YELLOW, bad_checks(result)
+    assert any("textura aprovechada" in c["text"] and c["advice"] for c in bad_checks(result)), bad_checks(result)
+
+    # dos quads vecinos con el segundo girado 90 en UV: el corte no casa -> amarillo con consejo (no rojo: no es un fallo grave)
+    points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0)]
+    uvs = [(0.02, 0.02), (0.49, 0.02), (0.49, 0.49), (0.02, 0.49),
+           (0.98, 0.02), (0.98, 0.49), (0.51, 0.49), (0.51, 0.02)]
+    turned = make_uv_mesh(points, [[0, 1, 4, 3], [1, 2, 5, 4]], uvs, [[0, 1, 2, 3], [4, 5, 6, 7]])
+    result = judged(turned)
+    assert any(c["level"] == status.YELLOW and "no casan" in c["text"] and "Dividir islas" in c["advice"]
+               for c in bad_checks(result)), bad_checks(result)
+    # lo mismo con el segundo quad sin girar (UVs contiguas, una sola isla): sin avisos
+    flat = make_uv_mesh(points, [[0, 1, 4, 3], [1, 2, 5, 4]], [(0.02, 0.02), (0.49, 0.02), (0.98, 0.02), (0.02, 0.98),
+                                                              (0.49, 0.98), (0.98, 0.98)], [[0, 1, 4, 3], [1, 2, 5, 4]])
+    assert judged(flat)["level"] == status.GREEN, bad_checks(judged(flat))
+
+    # si el juez falla, el paso sale en amarillo con un aviso (nunca verde sin saberlo) y las comprobaciones de antes siguen
+    original = status.uv_quality.report
+    status.uv_quality.report = lambda *args: 1 / 0
+    try:
+        result = status.uv_status(make_uv_planes([left, right]), None, 2048, False)
+    finally:
+        status.uv_quality.report = original
+    assert result["level"] == status.YELLOW, result
+    assert any("No he podido calcular la calidad de las UVs" in c["text"] and c["advice"] for c in result["checks"]), result
+
+
 def make_cube_sphere(name, subdivisions=16, radius=1.0):
     """Esfera de solo quads (un cubo subdividido y redondeado): un retopo limpio, sin triángulos ni polos de 5."""
     cube = cmds.polyCube(width=2, height=2, depth=2, subdivisionsX=subdivisions, subdivisionsY=subdivisions,
@@ -1564,13 +1715,38 @@ assert collected["uv_udim"] is True and collected["retopo_target_faces"] == 777,
 assert collected["uv_map_size"] == 8192, collected
 window.save_settings()
 assert config.load(sys.argv[2])["retopo_target_faces"] == 777
-# el desplegable de motores: solo los que existen (un motor que ya no existe se queda en Automático)
+# el desplegable de motores: solo los que existen, Maya primero y recomendado, y el Motor MBL como experimental con su aviso
+# (un motor que ya no existe se queda en el de por defecto, Maya)
 combo = window.widgets["retopo_engine"]
-assert [combo.itemData(i) for i in range(combo.count())] == ["auto", "mbl", "maya", "instant_meshes"]
-window.apply_settings(dict(config.DEFAULTS, retopo_engine="maya"))
-assert window.collect_settings()["retopo_engine"] == "maya"
+assert [combo.itemData(i) for i in range(combo.count())] == ["maya", "auto", "mbl", "instant_meshes"]
+assert "recomendado" in combo.itemText(0) and "experimental" in combo.itemText(combo.findData("mbl")), combo.itemText(0)
+assert "EXPERIMENTAL" in ui.ENGINE_NOTES["mbl"] and "Recomendado" in ui.ENGINE_NOTES["maya"]
+window.apply_settings(dict(config.DEFAULTS))
+assert window.collect_settings()["retopo_engine"] == "maya" and "Recomendado" in window.engine_note.text()
+for engine in ("auto", "mbl", "instant_meshes"):
+    window.apply_settings(dict(config.DEFAULTS, retopo_engine=engine))
+    assert window.collect_settings()["retopo_engine"] == engine
+window.apply_settings(dict(config.DEFAULTS, retopo_engine="mbl"))
+assert "EXPERIMENTAL" in window.engine_note.text()
 window.apply_settings(dict(config.DEFAULTS, retopo_engine="quadwild"))
-assert window.collect_settings()["retopo_engine"] == "auto"
+assert window.collect_settings()["retopo_engine"] == "maya"
+# lo principal fuera de «Avanzado» y todo lo demás dentro, plegado; ninguna opción se quita
+internal = {"uv_split_big_shells", "retopo_orient", "uv_rotate_step", "uv_pack_iterations", "uv_pre_rotate"}  # sin casilla en la ventana
+assert set(window.widgets) == set(config.DEFAULTS) - internal, set(window.widgets) ^ (set(config.DEFAULTS) - internal)
+assert not window.advanced_box.isChecked() and window.advanced_box.title() == "Avanzado"
+main = ("retopo_engine", "retopo_target_faces", "uv_map_size")
+for key, widget in window.widgets.items():
+    assert window.advanced_box.isAncestorOf(widget) != (key in main), key
+# Instant Meshes sin su programa: «Avanzado» se despliega para que se vea dónde indicar la ruta
+real_find = config.find_instant_meshes
+config.find_instant_meshes = lambda settings, platform=None: None
+try:
+    window.apply_settings(dict(config.DEFAULTS, retopo_engine="instant_meshes"))
+    assert window.advanced_box.isChecked()
+finally:
+    config.find_instant_meshes = real_find
+window.advanced_box.setChecked(False)
+window.apply_settings(dict(config.DEFAULTS))
 window.show_status({"|pieza": [{"step": "uv", "level": 2,
                                  "checks": [{"level": 2, "text": "3 caras solapadas", "advice": "Repite 'UVs'."}]}]})
 top = window.status_tree.topLevelItem(0)

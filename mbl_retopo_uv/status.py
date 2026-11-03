@@ -11,15 +11,20 @@ ajustes por defecto:
 
 El paso Retopo también pasa por el juez del motor (mbl_engine.quality: quads deformados, saltos de
 tamaño, caras dadas la vuelta o dobladas, triángulos y agujeros nuevos), con sus mismos umbrales: el
-semáforo nunca sale más verde que la nota del juez (0 verde, 1 amarillo, 2 rojo).
+semáforo nunca sale más verde que la nota del juez (0 verde, 1 amarillo, 2 rojo). El paso UVs hace lo mismo con
+el juez de UVs (mbl_engine.uv_quality: solapes, espejos, estiramiento, aprovechado, densidad de texel entre islas,
+margen y continuidad de los cortes), con sus mismos umbrales.
 """
+
+import math
 
 import maya.api.OpenMaya as om
 import maya.cmds as cmds
+import numpy as np
 
 from . import cleanup, diagnostics, retopo, uv
 from .common import dag_path, mesh_shape, short_name
-from mbl_engine import quality
+from mbl_engine import quality, uv_quality
 from mbl_engine.analyze import thousands
 from mbl_engine.mesh import Mesh
 
@@ -128,14 +133,14 @@ def _judge_checks(report, levels, compared):
         checks.append(_check(levels["bad_shape_percent"],
                              "{:.1f}% de quads deformados (ángulos muy agudos o abiertos, lados muy desiguales)".format(
                                  values["bad_shape_percent"]),
-                             "La textura se estiraría en esas caras. Con Maya, QuadWild o Instant Meshes sube 'Relajar "
-                             "quads' (en 'Más opciones'); o prueba otro motor: 'Automático' elige el mejor."))
+                             "La textura se estiraría en esas caras. Con Maya o Instant Meshes sube 'Relajar quads' "
+                             "(en 'Avanzado'); o prueba otro motor: 'Automático' elige el mejor."))
     if levels["size_jump_percent"]:
         checks.append(_check(levels["size_jump_percent"],
                              "{:.1f}% de saltos de tamaño entre caras vecinas (una cara más de {:g} veces mayor que la "
                              "de al lado)".format(values["size_jump_percent"], quality.SIZE_JUMP),
-                             "Con Maya, QuadWild o Instant Meshes sube 'Relajar quads' (en 'Más opciones') para igualar "
-                             "los tamaños, o prueba otro motor. Si pintaste detalle, el salto en el borde de lo pintado "
+                             "Con Maya o Instant Meshes sube 'Relajar quads' (en 'Avanzado') para igualar los tamaños, "
+                             "o prueba otro motor. Si pintaste detalle, el salto en el borde de lo pintado "
                              "es normal: baja 'Densidad en lo pintado'."))
     if levels["flipped_percent"]:
         checks.append(_check(levels["flipped_percent"],
@@ -266,6 +271,98 @@ def _unmapped_faces(transform):
     return sum(1 for c in counts if c == 0)
 
 
+def uv_arrays(transform):
+    """(puntos, caras, puntos UV Mx2, caras de UV) de la malla, como los pide uv_quality.report (el mismo formato
+    que usa test_uv_quality_matches_maya)."""
+    points, faces = retopo.mesh_arrays(transform)
+    fn = om.MFnMesh(dag_path(mesh_shape(transform)))
+    us, vs = fn.getUVs()
+    counts, ids = fn.getAssignedUVs()
+    ids = list(ids)
+    uv_faces, start = [], 0
+    for count in counts:
+        uv_faces.append(ids[start:start + count])
+        start += count
+    return points, faces, np.column_stack([us, vs]), uv_faces
+
+
+def uv_judge_report(transform, udim=False):
+    """Informe de uv_quality.report de las UVs de la malla. En UDIM `used_percent` suma áreas (cada tile es un cuadrado 0-1
+    y pasaría de 100), así que se reparte entre los tiles que ocupan las islas."""
+    report = uv_quality.report(*uv_arrays(transform))
+    if udim:
+        tiles = {(math.floor((b[0] + b[1]) * 0.5), math.floor((b[2] + b[3]) * 0.5)) for b in uv.shell_bounds(transform)}
+        report["used_percent"] /= max(len(tiles), 1)
+    return report
+
+
+def _uv_judge_values(report):
+    """Cifras que mira uv_quality.grade, con los nombres de uv_quality.LIMITS."""
+    faces = max(report["faces"], 1)
+    return {"overlapping_percent": 100.0 * report["overlapping_faces"] / faces,
+            "flipped_percent": 100.0 * report["flipped_faces"] / faces,
+            "unmapped_percent": 100.0 * (report["faces"] - report["mapped_faces"]) / faces,
+            "stretch_mean": report["stretch_mean"], "over_1_5_percent": report["over_1_5_percent"],
+            "texel_variation_percent": report["texel_variation_percent"], "used_percent": report["used_percent"],
+            "racord_percent": report["racord_percent"] if report["seam_percent"] > 0 else None,
+            "margin_min": report["margin_min"]}
+
+
+def _uv_judge_level(key, value):
+    if value is None:
+        return GREEN
+    review, bad = uv_quality.LIMITS[key]
+    worse = (lambda v, limit: v <= limit) if key in uv_quality.LOWER_IS_WORSE else (lambda v, limit: v >= limit)
+    return RED if bad is not None and worse(value, bad) else YELLOW if worse(value, review) else GREEN
+
+
+def _uv_judge_checks(report, values, levels, covered, map_size=None, udim=False):
+    """Avisos del juez de UVs con su «→ qué tocar». `covered` = nivel que ya da uv_status a esa cifra con sus propias
+    comprobaciones: solo sale un aviso nuevo si el juez es más duro (así no se repite lo que ya se avisa). Sin avisos,
+    una línea en verde."""
+    margin = values["margin_min"]
+    margin_text = "{:.1f} px en la textura de {}".format(margin * map_size, map_size) if margin is not None and map_size else \
+        "{}".format(margin)
+    texts = {
+        "overlapping_percent": ("{} caras con UVs solapadas ({:.2f}%)".format(report["overlapping_faces"], values["overlapping_percent"]),
+                                "Se pintarían a la vez en Substance. Repite 'UVs'; si sigue, usa Costuras 'Máxima resolución' "
+                                "o sube 'Dividir islas'."),
+        "flipped_percent": ("{} caras con UVs en espejo ({:.2f}%)".format(report["flipped_faces"], values["flipped_percent"]),
+                            "Los normal maps saldrían invertidos. Repite 'UVs'."),
+        "unmapped_percent": ("{} caras sin UVs ({:.2f}%)".format(report["faces"] - report["mapped_faces"], values["unmapped_percent"]),
+                             "Repite 'UVs'."),
+        "stretch_mean": ("Estiramiento medio de {:.2f}x (1x = sin deformar)".format(values["stretch_mean"]),
+                         "La textura se vería deformada en general. Sube 'Optimize' o 'Dividir islas', o usa Costuras "
+                         "'Máxima resolución', y repite 'UVs'."),
+        "over_1_5_percent": ("{:.1f}% de caras estiradas más de 1.5x".format(values["over_1_5_percent"]),
+                             "La textura se vería deformada ahí. Sube 'Optimize' o 'Dividir islas', o usa Costuras "
+                             "'Máxima resolución', y repite 'UVs'."),
+        "texel_variation_percent": ("Densidad de texel distinta entre islas ({:.0f}% de variación)".format(
+                                        values["texel_variation_percent"]),
+                                    "Unas partes saldrían más nítidas que otras al texturizar. Repite 'UVs': el plugin da la "
+                                    "misma densidad a todas las islas (si escalaste islas a mano, se pierde)."),
+        "used_percent": ("Solo el {:.0f}% de {} aprovechado".format(values["used_percent"], "cada tile UDIM" if udim else "la textura"),
+                         "Sube 'Intentos de empaquetado' o 'Calidad de layout'"
+                         + (" o baja 'Nº de UDIMs' para que las islas llenen menos tiles." if udim else
+                            ", baja 'Padding' o marca 'UDIM' para tener más resolución.")),
+        "racord_percent": ("Costuras que no casan: solo el {:.1f}% de su longitud continúa de un lado al otro sin giro ni "
+                           "cambio de escala".format(values["racord_percent"] or 0.0),
+                           "El dibujo de la textura (vetas, rayones) se cortaría en cada costura. Para tener menos cortes baja "
+                           "'Dividir islas' o elige 'Costuras escondidas' (en Costuras); deja marcado 'Islas rectas y de pie' "
+                           "y desmarcado 'Permitir rotar islas'."),
+        "margin_min": ("Islas casi pegadas: margen mínimo de {}".format(margin_text),
+                       "El color de una isla manchará a la vecina al hornear o con mipmaps. Sube 'Padding' y repite 'UVs'."),
+    }
+    checks = [_check(level, *texts[key]) for key, level in levels.items() if level > covered.get(key, GREEN)]
+    if not checks:
+        parts = ["densidad de texel igual entre islas ({:.1f}% de variación)".format(report["texel_variation_percent"])]
+        if margin is not None:
+            parts.append("margen entre islas de {}".format(margin_text))
+        text = "; ".join(parts)
+        checks.append(_check(GREEN, text[0].upper() + text[1:]))
+    return checks
+
+
 def uv_status(transform, report=None, map_size=None, hidden_seams=False):
     fn = om.MFnMesh(dag_path(mesh_shape(transform)))
     if fn.numUVs() == 0:
@@ -276,17 +373,35 @@ def uv_status(transform, report=None, map_size=None, hidden_seams=False):
         report = uv.check(transform, udim=udim)
     stretch = report.get("stretch") or uv.stretch(transform)
     checks = []
+    # nivel que ya da a cada cifra del juez de UVs lo que se comprueba aquí abajo
+    covered = {}
+
+    # el juez de UVs (la misma nota que el banco de pruebas): además de lo de abajo mira la densidad entre islas, el
+    # margen, el estiramiento medio y la continuidad de los cortes
+    try:
+        judge = uv_judge_report(transform, udim)
+        judge_values = _uv_judge_values(judge)
+        judge_levels = {key: _uv_judge_level(key, value) for key, value in judge_values.items()}
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        judge = judge_values = judge_levels = None
+        checks.append(_check(YELLOW, "No he podido calcular la calidad de las UVs (densidad entre islas, margen, costuras)",
+                             "Pulsa 'Comprobar estado' otra vez; si se repite, repite 'UVs'."))
 
     unmapped = _unmapped_faces(transform)
     if unmapped:
         checks.append(_check(RED, "{} caras sin UVs".format(unmapped), "Repite 'UVs'."))
+        covered["unmapped_percent"] = RED
     if report["overlapping_faces"]:
         checks.append(_check(RED, "{} caras con UVs solapadas".format(report["overlapping_faces"]),
                              "Se pintarían a la vez en Substance. Repite 'UVs'; si sigue, usa Costuras "
                              "'Máxima resolución' o sube 'Dividir islas'."))
+        covered["overlapping_percent"] = RED
     if report["flipped_faces"]:
         checks.append(_check(RED, "{} caras con UVs en espejo".format(report["flipped_faces"]),
                              "Los normal maps saldrían invertidos. Repite 'UVs'."))
+        covered["flipped_percent"] = RED
     if udim:
         if umin < -1e-5 or vmin < -1e-5:
             checks.append(_check(RED, "UVs en coordenadas negativas", "Repite 'UVs' con 'UDIM' marcado."))
@@ -300,6 +415,10 @@ def uv_status(transform, report=None, map_size=None, hidden_seams=False):
         coverage = 100.0 * uv.uv_area(transform)
         limits = UV_COVERAGE_HIDDEN_PERCENT if hidden_seams else UV_COVERAGE_PERCENT
         level = _grade(coverage, limits, higher_is_worse=False)
+        if judge_levels:
+            # con Costuras escondidas los umbrales de aquí son más tolerantes que los del juez: manda el más duro
+            level = max(level, judge_levels["used_percent"])
+        covered["used_percent"] = level
         advice = ("Sube 'Intentos de empaquetado' o 'Calidad de layout', baja 'Padding' o marca 'UDIM' "
                   "para tener más resolución.")
         if hidden_seams:
@@ -310,6 +429,7 @@ def uv_status(transform, report=None, map_size=None, hidden_seams=False):
                              "" if level == GREEN else advice))
 
     level = _grade(stretch["over_1_5_percent"], UV_STRETCH_PERCENT)
+    covered["over_1_5_percent"] = level
     checks.append(_check(level, "{:.1f}% de caras estiradas más de 1.5x".format(stretch["over_1_5_percent"]),
                          "" if level == GREEN else
                          "La textura se vería deformada ahí. Sube 'Optimize' o 'Dividir islas', o usa "
@@ -317,6 +437,13 @@ def uv_status(transform, report=None, map_size=None, hidden_seams=False):
     if map_size and not udim:
         checks.append(_check(GREEN, "{:.1f} px por unidad con textura de {}".format(
             uv.texel_density(transform, map_size), map_size)))
+    if judge:
+        checks.extend(_uv_judge_checks(judge, judge_values, judge_levels, covered, map_size, udim))
+        # red de seguridad: nunca más verde que la nota del juez, aunque uv_quality.grade mire algo que aquí no se traduce
+        grade, reasons = uv_quality.grade(judge)
+        if grade > max(c["level"] for c in checks):
+            checks.append(_check(grade, "Calidad de las UVs: {}".format("; ".join(reasons)),
+                                 "Repite 'UVs' o prueba otras Costuras."))
     return _result("uv", checks)
 
 

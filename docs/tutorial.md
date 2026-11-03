@@ -34,6 +34,8 @@ El resultado es una malla nueva que termina en `_retopo`. **El original no se to
 4. Pulsa **Todo: limpiar → retopo → UVs**.
 5. Mira el **semáforo** del panel *Estado*. Verde = listo. Amarillo o rojo = lee la línea **→** que sale debajo: te dice qué tocar.
 
+> El **Motor** viene en *Maya (polyRetopo, recomendado)*: no hace falta cambiarlo. A la vista tienes lo principal (**Motor**, **Caras objetivo**, **Recomendar caras** y **Resolución textura**, en *Ajustes principales*), los botones, el semáforo y el log. Todo lo demás está plegado en el grupo **Avanzado**: pulsa su título para abrirlo.
+
 > **Ejemplo:** criatura de IA de 500.000 triángulos. «Recomendar caras» dice 17.000. Pones 17.000, pulsas *Todo* y en unos minutos tienes una malla de ~17.000 quads con UVs, lista para Substance.
 
 ---
@@ -42,7 +44,7 @@ El resultado es una malla nueva que termina en `_retopo`. **El original no se to
 
 ### 4.1. Limpieza
 
-Arregla el modelo antes del retopo. Casi nunca hace falta tocar nada.
+Arregla el modelo antes del retopo. Casi nunca hace falta tocar nada. Está en el grupo plegado **Avanzado**, apartado *Limpieza*.
 
 | Opción | Para qué sirve | Ejemplo rápido |
 |---|---|---|
@@ -53,13 +55,21 @@ Arregla el modelo antes del retopo. Casi nunca hace falta tocar nada.
 | **Reparar no-manifold** | Separa geometría «imposible» (aristas compartidas por 3 caras o más) | Si las UVs dan el error *non-manifold*, marca esto y pulsa *Limpiar* |
 | **Analizar y seleccionar problemas** | Busca errores **sin cambiar nada** y los selecciona | Para ver qué está mal en un modelo antes de tocarlo |
 
-### 4.2. Retopología
+### 4.2. Retopo
+
+Lo principal está siempre a la vista, en *Ajustes principales*:
 
 | Opción | Para qué sirve | Ejemplo rápido |
 |---|---|---|
-| **Motor** | Quién hace el retopo | Déjalo en **Automático**: prueba Maya y el Motor MBL y se queda el mejor |
+| **Motor** | Quién hace el retopo | Déjalo en **Maya (polyRetopo, recomendado)**, el de por defecto. Los demás son para comparar o para casos concretos (abajo) |
 | **Caras objetivo** | Cuántas caras tendrá el resultado (aproximado) | Un personaje para juego: 5.000–10.000. Para VFX o primeros planos: 15.000–30.000 |
 | **Recomendar caras** | Mide el modelo y te dice el mínimo para no perder forma | Pulsas y dice «mínimo 9.000»: si pones 4.000, los dedos saldrán aplastados |
+| **Resolución textura** | Tamaño de la textura de las UVs | 4096 va bien para casi todo |
+
+Y estas están en **Avanzado**, apartado *Retopo*:
+
+| Opción | Para qué sirve | Ejemplo rápido |
+|---|---|---|
 | **Simetría** | Hace una mitad y la refleja (por defecto, *No*) | Un personaje simétrico que vas a riggear: *Automática*, para que los dos lados tengan la misma topología |
 | **Calidad** (Motor MBL) | Cuántas pruebas hace antes de quedarse con la mejor | *Rápida* para ver cómo queda; *Normal* para el resultado; *Alta* solo si tienes tiempo |
 | **Tiempo máx. Motor MBL** | Tope de tiempo del Motor MBL | Si se alarga demasiado, bájalo: se queda con la mejor prueba terminada |
@@ -67,16 +77,16 @@ Arregla el modelo antes del retopo. Casi nunca hace falta tocar nada.
 *Calidad* y *Tiempo máx. Motor MBL* solo se ven con *Automático* o *Motor MBL*.
 
 **Los motores, en una línea cada uno:**
-- **Automático** (recomendado): el mejor entre Maya y el Motor MBL.
-- **Motor MBL** (experimental): el nuestro. Sigue la forma muy bien, solo quads, pero aún no admite guías ni pincel.
-- **Maya (polyRetopo):** rápido y ordenado. **Es el que sigue las guías.**
+- **Maya (polyRetopo)** (recomendado, por defecto): solo quads, pocos polos, rápido y ordenado. En las pruebas con modelos reales rinde mejor que el Motor MBL. **Es el que sigue las guías.**
+- **Automático:** hace Maya y el Motor MBL y se queda el de mejor nota. Tarda lo que los dos juntos, y como Maya suele ganar, normalmente basta con elegir Maya.
+- **Motor MBL** (experimental): el nuestro. Solo quads, pero en las pruebas con modelos reales sus quads salen más deformados y desiguales que los de Maya, y aún no admite guías ni pincel. Está para probarlo o compararlo, no para trabajar.
 - **Instant Meshes:** rápido. **Es el que usa el pincel de detalle.**
 
-Si hay guías o detalle pintado, el plugin cambia de motor solo y lo dice en el log: con guías, *Automático* usa Maya; con detalle pintado, Instant Meshes.
+Si hay guías o detalle pintado, el plugin cambia de motor solo y lo dice en el log: con guías, Maya; con detalle pintado, Instant Meshes.
 
-### 4.3. Más opciones (normalmente no hace falta tocarlas)
+### 4.3. Más opciones de retopo (normalmente no hace falta tocarlas)
 
-Es un grupo plegado dentro de *2. Retopología*: pulsa su título para abrirlo.
+También están en **Avanzado**, apartado *Retopo*.
 
 | Opción | Para qué sirve | Ejemplo rápido |
 |---|---|---|
@@ -88,9 +98,11 @@ Es un grupo plegado dentro de *2. Retopología*: pulsa su título para abrirlo.
 | **Rellenar agujeros de hasta** | Cierra agujeros pequeños del resultado | Agujeros diminutos que no estaban en el original |
 | **Tiempo máximo** | Tope por malla | Para no quedarte esperando sin fin |
 
-> Al elegir el motor **Instant Meshes** aparecen sus opciones propias (suavizado, solo quads, determinista, alinear a los bordes, densidad por curvatura) y, arriba, el recuadro con la ruta del programa. Con los demás motores no se ven: no hace falta tocarlas.
+> Al elegir el motor **Instant Meshes** aparecen, dentro de *Avanzado*, sus opciones propias (suavizado, solo quads, determinista, alinear a los bordes, densidad por curvatura) y el recuadro *Instant Meshes* con la ruta del programa (si no lo encuentra solo, *Avanzado* se abre para que la indiques). Con los demás motores no se ven: no hace falta tocarlas.
 
 ### 4.4. Diagnóstico
+
+Al final del apartado *Retopo*, en **Avanzado**.
 
 | Botón | Para qué sirve | Ejemplo rápido |
 |---|---|---|
@@ -98,6 +110,8 @@ Es un grupo plegado dentro de *2. Retopología*: pulsa su título para abrirlo.
 | **Quitar colores** | Quita esos colores | **Hazlo siempre antes de exportar** a Substance |
 
 ### 4.5. UVs
+
+Están en **Avanzado**, apartado *UVs* (la **Resolución textura** está a la vista, en *Ajustes principales*).
 
 | Opción | Para qué sirve | Ejemplo rápido |
 |---|---|---|
@@ -123,7 +137,7 @@ Es un grupo plegado dentro de *2. Retopología*: pulsa su título para abrirlo.
 - **Todo**: los tres pasos seguidos.
 - **Cancelar**: para el proceso. Maya sigue vivo.
 - **Comprobar estado**: calcula el semáforo de lo seleccionado sin cambiar nada.
-- **Semáforo**: 🟢 listo · 🟡 revisar · 🔴 arreglar. Debajo de cada aviso, **→ qué tocar**. Doble clic en una malla la selecciona.
+- **Semáforo**: 🟢 listo · 🟡 revisar · 🔴 arreglar. Debajo de cada aviso, **→ qué tocar**. Doble clic en una malla la selecciona. En las UVs, además de solapes, espejos, estiramiento y textura aprovechada, mira la densidad de texel entre islas, el margen entre ellas y si los cortes casan, y nunca sale en verde si el juez de UVs las suspende.
 - **Log**: qué hace y a qué hora (y el tiempo total al terminar). Si algo falla, el motivo está ahí (y en el Script Editor). **Limpiar log** borra el texto.
 
 ---
@@ -145,7 +159,7 @@ Trazos que dibujas **sobre el modelo** para decirle al retopo **por dónde quier
 ### Cómo se hace
 
 1. Selecciona el **modelo original**.
-2. En el grupo *2. Retopología*, debajo de *Más opciones*, bloque **Guías de flujo**, pulsa **Dibujar guías**.
+2. Abre el grupo **Avanzado**, bloque **Guías de flujo**, y pulsa **Dibujar guías**.
    - El modelo se vuelve «vivo» (*live*): lo que dibujes se pega a su superficie.
    - Se activa el lápiz de Maya.
 3. **Dibuja** arrastrando con el ratón en el visor.
@@ -170,7 +184,7 @@ Trazos que dibujas **sobre el modelo** para decirle al retopo **por dónde quier
 
 ### Lo que hay que saber
 
-- **Con guías se usa el motor de Maya** (el que mejor las sigue). *Automático* y *Motor MBL* pasan a Maya solos; si eliges *Instant Meshes*, las sigue con su propio campo de direcciones, menos exacto. El Motor MBL todavía no admite guías.
+- **Con guías se usa el motor de Maya** (el que mejor las sigue y el de por defecto). *Automático* y *Motor MBL* pasan a Maya solos; si eliges *Instant Meshes*, las sigue con su propio campo de direcciones, menos exacto. El Motor MBL todavía no admite guías.
 - **Con guías se hace el modelo entero**, sin reflejar la mitad.
 - **Red de seguridad:** si con las guías salen más de 1,6 veces las caras pedidas, el plugin repite el retopo **sin guías** y lo avisa en el log. Si te pasa, revisa si algún trazo está en zigzag o demasiado pegado a otro.
 - **Las guías ponen loops donde quieres, pero no deciden dónde van los polos.** Revisa con **Diagnóstico** (polos de colores) antes de hacer el skin.
@@ -194,7 +208,7 @@ Pintas en **rojo** las zonas que necesitan **más caras**. Lo pintado recibe má
 ### Cómo se hace
 
 1. Selecciona el **modelo original**.
-2. Pulsa **Pintar detalle**. Se abre el pincel de color de vértices de Maya, ya en rojo.
+2. Pulsa **Pintar detalle** (en **Avanzado**, bloque *Pincel de detalle*). Se abre el pincel de color de vértices de Maya, ya en rojo.
 3. **Pinta** sobre las zonas que quieras con más detalle.
    - **Más rojo = más detalle.** Lo negro (sin pintar) queda normal.
    - Cambia el tamaño del pincel con **B + arrastrar**, el atajo de Maya para sus pinceles (o con *Radius* en las opciones del pincel). Es la herramienta *Paint Vertex Color* de Maya; el plugin no cambia sus atajos.
@@ -222,7 +236,7 @@ Pintas en **rojo** las zonas que necesitan **más caras**. Lo pintado recibe má
 ## 7. Recetas rápidas
 
 ### Personaje para animar o VFX
-1. *Simetría*: **Automática** (si es simétrico).
+1. *Simetría* (en **Avanzado**): **Automática** (si es simétrico).
 2. **Recomendar caras** y súbelo un poco (cara y manos lo agradecen).
 3. **Guías**: anillos en hombros, codos, muñecas, cadera, rodillas, tobillos, cuello, ojos y boca.
 4. **Todo**.
@@ -230,7 +244,7 @@ Pintas en **rojo** las zonas que necesitan **más caras**. Lo pintado recibe má
 
 ### Criatura de IA para Substance Painter
 1. **Recomendar caras** y pon esa cifra.
-2. Motor **Automático**, Calidad **Normal**.
+2. Motor **Maya** (el de por defecto).
 3. *Costuras*: **Costuras escondidas** si se verá de frente.
 4. **Todo** → semáforo en verde → exporta el `_retopo`.
 
@@ -241,7 +255,7 @@ Pintas en **rojo** las zonas que necesitan **más caras**. Lo pintado recibe má
 
 ### Personaje con dedos juntos o ropa con pliegues
 1. **Recomendar caras**: si avisa de piezas finas, **Pintar detalle** en manos y pliegues.
-2. Si salen agujeros o caras dobladas entre los dedos, prueba el motor **Maya** y más caras.
+2. Si salen agujeros o caras dobladas entre los dedos, sube las caras y comprueba que el motor es **Maya** (el de por defecto).
 
 ---
 
@@ -250,10 +264,10 @@ Pintas en **rojo** las zonas que necesitan **más caras**. Lo pintado recibe má
 | Problema | Qué hacer |
 |---|---|
 | El semáforo sale en rojo | Lee la línea **→** debajo del aviso: dice exactamente qué tocar |
-| Tarda mucho | Calidad **Rápida**, menos caras, o motor **Maya** |
+| Tarda mucho | Menos caras, o motor **Maya** (con el Motor MBL o *Automático*, también Calidad **Rápida**) |
 | El PC va lento mientras calcula | Normal con muchas caras. El plugin trabaja con prioridad baja y se para solo si la memoria va justa |
 | Dice que no caben tantas caras | Te dice cuántas puedes pedir: pon esa cifra o usa el motor **Maya** |
 | Las guías no se respetan | Mira el log: si salieron demasiadas caras, se repitió sin guías. Revisa trazos en zigzag o muy juntos |
 | Los dedos salen aplastados o pegados | Más caras (mira *Recomendar caras*) o **Pintar detalle** en las manos |
 | Error *non-manifold* en las UVs | Comprueba que **Reparar no-manifold** está marcado (viene marcado) y pulsa **Limpiar** |
-| No me gusta el resultado | **Ctrl+Z**, cambia Calidad, caras o simetría, y repite |
+| No me gusta el resultado | **Ctrl+Z**, cambia el motor, las caras o la simetría, y repite |

@@ -61,10 +61,10 @@ QProgressBar::chunk { background-color: #2f6fed; border-radius: 3px; }
 """
 
 ENGINE_NOTES = {
-    "auto": "Prueba Maya y el Motor MBL y se queda con el mejor. Recomendado; de 30 s a 2 min.",
-    "mbl": "Nuestro motor (experimental): solo quads y simétrico con bucle central. Sigue la forma muy bien, pero sus quads salen menos regulares que los de Maya. Sin guías ni detalle pintado. De 30 s a 2 min.",
-    "maya": "polyRetopo de Maya: el más rápido de los buenos.",
-    "instant_meshes": "Rápido, con opciones propias (abajo). Menos preciso que los demás.",
+    "maya": "polyRetopo de Maya. Recomendado: solo quads, pocos polos y el más rápido de los buenos; en las pruebas con modelos reales rinde mejor que el Motor MBL.",
+    "auto": "Hace el retopo con Maya y con el Motor MBL (experimental) y se queda el de mejor nota. Tarda lo que los dos juntos (de 30 s a 2 min); como Maya suele ganar, normalmente basta con elegir Maya.",
+    "mbl": "EXPERIMENTAL, no recomendado para trabajar. Nuestro motor: solo quads y simétrico con bucle central, pero en las pruebas con modelos reales sus quads salen más deformados y desiguales que los de Maya. Sin guías ni detalle pintado. De 30 s a 2 min. Úsalo para probar o comparar.",
+    "instant_meshes": "Rápido, con opciones propias (en Avanzado). Menos preciso que los demás.",
 }
 
 
@@ -115,7 +115,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
                                               "Hace que todas las caras miren hacia el mismo lado.")
         w["cleanup_fix_nonmanifold"] = _check("Reparar no-manifold",
                                               "Separa aristas y vértices no-manifold (Unfold3D no admite esa geometría).")
-        cleanup_box = QtWidgets.QGroupBox("1. Limpieza")
+        cleanup_box = QtWidgets.QGroupBox("Limpieza")
         form = QtWidgets.QFormLayout(cleanup_box)
         form.addRow(w["cleanup_delete_history"])
         form.addRow(w["cleanup_freeze"])
@@ -129,17 +129,18 @@ class RetopoUVWindow(QtWidgets.QDialog):
 
         # Retopo
         w["retopo_engine"] = QtWidgets.QComboBox()
-        for key, label in (("auto", "Automático (el mejor de Maya y Motor MBL)"), ("mbl", "Motor MBL (experimental, solo quads)"),
-                           ("maya", "Maya (polyRetopo)"), ("instant_meshes", "Instant Meshes")):
+        for key, label in (("maya", "Maya (polyRetopo, recomendado)"), ("auto", "Automático (el mejor de Maya y Motor MBL)"),
+                           ("mbl", "Motor MBL (experimental)"), ("instant_meshes", "Instant Meshes")):
             w["retopo_engine"].addItem(label, key)
         w["retopo_engine"].setToolTip(
+            "Maya (polyRetopo): recomendado. En las pruebas, 100% quads, muchos menos polos y menos error que Instant "
+            "Meshes, y mejor calidad de malla que el Motor MBL. El más rápido de los buenos.\n"
             "Automático: hace el retopo con Maya y con el Motor MBL, y se queda el de mejor forma, menos polos y "
-            "solo quads. Recomendado; tarda lo que los dos juntos (de 30 s a 2 min).\n"
-            "Motor MBL: nuestro motor. QuadriFlow con las piezas finas engordadas, ajuste final a la forma y la mejor "
-            "de 3 variantes. Solo quads, sin agujeros y la mejor fidelidad de forma en las pruebas (humano y águila, "
-            "a la mitad de error que Maya). Hace siempre el modelo entero (sin reflejar la mitad) y no admite guías "
-            "ni detalle pintado. Tarda de 13 s (humano) a 22 s (águila).\n"
-            "Maya (polyRetopo): en las pruebas, 100% quads, muchos menos polos y menos error que Instant Meshes. El más rápido de los buenos.\n"
+            "solo quads. Tarda lo que los dos juntos (de 30 s a 2 min).\n"
+            "Motor MBL (experimental): nuestro motor. QuadriFlow con las piezas finas engordadas, ajuste final a la forma y la "
+            "mejor de 3 variantes. Solo quads y sin agujeros, pero en las pruebas con modelos reales sus quads salen más "
+            "deformados y desiguales que los de Maya, así que no es el recomendado. Hace siempre el modelo entero (sin "
+            "reflejar la mitad) y no admite guías ni detalle pintado.\n"
             "Instant Meshes: más rápido; las opciones de quads, determinista, suavizado, ángulo y densidad "
             "por curvatura solo afectan a este motor.")
         w["retopo_target_faces"] = _spin(50, 2000000, 5000, 500, tip="Número aproximado de caras del resultado.")
@@ -178,7 +179,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         w["retopo_relax"] = _spin(0, 100, 10, tip="Pasadas de relajación: iguala el tamaño de los quads deslizándolos "
                                                   "por la superficie del original. 0 = no relajar.")
         w["retopo_timeout"] = _spin(10, 36000, 600, 60, suffix=" s", tip="Tiempo máximo por malla.")
-        retopo_box = QtWidgets.QGroupBox("2. Retopología")
+        retopo_box = QtWidgets.QGroupBox("Retopo")
         form = QtWidgets.QFormLayout(retopo_box)
         w["mbl_variants"] = QtWidgets.QComboBox()
         for value, label in ((1, "Rápida (1 prueba)"), (3, "Normal (la mejor de 3)"), (6, "Alta (la mejor de 6, el doble de tiempo)")):
@@ -193,9 +194,13 @@ class RetopoUVWindow(QtWidgets.QDialog):
         self.engine_note.setWordWrap(True)
         self.engine_note.setObjectName("note")
 
-        form.addRow("Motor", w["retopo_engine"])
-        form.addRow(self.engine_note)
-        form.addRow("Caras objetivo", w["retopo_target_faces"])
+        # lo principal, siempre a la vista: motor, caras objetivo y resolución de textura (se añade con las UVs);
+        # el resto de opciones va plegado en «Avanzado»
+        main_box = QtWidgets.QGroupBox("Ajustes principales")
+        main_form = QtWidgets.QFormLayout(main_box)
+        main_form.addRow("Motor", w["retopo_engine"])
+        main_form.addRow(self.engine_note)
+        main_form.addRow("Caras objetivo", w["retopo_target_faces"])
         recommend = QtWidgets.QPushButton("Recomendar caras")
         recommend.setToolTip("Mide la malla seleccionada y dice cuántas caras hacen falta para no perder la forma "
                              "(mínimo recomendado) y cuántas para conservar también las piezas más finas (máximo detalle).")
@@ -203,8 +208,9 @@ class RetopoUVWindow(QtWidgets.QDialog):
         self.faces_note = QtWidgets.QLabel()
         self.faces_note.setWordWrap(True)
         self.faces_note.setObjectName("note")
-        form.addRow(recommend)
-        form.addRow(self.faces_note)
+        main_form.addRow(recommend)
+        main_form.addRow(self.faces_note)
+
         form.addRow("Simetría", w["retopo_symmetry"])
 
         # opciones del Motor MBL (solo se ven con Motor MBL o Automático)
@@ -227,25 +233,13 @@ class RetopoUVWindow(QtWidgets.QDialog):
         im_form.addRow("Relación máx. de tamaño", w["retopo_adaptive_ratio"])
         form.addRow(self.im_options)
 
-        # el resto, plegado
-        self.advanced_box = QtWidgets.QGroupBox("Más opciones")
-        self.advanced_box.setCheckable(True)
-        self.advanced_box.setChecked(False)
-        advanced_inner = QtWidgets.QWidget()
-        advanced_form = QtWidgets.QFormLayout(advanced_inner)
-        advanced_form.setContentsMargins(0, 0, 0, 0)
-        advanced_form.addRow("Ángulo aristas duras", w["retopo_crease_angle"])
-        advanced_form.addRow(w["retopo_reproject"])
-        advanced_form.addRow(w["retopo_pole_cleanup"])
-        advanced_form.addRow("Relajar quads", w["retopo_relax"])
-        advanced_form.addRow("Ignorar piezas menores de", w["retopo_min_piece"])
-        advanced_form.addRow("Rellenar agujeros de hasta", w["retopo_fill_holes"])
-        advanced_form.addRow("Tiempo máximo", w["retopo_timeout"])
-        advanced_layout = QtWidgets.QVBoxLayout(self.advanced_box)
-        advanced_layout.addWidget(advanced_inner)
-        advanced_inner.setVisible(False)
-        self.advanced_box.toggled.connect(advanced_inner.setVisible)
-        form.addRow(self.advanced_box)
+        form.addRow("Ángulo aristas duras", w["retopo_crease_angle"])
+        form.addRow(w["retopo_reproject"])
+        form.addRow(w["retopo_pole_cleanup"])
+        form.addRow("Relajar quads", w["retopo_relax"])
+        form.addRow("Ignorar piezas menores de", w["retopo_min_piece"])
+        form.addRow("Rellenar agujeros de hasta", w["retopo_fill_holes"])
+        form.addRow("Tiempo máximo", w["retopo_timeout"])
         w["retopo_engine"].currentIndexChanged.connect(self._update_engine_ui)
         # guías y pincel de detalle
         w["retopo_detail_density"] = _spin(1.5, 16.0, 4.0, 0.5, 1, "x",
@@ -273,11 +267,12 @@ class RetopoUVWindow(QtWidgets.QDialog):
         detail_row = QtWidgets.QHBoxLayout()
         detail_row.addWidget(paint_detail)
         detail_row.addWidget(clear_detail)
-        form.addRow(QtWidgets.QLabel("<b>Guías de flujo</b> (motor de Maya)"))
-        form.addRow(guide_row)
-        form.addRow(QtWidgets.QLabel("<b>Pincel de detalle</b> (usa Instant Meshes)"))
-        form.addRow(detail_row)
-        form.addRow("Densidad en lo pintado", w["retopo_detail_density"])
+        guides_box = QtWidgets.QGroupBox("Guías de flujo (motor de Maya)")
+        QtWidgets.QVBoxLayout(guides_box).addLayout(guide_row)
+        detail_box = QtWidgets.QGroupBox("Pincel de detalle (usa Instant Meshes)")
+        detail_form = QtWidgets.QFormLayout(detail_box)
+        detail_form.addRow(detail_row)
+        detail_form.addRow("Densidad en lo pintado", w["retopo_detail_density"])
         self._guide_session = None
 
         diagnose_button = QtWidgets.QPushButton("Diagnóstico")
@@ -345,7 +340,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         w["uv_udim_tiles"].valueChanged.connect(self._update_density_enabled)
         w["uv_max_faces"] = _spin(0, 10000000, 150000, 10000,
                                   tip="Si la malla tiene más caras, no se hacen UVs (podría agotar la memoria). 0 = sin límite.")
-        uv_box = QtWidgets.QGroupBox("3. UVs")
+        uv_box = QtWidgets.QGroupBox("UVs")
         form = QtWidgets.QFormLayout(uv_box)
         form.addRow(w["uv_respect_existing"])
         form.addRow("Ángulo de costura", w["uv_seam_angle"])
@@ -357,7 +352,6 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_tailor_seams"])
         form.addRow(w["uv_straight_islands"])
         form.addRow("Optimize", w["uv_optimize_iterations"])
-        form.addRow("Resolución textura", w["uv_map_size"])
         form.addRow("Padding", w["uv_padding_px"])
         form.addRow(w["uv_allow_rotation"])
         form.addRow("Calidad de layout", w["uv_layout_quality"])
@@ -366,12 +360,29 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow("Nº de UDIMs", w["uv_udim_tiles"])
         form.addRow("Densidad de texel", w["uv_texel_density"])
         form.addRow("Máx. caras para UVs", w["uv_max_faces"])
+        main_form.addRow("Resolución textura", w["uv_map_size"])
+
+        # todas las demás opciones, plegadas
+        self.advanced_box = QtWidgets.QGroupBox("Avanzado")
+        self.advanced_box.setCheckable(True)
+        self.advanced_box.setChecked(False)
+        self.advanced_box.setToolTip("Limpieza, opciones de cada motor, simetría, guías de flujo, detalle pintado y UVs. "
+                                     "Los valores por defecto valen para la mayoría de los modelos.")
+        advanced_inner = QtWidgets.QWidget()
+        advanced_layout = QtWidgets.QVBoxLayout(advanced_inner)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        self.im_box = im_box
+        for box in (cleanup_box, retopo_box, im_box, guides_box, detail_box, uv_box):
+            advanced_layout.addWidget(box)
+        advanced_outer = QtWidgets.QVBoxLayout(self.advanced_box)
+        advanced_outer.addWidget(advanced_inner)
+        advanced_inner.setVisible(False)
+        self.advanced_box.toggled.connect(advanced_inner.setVisible)
 
         options = QtWidgets.QWidget()
         options_layout = QtWidgets.QVBoxLayout(options)
-        self.im_box = im_box
-        for box in (im_box, cleanup_box, retopo_box, uv_box):
-            options_layout.addWidget(box)
+        options_layout.addWidget(main_box)
+        options_layout.addWidget(self.advanced_box)
         options_layout.addStretch()
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
@@ -380,20 +391,20 @@ class RetopoUVWindow(QtWidgets.QDialog):
         # botones
         self.run_buttons = []
         buttons = QtWidgets.QGridLayout()
-        for column, (text, steps) in enumerate([("Limpiar", ["cleanup"]), ("Retopo", ["retopo"]), ("UVs", ["uv"])]):
-            button = QtWidgets.QPushButton(text)
-            button.clicked.connect(lambda checked=False, s=steps: self.run_steps(s))
-            buttons.addWidget(button, 0, column)
-            self.run_buttons.append(button)
         all_button = QtWidgets.QPushButton("Todo: limpiar → retopo → UVs")
         all_button.setObjectName("primary")
         all_button.clicked.connect(lambda: self.run_steps(["cleanup", "retopo", "uv"]))
-        buttons.addWidget(all_button, 1, 0, 1, 2)
+        buttons.addWidget(all_button, 0, 0, 1, 2)
         self.run_buttons.append(all_button)
         self.cancel_button = QtWidgets.QPushButton("Cancelar")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._request_cancel)
-        buttons.addWidget(self.cancel_button, 1, 2)
+        buttons.addWidget(self.cancel_button, 0, 2)
+        for column, (text, steps) in enumerate([("Limpiar", ["cleanup"]), ("Retopo", ["retopo"]), ("UVs", ["uv"])]):
+            button = QtWidgets.QPushButton(text)
+            button.clicked.connect(lambda checked=False, s=steps: self.run_steps(s))
+            buttons.addWidget(button, 1, column)
+            self.run_buttons.append(button)
 
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 1)
@@ -467,6 +478,9 @@ class RetopoUVWindow(QtWidgets.QDialog):
         self.mbl_options.setVisible(engine in ("auto", "mbl"))
         self.im_options.setVisible(engine == "instant_meshes")
         self.im_box.setVisible(engine == "instant_meshes")
+        if engine == "instant_meshes" and not config.find_instant_meshes(self.collect_settings()):
+            # la ruta del programa está en «Avanzado»: si no se encuentra solo, que se vea dónde indicarla
+            self.advanced_box.setChecked(True)
 
     def _update_density_enabled(self, *args):
         udim = self.widgets["uv_udim"].isChecked()

@@ -116,6 +116,8 @@ class _Mesh:
         for fi, face in enumerate(self.faces):
             for v in face:
                 self.vf.setdefault(v, set()).add(fi)
+        # vecinos de cada vértice ya calculados (neighbors() es lo que más se pide); set_face() borra los que cambian
+        self._near = {}
         _, _, _, self.frozen = _topology(self.faces, [True] * len(self.faces), freeze_nonquad=not self.mixed)
 
     def valence(self, v):
@@ -128,12 +130,16 @@ class _Mesh:
         return self.mixed and any(len(self.faces[f]) != 4 for f in self.vf[v])
 
     def neighbors(self, v):
-        result = set()
-        for fi in self.vf[v]:
-            face = self.faces[fi]
-            k = face.index(v)
-            result.add(face[k - 1])
-            result.add(face[(k + 1) % len(face)])
+        """Vértices unidos a v por una arista. El set es el de la caché: quien lo recibe no lo modifica."""
+        result = self._near.get(v)
+        if result is None:
+            result = set()
+            for fi in self.vf[v]:
+                face = self.faces[fi]
+                k = face.index(v)
+                result.add(face[k - 1])
+                result.add(face[(k + 1) % len(face)])
+            self._near[v] = result
         return result
 
     def edge_faces(self, u, w):
@@ -147,13 +153,16 @@ class _Mesh:
 
     def set_face(self, fi, face):
         old = self.faces[fi]
+        near = self._near
         if old is not None:
             for v in old:
                 self.vf[v].discard(fi)
+                near.pop(v, None)
         self.faces[fi] = face
         if face is not None:
             for v in face:
                 self.vf.setdefault(v, set()).add(fi)
+                near.pop(v, None)
         return old
 
     # --- operaciones: cada una devuelve (delta de energía, vértices cambiados, deshacer) o None

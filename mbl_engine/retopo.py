@@ -17,8 +17,8 @@ from . import decimate, fit, metrics, orient, quality, quadopt, sizefield, symme
 from .closest import find_native, make_grid
 from .mesh import Mesh
 from .process import EngineError, MemoryLow, _run_once, run_instant_meshes
-from .repair import (_dissolve_doublets, _remove_small_pieces, fill_new_holes, make_manifold, read_obj,
-                     repair_topology, write_obj, write_ply, vertex_areas)
+from .repair import (_dissolve_doublets, fill_new_holes, make_manifold, read_obj, repair_topology,
+                     write_obj, write_ply, vertex_areas)
 
 
 # Instant Meshes en modo solo quads subdivide al final: da ~3,15 veces las caras pedidas
@@ -36,6 +36,16 @@ QUADRIFLOW_ATTEMPTS = 3
 QUADRIFLOW_MAX_STEP = 2.0
 QUADRIFLOW_MAX_REQUEST = 1.5
 QUADRIFLOW_MAX_DEVIATION = 3.0
+# Cuánto da QuadriFlow por cada cara pedida depende de la malla: 0,75 en el humano, 0,98 en un objeto de bordes duros, 0,87 en
+# la criatura. Con QUADRIFLOW_FACTOR (pensado para 0,77) la primera pasada se sale de la tolerancia en tres de esos cuatro
+# modelos y cada variante gasta dos ejecuciones del motor (~4 s cada una; en el objeto de bordes duros el 80 % del retopo).
+# Con LEARN_QUADRIFLOW_REQUEST la primera variante cuenta lo que le hizo falta y las demás empiezan ya con esa petición
+# (best_retopo, opción "factor_hint"); si la primera pasada de la primera variante acierta, nadie cambia nada, y la primera
+# variante nunca cambia. Pero la petición no es la misma que habrían hecho al corregir ellas, así que sus mallas son otra muestra
+# del motor caótico: el retopo sale entre un 35 y un 40 % más rápido en tres de los cuatro modelos de prueba, pero cambia lo
+# que se entrega (en el prop ganó una variante con un error de forma medio 1,4 veces mayor y menos polos y fallos visibles).
+# Desactivado por defecto para no cambiar resultados; options["learn_request"] lo cambia en una llamada.
+LEARN_QUADRIFLOW_REQUEST = False
 # puntos del original con los que se mide lo que el retopo no cubre (también es el tamaño de SurfaceReference)
 FIT_SAMPLES = 40000
 
@@ -67,7 +77,10 @@ REGULAR_SPREAD = 2
 def thin_feature_density(points, faces, target_faces, edges_per_radius=THIN_EDGES_PER_RADIUS,
                          max_density=THIN_MAX_DENSITY):
     """Densidad por vértice (1 = normal) para que las piezas finas no se pierdan. faces: triángulos."""
-    mesh = Mesh(points, faces)
+    if isinstance(faces, np.ndarray):
+        mesh = Mesh(points, (faces.ravel(), np.full(len(faces), faces.shape[1], dtype=np.int64)))
+    else:
+        mesh = Mesh(points, faces)
     edge = float(np.sqrt(mesh.face_areas.sum() / max(int(target_faces), 1)))
     k1, k2, _ = orient.principal_curvatures(points, faces, THIN_SMOOTH)
     bend = np.maximum(np.abs(k1), np.abs(k2)) * edge / edges_per_radius
@@ -125,7 +138,8 @@ def _quadriflow(executable, points, faces, target, work, timeout, tick, options)
     source = os.path.join(work, "input.obj")
     destination = os.path.join(work, "output.obj")
     density = options.get("density")
-    asked = target * QUADRIFLOW_FACTOR
+    asked = target * (options.get("factor_hint") or QUADRIFLOW_FACTOR)
+    density_scale = 1.0
     density_file = None
     if density is not None:
         # nuestra versión de QuadriFlow (-density): el valor de cada vértice va en el mismo orden
@@ -136,7 +150,8 @@ def _quadriflow(executable, points, faces, target, work, timeout, tick, options)
         # aristas donde hay densidad, así que el total sube por la densidad media (por área). Se piden
         # menos caras de base para que el total siga siendo el objetivo.
         areas = vertex_areas(points, faces)
-        asked /= float(np.sum(areas * density) / max(np.sum(areas), 1e-30))
+        density_scale = float(np.sum(areas * density) / max(np.sum(areas), 1e-30))
+        asked /= density_scale
     else:
         write_obj(source, points, faces)
     result, tried = None, []
@@ -157,6 +172,11 @@ def _quadriflow(executable, points, faces, target, work, timeout, tick, options)
         tried.append((asked, got, mesh))
         if options.get("attempts") is not None:
             options["attempts"].append((int(asked), got))
+        if attempt == 0 and options.get("first_attempt"):
+            # la petición que habría acertado a la primera (None si esta ya cayó dentro de la tolerancia)
+            accepted = not got or abs(got - target) <= QUADRIFLOW_TOLERANCE * target
+            options["first_attempt"](None if accepted else min(_next_request(tried, target) * density_scale / target,
+                                                                QUADRIFLOW_MAX_REQUEST))
         # con densidad variable el total se desvía: se corrige con la pendiente medida (caras / pedido)
         # y se repite hasta quedar dentro de la tolerancia
         if not got or abs(got - target) <= QUADRIFLOW_TOLERANCE * target:
@@ -190,6 +210,50 @@ ENGINES = {"instant_meshes": _instant_meshes, "quadriflow": _quadriflow}
 def triangulated(points, faces):
     tris, _ = Mesh(points, faces).triangles()
     return tris.tolist()
+
+
+def vertex_pieces(mesh):
+    """Pieza (el menor índice de vértice de su conjunto) de cada vértice, uniendo los vértices de cada cara. Con numpy:
+    cada pasada pasa a cada vértice el menor nombre de los que toca y los nombres se acortan saltando de uno a otro."""
+    label = np.arange(mesh.vertex_count, dtype=np.int64)
+    a, b = mesh.face_vertices, mesh.corner_next
+    while True:
+        la, lb = label[a], label[b]
+        low = np.minimum(la, lb)
+        new = label.copy()
+        np.minimum.at(new, la, low)
+        np.minimum.at(new, lb, low)
+        while True:
+            jumped = new[new]
+            if (jumped == new).all():
+                break
+            new = jumped
+        if (new == label).all():
+            return label
+        label = new
+
+
+def drop_small_pieces(mesh, min_ratio):
+    """(Mesh sin las piezas sueltas pequeñas, cuántas quitó): se quedan la mayor (o las mayores, si empatan) y las que
+    tienen al menos min_ratio de las caras. Mismo criterio que repair._remove_small_pieces, sin listas de Python."""
+    if not mesh.face_count:
+        return mesh, 0
+    first = mesh.face_vertices[mesh.face_starts]
+    _, inverse, counts = np.unique(vertex_pieces(mesh)[first], return_inverse=True, return_counts=True)
+    keep_piece = (counts == counts.max()) | (counts >= mesh.face_count * min_ratio)
+    if keep_piece.all():
+        return mesh, 0
+    keep = keep_piece[inverse.ravel()]
+    kept = keep[mesh.corner_face]
+    return Mesh(mesh.points, (mesh.face_vertices[kept], mesh.face_sizes[keep])), int((~keep_piece).sum())
+
+
+def compact_mesh(mesh):
+    """compact() de un Mesh, sin pasar por listas de Python (con 528.000 triángulos son ~200 MB de objetos): otro Mesh."""
+    used = np.nonzero(mesh.used_vertices)[0]
+    remap = np.full(len(mesh.points), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    return Mesh(mesh.points[used], (remap[mesh.face_vertices], mesh.face_sizes))
 
 
 def compact(points, faces):
@@ -236,30 +300,28 @@ def prepare(points, faces, target_faces, engine, symmetric=None, timeout=600, ti
     options = options or {}
     trace = options.get("trace") or (lambda stage, p, f: None)
     report = {"engine": engine}
-    source = Mesh(points, faces)
-    faces = [list(f) for f in faces]
-    faces, report["pieces_removed"] = _remove_small_pieces(faces, min_piece)
-    source_kept = Mesh(source.points, faces)
+    source_kept, report["pieces_removed"] = drop_small_pieces(
+        Mesh(np.ascontiguousarray(points, dtype=np.float64).reshape(-1, 3), faces), min_piece)
     if symmetric is None:
         symmetric = symmetry.is_symmetric(source_kept)[0]
     report["symmetric"] = bool(symmetric)
-    work_points, work_faces = source_kept.points, faces
+    work_mesh = source_kept
     target = int(target_faces)
     center = None
     if symmetric:
         center = symmetry.plane_x(source_kept.points[source_kept.used_vertices])
-        work_points, work_faces = symmetry.cut_half(work_points, work_faces, center)
+        work_points, work_faces = symmetry.cut_half(source_kept.points, source_kept.faces(), center)
+        work_mesh = Mesh(work_points, work_faces)
         target = max(target // 2, 1)
-        log("mitad +X: {} caras".format(len(work_faces)))
+        log("mitad +X: {} caras".format(work_mesh.face_count))
 
-    work_points, work_faces = compact(work_points, work_faces)
-    work_mesh = Mesh(work_points, work_faces)
+    work_mesh = compact_mesh(work_mesh)
     if "align_boundaries" not in options:
         # con bordes (el corte de la mitad, aberturas del modelo) los vértices tienen que caer sobre
         # ellos: si no, la costura central no se suelda entera
         options = dict(options, align_boundaries=bool(len(work_mesh.boundary_edges)))
-    engine_points, engine_faces = work_points, work_faces
-    tris = triangulated(engine_points, engine_faces)
+    engine_points = work_mesh.points
+    tris = work_mesh.triangles()[0]
     # el motor no necesita 528.000 triángulos para sacar 5.000 caras: se le da una versión reducida
     # (águila: 56 s a 15 s con el mismo error). El resto del proceso usa la malla original.
     decimator = decimate.find_decimator(options.get("decimator")) if options.get("decimate", True) else None
@@ -268,7 +330,7 @@ def prepare(points, faces, target_faces, engine, symmetric=None, timeout=600, ti
                                                         timeout=timeout, tick=tick)
         log("malla reducida para el motor: {} a {} triángulos".format(len(tris), len(reduced)))
         report["decimated"] = (len(tris), len(reduced))
-        tris = reduced.tolist()
+        tris = reduced
         trace("decimada", engine_points, tris)
     reference = metrics.SurfaceReference(work_mesh, FIT_SAMPLES)
     field = None
@@ -300,6 +362,15 @@ def retopo(points, faces, target_faces, engine, executable, symmetric=None, time
     symmetric: None = detectar; True / False = forzar. engine: "instant_meshes" o "quadriflow".
     options["prepared"]: el resultado de prepare() si ya se hizo (variantes de best_retopo).
     """
+    raw = run_engine(points, faces, target_faces, engine, executable, symmetric, timeout, tick, min_piece, options, log)
+    return finish_retopo(raw, relax, pole_cleanup, fill_holes, log)
+
+
+def run_engine(points, faces, target_faces, engine, executable, symmetric=None, timeout=600, tick=None,
+               min_piece=0.01, options=None, log=None):
+    """Primera mitad de retopo(): prepara la entrada, la engorda si toca y deja que el motor externo dé su malla.
+    Devuelve un Prepared para finish_retopo(). Es lo único que necesita el proceso del motor (y su memoria): el resto
+    es Python, y best_retopo() lo hace mientras el motor ya trabaja en la variante siguiente."""
     log = log or (lambda message: None)
     options = dict(options or {})
     prep = options.pop("prepared", None) or prepare(points, faces, target_faces, engine, symmetric, timeout, tick,
@@ -343,6 +414,16 @@ def retopo(points, faces, target_faces, engine, executable, symmetric=None, time
     if not new_faces:
         raise EngineError("{} no devolvió ninguna malla.".format(engine))
     trace("motor", new_points, new_faces)
+    return Prepared(new_points=new_points, new_faces=new_faces, report=report, options=options, prep=prep, trace=trace)
+
+
+def finish_retopo(raw, relax=10, pole_cleanup=True, fill_holes=60, log=None):
+    """Segunda mitad de retopo(): reparación, limpieza de polos, relajado, reproyección y ajuste, y la simetría.
+    `raw`: lo que devolvió run_engine(). Devuelve (puntos, caras, informe)."""
+    verbose = log is not None
+    log = log or (lambda message: None)
+    new_points, new_faces, report, options, prep, trace = raw.new_points, raw.new_faces, raw.report, raw.options, raw.prep, raw.trace
+    symmetric, center, work_mesh, reference = prep.symmetric, prep.center, prep.work_mesh, prep.reference
 
     # sin rellenar aquí: se cierran solo los agujeros que abrió el motor (los bordes de la entrada,
     # como el corte de la mitad o el cuello, se respetan; rellenarlos metía abanicos de triángulos)
@@ -362,10 +443,12 @@ def retopo(points, faces, target_faces, engine, executable, symmetric=None, time
     project = lambda points_: grid.closest(points_)[0]  # noqa: E731
     new_points = np.asarray(new_points, dtype=float)
     if pole_cleanup:
-        before = quadopt.pole_count(new_faces)
+        # contar polos solo cuesta (dos pasadas por la topología) si alguien lee el mensaje
+        before = quadopt.pole_count(new_faces) if verbose else 0
         new_points, new_faces, report["pole_operations"] = quadopt.clean_poles(new_points, new_faces, depth=int(options.get("pole_depth", 3)),
                                                                        mixed=mixed)
-        log("polos {} -> {}".format(before, quadopt.pole_count(new_faces)))
+        if verbose:
+            log("polos {} -> {}".format(before, quadopt.pole_count(new_faces)))
     trace("polos", new_points, new_faces)
     regular = int(options.get("regular", REGULAR_ITERATIONS))
     relaxed = quadopt.relax(new_points, new_faces, relax, project) if relax > 0 else new_points
@@ -557,7 +640,6 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
     from . import process as _process_module, resources
     log = log or (lambda message: None)
     start = time.time()          # el presupuesto cuenta desde aquí: la preparación de la malla también tarda
-    source = Mesh(points, faces)
     count = max(1, int(variants))
     base_options = kwargs.pop("options", None) or {}
     cancel = threading.Event()
@@ -575,30 +657,66 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
                                kwargs.get("min_piece", 0.01),
                                dict(base_options, inflate=any(extra.get("inflate") for _, extra in plan)), log)
     if shared.report["pieces_removed"] or shared.symmetric:
+        source = Mesh(points, faces)
         reference = metrics.SurfaceReference(source, FIT_SAMPLES)
     else:
-        reference = shared.reference
+        # sin piezas quitadas ni corte, la malla de trabajo es el original (solo sin vértices sueltos): se comparte
+        # con su rejilla y sus aristas en vez de montar otra copia de ~100 MB con modelos de medio millón de triángulos
+        source, reference = shared.work_mesh, shared.reference
 
     def worker_tick():
         if cancel.is_set():
             raise EngineError("cancelado")
 
-    durations = []
+    durations, engine_durations = [], []
     # lo máximo que se le pide al motor (con el factor mayor de las variantes) fija la memoria de cada proceso
     asked_max = int(QUADRIFLOW_MAX_REQUEST * target_faces * max(factor for factor, _ in plan))
     job_bytes = resources.job_memory(len(shared.tris), asked_max)
+    # retopo() en dos mitades: la del motor (usa su proceso y su memoria) y la de Python (reparar, limpiar polos, relajar,
+    # ajustar y medir), que va en otro hilo mientras el motor ya trabaja en la variante siguiente. Mismo resultado.
+    engine_kwargs = {k: kwargs[k] for k in ("symmetric", "timeout", "min_piece") if k in kwargs}
+    finish_kwargs = {k: kwargs[k] for k in ("relax", "pole_cleanup", "fill_holes") if k in kwargs}
 
-    def run(index):
-        if not can_start_variant(time.time() - start, durations, time_budget):
-            raise _OutOfTime("sin tiempo")
-        if not resources.wait_for_memory(job_bytes, _process_module.active_jobs, cancel):
-            raise MemoryLow("No hay memoria libre para otra variante ({:.1f} GB libres, hacen falta {:.1f} GB más el "
-                            "margen).".format((resources.available_memory() or 0) / 1024 ** 3, job_bytes / 1024 ** 3))
-        began = time.time()
+    # lo que la primera variante aprende de QuadriFlow (ver QUADRIFLOW_MAX_REQUEST): {"factor": caras a pedir / objetivo}.
+    # Las demás esperan a su primera pasada, así el resultado no depende de cuántas variantes corran a la vez.
+    learned = {"factor": None, "ready": threading.Event()}
+
+    def publish(factor):
+        learned["factor"] = factor
+        learned["ready"].set()
+
+    def run_engine_stage(index):
+        try:
+            # sin ninguna variante terminada se estima lo que tardará con lo que ha tardado el motor (y ~50 % más de Python)
+            if not can_start_variant(time.time() - start, durations or [1.5 * d for d in engine_durations], time_budget):
+                raise _OutOfTime("sin tiempo")
+            if not resources.wait_for_memory(job_bytes, _process_module.active_jobs, cancel):
+                raise MemoryLow("No hay memoria libre para otra variante ({:.1f} GB libres, hacen falta {:.1f} GB más el "
+                                "margen).".format((resources.available_memory() or 0) / 1024 ** 3, job_bytes / 1024 ** 3))
+            hints = {}
+            if engine == "quadriflow" and base_options.get("learn_request", LEARN_QUADRIFLOW_REQUEST):
+                if index == 0:
+                    hints["first_attempt"] = publish
+                else:
+                    while not learned["ready"].wait(0.1):
+                        worker_tick()
+                    if learned["factor"]:
+                        hints["factor_hint"] = learned["factor"]
+            began = time.time()
+            factor, extra = plan[index]
+            prepared = shared_plain if index in plain_variants else shared
+            raw = run_engine(points, faces, int(round(target_faces * factor)), engine, executable, tick=worker_tick,
+                             options=dict(base_options, prepared=prepared, **dict(extra, **hints)), **engine_kwargs)
+            engine_durations.append(time.time() - began)
+            return index, began, raw
+        finally:
+            if index == 0:
+                learned["ready"].set()
+
+    def run(index, began, raw):
         factor, extra = plan[index]
         prepared = shared_plain if index in plain_variants else shared
-        p, f, report = retopo(points, faces, int(round(target_faces * factor)), engine, executable,
-                              tick=worker_tick, options=dict(base_options, prepared=prepared, **extra), **kwargs)
+        p, f, report = finish_retopo(raw, **finish_kwargs)
         durations.append(time.time() - began)
         result = Mesh(p, f)
         stats = metrics.topology_stats(result)
@@ -626,12 +744,24 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
     low_memory = None
     last_failure = ""
     pool = ThreadPoolExecutor(max_workers=workers)
-    pending = {pool.submit(run, index) for index in range(len(plan))}
+    finish_pool = ThreadPoolExecutor(max_workers=workers)
+    pending = {pool.submit(run_engine_stage, index) for index in range(len(plan))}
+    engine_futures = set(pending)
     try:
         while pending:
             done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
             for future in done:
+                if future.cancelled():
+                    continue
                 try:
+                    if future in engine_futures:
+                        # el motor ha terminado esta variante: su parte de Python va a otro hilo
+                        if not cancel.is_set():
+                            later = finish_pool.submit(run, *future.result())
+                            pending.add(later)
+                        else:
+                            future.result()
+                        continue
                     tried.append(future.result())
                 except _OutOfTime:
                     skipped += 1
@@ -663,6 +793,7 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
         # si tick cancela (excepción) o algo falla, los procesos de motor se detienen y se espera a los hilos
         cancel.set()
         pool.shutdown(wait=True)
+        finish_pool.shutdown(wait=True)
     if skipped:
         log("{} de {} variantes no se probaron para no pasar del tiempo máximo ({:.0f} s)".format(skipped, len(plan), time_budget))
     if not tried:

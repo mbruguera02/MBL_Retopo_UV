@@ -118,6 +118,7 @@ Están en **Avanzado**, apartado *UVs* (la **Resolución textura** está a la vi
 | **Respetar costuras existentes** | Usa tus cortes en vez de crear otros | Ya marcaste a mano los cortes del torso: los respeta |
 | **Ángulo de costura** | Corta por aristas más afiladas que ese ángulo | Objetos duros con cantos: 60–90°. Orgánicos: 180 (no cortar por ángulo) |
 | **Costuras automáticas de Unfold3D** | Añade los cortes mínimos para abrir sin solapes | Déjalo marcado |
+| **Bordes de material como costuras** | Si el modelo tiene varios materiales, el corte pasa por el borde entre dos materiales | Casco + visera + correa: cada material tiene sus propias islas |
 | **Cortar tubos** | Corta brazos, dedos, piernas a lo largo | Personajes: marcado. Una roca: da igual |
 | **Dividir islas** | 0 = el mínimo de islas; más alto = más islas y menos distorsión. Ya viene en **0,75**, el valor con el que más textura se aprovecha (por encima no cambia nada) | Déjalo así; bájalo solo si quieres menos cortes |
 | **Costuras** | *Máxima resolución* aprovecha más la textura; *Costuras escondidas* las lleva a la espalda y a huecos como las axilas, con menos islas y algo menos de textura aprovechada. El modelo debe mirar a +Z | Un personaje que se verá de frente: *Costuras escondidas* |

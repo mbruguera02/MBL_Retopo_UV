@@ -292,6 +292,9 @@ class RetopoUVWindow(QtWidgets.QDialog):
                                           "Si la malla ya tiene costuras UV, se usan esas y no se añaden automáticas.")
         w["uv_seam_angle"] = _spin(1.0, 180.0, 180.0, 5.0, 1, "°",
                                    "Se corta por las aristas cuyo ángulo supera este valor. 180 = no cortar por ángulo.")
+        w["uv_material_seams"] = _check("Bordes de material como costuras",
+                                        "Si la malla tiene varios materiales, las aristas entre caras de materiales distintos "
+                                        "son costura: cada material tiene sus propias islas.")
         w["uv_auto_seams"] = _check("Costuras automáticas de Unfold3D",
                                     "Añade los cortes mínimos para poder desplegar sin solapes.")
         w["uv_cut_pipes"] = _check("Cortar tubos (brazos, dedos...)")
@@ -348,6 +351,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_respect_existing"])
         form.addRow("Ángulo de costura", w["uv_seam_angle"])
         form.addRow(w["uv_auto_seams"])
+        form.addRow(w["uv_material_seams"])
         form.addRow(w["uv_cut_pipes"])
         form.addRow("Dividir islas", w["uv_split_shells"])
         form.addRow("Costuras", w["uv_seam_style"])

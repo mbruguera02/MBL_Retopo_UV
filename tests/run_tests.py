@@ -605,6 +605,68 @@ def test_uv_seam_edges_and_areas_match_reference():
 
 
 @test
+def test_uv_quality_matches_maya():
+    """mbl_engine.uv_quality (numpy, sin Maya) da el mismo estiramiento, el mismo aprovechado, las mismas islas y los
+    mismos solapes y espejos que uv.py sobre mallas desplegadas con uv.unwrap, y también sobre UVs estropeadas."""
+    from mbl_engine import uv_quality
+
+    def arrays(mesh):
+        points, faces = retopo.mesh_arrays(mesh)
+        fn = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh)))
+        us, vs = fn.getUVs()
+        uv_counts, uv_ids = fn.getAssignedUVs()
+        uv_faces, start = [], 0
+        for count in uv_counts:
+            uv_faces.append(list(uv_ids[start:start + count]))
+            start += count
+        return points, faces, np.column_stack([us, vs]), uv_faces
+
+    def shells(mesh):
+        return om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh))).getUvShellsIds()[1]
+
+    meshes = [cmds.polySphere(radius=2, subdivisionsX=14, subdivisionsY=10, constructionHistory=False)[0],
+              cmds.polyTorus(radius=3, sectionRadius=1, subdivisionsX=14, subdivisionsY=8, constructionHistory=False)[0]]
+    cmds.move(8, 0, 0, meshes[1])
+    for mesh in cmds.ls(meshes, long=True):
+        uv.unwrap(mesh, base_settings(), quiet_log)
+        stretch, check = uv.stretch(mesh), uv.check(mesh)
+        rep = uv_quality.report(*arrays(mesh))
+        name = mesh.split("|")[-1]
+        assert check["overlapping_faces"] == 0 and rep["overlapping_faces"] == 0, (name, check, rep)
+        assert check["flipped_faces"] == rep["flipped_faces"] == 0, (name, check, rep)
+        assert abs(rep["stretch_mean"] - stretch["mean"]) <= 0.01, (name, rep["stretch_mean"], stretch["mean"])
+        assert abs(rep["over_1_5_percent"] - stretch["over_1_5_percent"]) <= 0.5, (name, rep, stretch)
+        assert abs(rep["used_percent"] - 100.0 * uv.uv_area(mesh)) <= 0.5, (name, rep["used_percent"], uv.uv_area(mesh))
+        assert rep["islands"] == check["shells"], (name, rep["islands"], check["shells"])
+        assert rep["mapped_faces"] == rep["faces"] == cmds.polyEvaluate(mesh, face=True), (name, rep)
+        level, reasons = uv_quality.grade(rep)
+        assert level < 2, (name, level, reasons, rep)
+
+    # UVs estropeadas a propósito: una isla encima de otra y otra en espejo; Maya y el núcleo cuentan lo mismo
+    mesh = cmds.ls(meshes[0], long=True)[0]
+    ids = list(shells(mesh))
+    assert max(ids) >= 1, "la esfera tendría que salir en varias islas"
+    first = [i for i, s in enumerate(ids) if s == 0]
+    second = [i for i, s in enumerate(ids) if s == 1]
+    fn = om.MFnMesh(uv.dag_path(uv.mesh_shape(mesh)))
+    us, vs = fn.getUVs()
+    shift_u = sum(us[i] for i in second) / len(second) - sum(us[i] for i in first) / len(first)
+    shift_v = sum(vs[i] for i in second) / len(second) - sum(vs[i] for i in first) / len(first)
+    cmds.polyEditUV(uv.components(mesh, "map", first), uValue=shift_u, vValue=shift_v, relative=True)
+    check = uv.check(mesh)
+    rep = uv_quality.report(*arrays(mesh))
+    assert check["overlapping_faces"] > 0 and rep["overlapping_faces"] > 0, (check, rep)
+    assert abs(rep["overlapping_faces"] - check["overlapping_faces"]) <= 0.1 * check["overlapping_faces"], (check, rep)
+    assert uv_quality.grade(rep)[0] == 2, uv_quality.grade(rep)
+    umin, umax = min(us[i] for i in second), max(us[i] for i in second)
+    cmds.polyEditUV(uv.components(mesh, "map", second), pivotU=(umin + umax) * 0.5, pivotV=0.5, scaleU=-1.0, scaleV=1.0)
+    check = uv.check(mesh)
+    rep = uv_quality.report(*arrays(mesh))
+    assert check["flipped_faces"] > 0 and rep["flipped_faces"] == check["flipped_faces"], (check, rep)
+    assert "caras en espejo" in " ".join(uv_quality.grade(rep)[1]), uv_quality.grade(rep)
+
+
+@test
 def test_pole_cleanup():
     """Un giro de arista en una rejilla crea 4 polos; la limpieza los quita."""
     from mbl_retopo_uv import quadopt

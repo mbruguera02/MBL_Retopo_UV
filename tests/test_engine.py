@@ -16,7 +16,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from mbl_engine import analyze, cleanup, closest, decimate, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry  # noqa: E402
+from mbl_engine import analyze, cleanup, closest, decimate, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry, uv_quality  # noqa: E402
 from mbl_engine.mesh import Mesh  # noqa: E402
 
 TESTS, RESULTS = [], []
@@ -973,6 +973,282 @@ def test_analyze_warns_about_thin_pieces_even_above_the_minimum():
     # una esfera maciza con caras de sobra no avisa
     ball = uv_sphere(rings=16, segments=24)
     assert analyze.recommend(ball.points, ball.triangles()[0], 3000)[1] is None
+
+
+# ------------------------------------------------------------------ calidad de UVs (uv_quality)
+
+def uv_plane(n=10):
+    """Plano n x n bien desplegado: (puntos, caras, UV, caras de UV). La UV es la propia posición, de 0 a 1."""
+    mesh = grid(n)
+    faces = [list(map(int, f)) for f in mesh.faces()]
+    return mesh.points, faces, mesh.points[:, :2] / n, [list(f) for f in faces]
+
+
+def split_columns(n, gap=0.0, rotate=False, scale=1.0):
+    """El plano cortado por la mitad en dos islas con UVs propias. La derecha se separa `gap` de la izquierda,
+    se gira 90 grados (`rotate`) o se escala (`scale`)."""
+    points, faces, uv, _ = uv_plane(n)
+    right = uv - [0.5, 0.0]
+    if rotate:
+        right = np.column_stack([-right[:, 1], right[:, 0]])
+    right = right * scale
+    right = right + [0.5 + gap, 0.0] - right[points[:, 0] >= n / 2].min(axis=0)
+    uv_faces = [[v + (len(uv) if points[face][:, 0].mean() > n / 2 else 0) for v in face] for face in faces]
+    return points, faces, np.vstack([uv, right]), uv_faces
+
+
+def grade_of(points, faces, uv, uv_faces):
+    rep = uv_quality.report(points, faces, uv, uv_faces)
+    return rep, uv_quality.grade(rep)
+
+
+@test
+def test_uv_quality_flat_plane_is_perfect():
+    """Un plano desplegado tal cual (una isla, sin estirar) saca nota 0 y las cifras de un despliegue perfecto."""
+    points, faces, uv, uv_faces = uv_plane(10)
+    rep, (level, reasons) = grade_of(points, faces, uv, uv_faces)
+    assert (level, reasons) == (0, []), (level, reasons)
+    assert rep["overlapping_faces"] == 0 and rep["flipped_faces"] == 0 and rep["islands"] == 1, rep
+    assert abs(rep["stretch_mean"] - 1.0) < 1e-9 and rep["over_1_5_percent"] == 0.0, rep
+    assert abs(rep["used_percent"] - 100.0) < 1e-9 and rep["margin_min"] is None, rep
+    assert rep["seam_percent"] == 0.0 and rep["racord_percent"] == 100.0, rep
+    # el mismo plano a la mitad de tamaño usa un cuarto de la textura
+    small = uv_quality.report(points, faces, uv * 0.5, uv_faces)
+    assert abs(small["used_percent"] - 25.0) < 1e-9 and abs(small["stretch_mean"] - 1.0) < 1e-9, small
+    # una malla sin UVs es mala
+    assert uv_quality.grade(uv_quality.report(points, faces, uv, [[] for _ in faces]))[0] == 2
+
+
+@test
+def test_uv_quality_overlaps_are_worse():
+    """Una cara puesta encima de otra (y la de debajo) cuentan como solapadas; tocarse no cuenta."""
+    for n, expected in ((10, 2), (40, 1)):
+        points, faces, uv, uv_faces = uv_plane(n)
+        base = len(uv)
+        # la cara 0 con UVs propias, puestas justo donde está la cara de su derecha
+        uv = np.vstack([uv, uv[faces[1]]])
+        uv_faces[0] = [base, base + 1, base + 2, base + 3]
+        rep, (level, reasons) = grade_of(points, faces, uv, uv_faces)
+        assert rep["overlapping_faces"] == 2, rep
+        assert level == expected and any("solapadas" in r for r in reasons), (n, level, reasons)
+    # dos islas pegadas por el corte no se solapan
+    points, faces, uv, uv_faces = split_columns(10)
+    assert uv_quality.report(points, faces, uv, uv_faces)["overlapping_faces"] == 0
+    # un solape parcial (media cara dentro de otra) también se ve
+    points, faces, uv, uv_faces = uv_plane(10)
+    uv = np.vstack([uv, uv[faces[0]] + [0.05, 0.0]])
+    uv_faces[0] = [len(uv) - 4, len(uv) - 3, len(uv) - 2, len(uv) - 1]
+    assert uv_quality.report(points, faces, uv, uv_faces)["overlapping_faces"] == 2
+
+
+@test
+def test_uv_quality_flipped_face_is_worse():
+    """Una cara con las UVs en espejo cuenta como volteada; una isla entera en espejo, nota 2."""
+    points, faces, uv, uv_faces = uv_plane(40)
+    base = len(uv)
+    square = uv[faces[5]]
+    mirrored = square.copy()
+    mirrored[:, 0] = square[:, 0].min() + square[:, 0].max() - square[:, 0]
+    uv = np.vstack([uv, mirrored])
+    uv_faces[5] = [base, base + 1, base + 2, base + 3]
+    rep, (level, reasons) = grade_of(points, faces, uv, uv_faces)
+    assert rep["flipped_faces"] == 1 and rep["overlapping_faces"] == 0, rep
+    assert level == 1 and any("espejo" in r for r in reasons), (level, reasons)
+    # todo el plano en espejo
+    points, faces, uv, uv_faces = uv_plane(10)
+    rep, (level, reasons) = grade_of(points, faces, uv * [-1.0, 1.0] + [1.0, 0.0], uv_faces)
+    assert rep["flipped_faces"] == len(faces) and level == 2, (rep, level)
+    # darle la vuelta al orden de las esquinas de una cara también la voltea
+    points, faces, uv, uv_faces = uv_plane(10)
+    uv_faces[3] = uv_faces[3][::-1]
+    assert uv_quality.report(points, faces, uv, uv_faces)["flipped_faces"] == 1
+
+
+@test
+def test_uv_quality_stretch_is_worse():
+    """Media ponderada y % de caras con más de 1,5x: la mitad derecha del plano en UV a un cuarto de ancho."""
+    points, faces, uv, uv_faces = uv_plane(10)
+    right = points[:, 0] > 5
+    squeezed = uv.copy()
+    squeezed[right, 0] = 0.5 + (uv[right, 0] - 0.5) / 4.0
+    rep, (level, reasons) = grade_of(points, faces, squeezed, uv_faces)
+    # densidad media = (0,5 + 0,125) / 1: la izquierda sale a 1/0,625 = 1,6x y la derecha a 0,25/0,625 -> 2,5x
+    assert abs(rep["stretch_mean"] - 0.5 * (1.6 + 2.5)) < 1e-9, rep["stretch_mean"]
+    assert abs(rep["over_1_5_percent"] - 100.0) < 1e-9, rep["over_1_5_percent"]
+    assert level == 2 and any("estiramiento" in r for r in reasons), (level, reasons)
+    # un estiramiento suave no quita la nota
+    gentle = uv.copy()
+    gentle[right, 0] = 0.5 + (uv[right, 0] - 0.5) * 0.9
+    rep, (level, reasons) = grade_of(points, faces, gentle, uv_faces)
+    assert 1.0 < rep["stretch_mean"] < 1.1 and rep["over_1_5_percent"] == 0.0 and level == 0, (rep, reasons)
+    # una cara que se queda sin área cuenta como mala, aunque en la media pese poco (tope de 4x)
+    flat = uv.copy()
+    flat[faces[0]] = flat[faces[0]][0]
+    assert uv_quality.report(points, faces, flat, uv_faces)["over_1_5_percent"] >= 1.0
+
+
+@test
+def test_uv_quality_zero_margin_between_islands_warns():
+    """Dos islas pegadas (margen 0) avisan; con hueco entre ellas, no. El hueco se mide hasta MARGIN_CAP."""
+    points, faces, uv, uv_faces = split_columns(10)
+    rep, (level, reasons) = grade_of(points, faces, uv, uv_faces)
+    assert rep["islands"] == 2 and rep["margin_min"] < 1e-9, rep
+    assert level == 1 and any("pegadas" in r for r in reasons), (level, reasons)
+    assert abs(rep["texel_variation_percent"]) < 1e-9 and rep["overlapping_faces"] == 0, rep
+    points, faces, uv, uv_faces = split_columns(10, gap=0.1)
+    rep, (level, reasons) = grade_of(points, faces, uv, uv_faces)
+    assert rep["margin_min"] == uv_quality.MARGIN_CAP and (level, reasons) == (0, []), (rep, reasons)
+    # un hueco de 0,004 se mide tal cual
+    points, faces, uv, uv_faces = split_columns(10, gap=0.004)
+    assert abs(uv_quality.report(points, faces, uv, uv_faces)["margin_min"] - 0.004) < 1e-9
+
+
+@test
+def test_uv_quality_islands_and_texel_density():
+    """Islas por UVs compartidas y variación de la densidad de texel entre ellas."""
+    box = cube()
+    faces = [list(map(int, f)) for f in box.faces()]
+    # seis cuadrados sueltos, cada uno con sus UVs
+    uv, uv_faces = [], []
+    for k in range(len(faces)):
+        uv.extend([(k * 1.2 + x, y) for x, y in ((0, 0), (1, 0), (1, 1), (0, 1))])
+        uv_faces.append(list(range(len(uv) - 4, len(uv))))
+    uv = np.array(uv) / 8.0
+    rep = uv_quality.report(box.points, faces, uv, uv_faces)
+    assert rep["islands"] == 6 and rep["texel_variation_percent"] < 1e-6, rep
+    # una isla al doble de escala: la densidad ya no es la misma
+    big = uv.copy()
+    big[:4] = (big[:4] - big[0]) * 2.0 + big[0]
+    rep = uv_quality.report(box.points, faces, big, uv_faces)
+    assert rep["texel_variation_percent"] > 20.0 and rep["islands"] == 6, rep
+    # compartir UVs une las islas; una cara sin UVs no tiene isla
+    island, count = uv_quality.islands([[0, 1, 2, 3], [1, 4, 5, 2], [9, 8, 7, 6], []])
+    assert count == 2 and island[0] == island[1] != island[2] and island[3] == -1, (island, count)
+
+
+def reference_seam_continuity(points, faces, uv_points, uv_faces):
+    """El recorrido por aristas de `seam_continuity` de tests/bench.py, sobre arrays."""
+    import math
+    edges = {}
+    for face, uv_face in zip(faces, uv_faces):
+        c = len(face)
+        for k in range(c):
+            a, b = face[k], face[(k + 1) % c]
+            ua, ub = uv_face[k], uv_face[(k + 1) % c]
+            if a > b:
+                a, b, ua, ub = b, a, ub, ua
+            edges.setdefault((a, b), []).append((ua, ub))
+    total = seam = 0.0
+    rows = []
+    for (a, b), sides in edges.items():
+        length = float(np.linalg.norm(points[a] - points[b]))
+        total += length
+        if len(sides) != 2 or (sides[0][0] == sides[1][0] and sides[0][1] == sides[1][1]):
+            continue
+        seam += length
+        s1 = uv_points[sides[0][1]] - uv_points[sides[0][0]]
+        s2 = uv_points[sides[1][1]] - uv_points[sides[1][0]]
+        n1, n2 = np.linalg.norm(s1), np.linalg.norm(s2)
+        if n1 < 1e-9 or n2 < 1e-9:
+            continue
+        rows.append((length, math.degrees(math.atan2(s1[0] * s2[1] - s1[1] * s2[0], float(s1 @ s2))), math.log2(n1 / n2)))
+    rows = np.array(rows)
+    w = rows[:, 0] / rows[:, 0].sum()
+    ang, scl = np.abs(rows[:, 1]), np.abs(rows[:, 2])
+    turn, same = ang < 15, scl < math.log2(1.1)
+    return (100 * seam / total, 100.0 * float(w[turn].sum()), 100.0 * float(w[same].sum()), 100.0 * float(w[turn & same].sum()))
+
+
+@test
+def test_uv_quality_seam_continuity_matches_reference():
+    """La continuidad en los cortes da lo mismo que el recorrido por aristas del banco, y baja si una isla se gira o se escala."""
+    ball = uv_sphere(rings=8, segments=12, triangulate=False)
+    faces = [list(map(int, f)) for f in ball.faces()]
+    rng = np.random.RandomState(4)
+    # cada cara con sus UVs propias (todas las aristas son cortes), giradas y escaladas al azar
+    uv, uv_faces = [], []
+    for face in faces:
+        angle, scale = rng.choice([0.0, 0.05, 0.3, 1.5, 3.1]), rng.choice([1.0, 1.05, 1.5, 2.0])
+        rot = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+        flat = np.array([(0, 0), (1, 0), (1, 1), (0, 1)][:len(face)], dtype=float)
+        uv.extend((flat @ rot.T * scale + rng.rand(2)).tolist())
+        uv_faces.append(list(range(len(uv) - len(face), len(uv))))
+    uv = np.array(uv)
+    got = uv_quality.seam_continuity(ball.points, faces, uv, uv_faces)
+    expected = reference_seam_continuity(ball.points, faces, uv, uv_faces)
+    values = (got["seam_percent"], got["racord_rot_lt_15"], got["racord_scale_lt_10"], got["racord_percent"])
+    assert np.allclose(values, expected, atol=1e-9), (values, expected)
+    assert got["racord_percent"] < got["racord_rot_lt_15"] < 100.0, got
+    # el plano cortado por la mitad: la derecha igual, girada 90 grados o al doble de escala
+    for kwargs, rot, scl in (({}, 100.0, 100.0), ({"rotate": True}, 0.0, 100.0), ({"scale": 2.0}, 100.0, 0.0)):
+        points, faces, uv, uv_faces = split_columns(10, **kwargs)
+        got = uv_quality.seam_continuity(points, faces, uv, uv_faces)
+        assert abs(got["seam_percent"] - 100.0 / 22) < 1e-9, got
+        assert abs(got["racord_rot_lt_15"] - rot) < 1e-9 and abs(got["racord_scale_lt_10"] - scl) < 1e-9, (kwargs, got)
+        assert abs(got["racord_percent"] - min(rot, scl)) < 1e-9, (kwargs, got)
+
+
+@test
+def test_uv_quality_overlap_search_matches_brute_force():
+    """La búsqueda por rejilla da las mismas caras solapadas y el mismo margen que comparar todas con todas."""
+    rng = np.random.RandomState(1)
+    for trial in range(10):
+        count = int(rng.randint(5, 50))
+        size = rng.choice([0.03, 0.1, 0.3])
+        uv, uv_faces = [], []
+        for centre in rng.rand(count, 2):
+            k = int(rng.choice([3, 4, 4, 5]))
+            angle = np.sort(rng.rand(k) * 2 * np.pi)
+            radius = size * (0.5 + rng.rand(k))
+            uv.extend((centre + radius[:, None] * np.column_stack([np.cos(angle), np.sin(angle)])).tolist())
+            uv_faces.append(list(range(len(uv) - k, len(uv))))
+        uv = np.array(uv)
+        counts, ids = uv_quality._flatten(uv_faces)
+        tris, owner = uv_quality._uv_triangles(uv, counts, ids)
+        i, j = np.triu_indices(len(tris), 1)
+        keep = owner[i] != owner[j]
+        i, j = i[keep], j[keep]
+        over = uv_quality._triangles_overlap(tris[i], tris[j], uv_quality.OVERLAP_TOL)
+        expected = np.zeros(count, dtype=bool)
+        expected[owner[i[over]]] = expected[owner[j[over]]] = True
+        assert (uv_quality.overlapping_faces(uv, uv_faces) == expected).all(), trial
+        # margen: la menor distancia entre dos aristas de islas distintas
+        island, number = uv_quality.islands(uv_faces)
+        owner_edge = np.array([f for f, fc in enumerate(uv_faces) for _ in fc])
+        start = np.array([uv[v] for fc in uv_faces for v in fc])
+        stop = np.array([uv[fc[(a + 1) % len(fc)]] for fc in uv_faces for a in range(len(fc))])
+        i, j = np.triu_indices(len(start), 1)
+        keep = island[owner_edge[i]] != island[owner_edge[j]]
+        i, j = i[keep], j[keep]
+        best = min(0.05, float(uv_quality._segment_distance(start[i], stop[i], start[j], stop[j]).min()))
+        assert abs(uv_quality.island_margin(uv, uv_faces, island, number, cap=0.05) - best) < 1e-12, trial
+    # un quad cóncavo: el triángulo que cae en su hueco no se solapa, el que cae dentro sí
+    arrow = np.array([[0, 0], [1, 0], [0.3, 0.3], [0, 1.0]])
+    inside = np.vstack([arrow, [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2]]])
+    notch = np.vstack([arrow, [[0.6, 0.6], [0.8, 0.6], [0.8, 0.8]]])
+    assert uv_quality.overlapping_faces(inside, [[0, 1, 2, 3], [4, 5, 6]]).all()
+    assert not uv_quality.overlapping_faces(notch, [[0, 1, 2, 3], [4, 5, 6]]).any()
+
+
+@test
+def test_uv_quality_is_fast_and_grades_the_baseline_as_acceptable():
+    """40.000 caras en pocos segundos, y las cifras de la línea base del banco (2 de noviembre) no sacan nota 2."""
+    points, faces, uv, uv_faces = uv_plane(200)
+    start = time.time()
+    rep = uv_quality.report(points, faces, uv, uv_faces)
+    assert time.time() - start < 20.0 and rep["overlapping_faces"] == 0 and rep["faces"] == 40000, rep
+    # (usado %, > 1,5x %, estiramiento medio, giro < 15 grados %, costuras %) de los 10 resultados de tests/baseline.json
+    baseline = [(64.59, 7.41, 1.12, 23.11, 10.84), (60.59, 6.78, 1.173, 21.57, 9.89), (56.03, 9.73, 1.141, 2.91, 3.84),
+                (48.93, 9.57, 1.19, 7.35, 3.51), (60.31, 3.51, 1.077, 27.46, 7.28), (61.58, 5.1, 1.114, 22.28, 8.01),
+                (56.07, 6.52, 1.14, 15.53, 9.6), (58.85, 6.61, 1.128, 27.78, 10.55), (60.28, 1.23, 1.069, 15.73, 5.95),
+                (53.61, 4.26, 1.1, 19.93, 4.68)]
+    for used, over, mean, rot, seam in baseline:
+        # la continuidad con giro y escala a la vez no pasa de la del giro: se prueba ese tope y su mitad
+        for racord in (rot, rot / 2.0):
+            case = dict(rep, used_percent=used, over_1_5_percent=over, stretch_mean=mean, racord_percent=racord,
+                        seam_percent=seam, islands=30, margin_min=0.004, texel_variation_percent=10.0)
+            level, reasons = uv_quality.grade(case)
+            assert level < 2, (used, over, mean, rot, reasons)
 
 
 if __name__ == "__main__":

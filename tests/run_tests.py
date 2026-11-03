@@ -1659,6 +1659,54 @@ def test_uv_material_borders_are_seams():
         assert a.shape == b.shape and np.array_equal(a, b), "un solo material: las UVs deben salir iguales"
 
 
+def make_bent_tube(name, rows=24, columns=16):
+    """Tubo de quads curvado un cuarto de vuelta y más fino por un extremo, abierto por los dos: Unfold3D lo corta a lo
+    largo y lo despliega en abanico, con las dos orillas del corte sin casar."""
+    from mbl_retopo_uv import meshbuild
+    points, faces = [], []
+    for i in range(rows + 1):
+        t = i / rows
+        angle = t * np.pi / 2
+        center = np.array([4.0 * np.sin(angle), 4.0 * (1 - np.cos(angle)), 0.0])
+        normal = np.array([-np.sin(angle), np.cos(angle), 0.0])
+        radius = 0.9 + (0.55 - 0.9) * t
+        for j in range(columns):
+            a = 2 * np.pi * j / columns
+            points.append(center + radius * (np.cos(a) * normal + np.sin(a) * np.array([0.0, 0.0, 1.0])))
+    for i in range(rows):
+        for j in range(columns):
+            faces.append([i * columns + j, i * columns + (j + 1) % columns, (i + 1) * columns + (j + 1) % columns,
+                          (i + 1) * columns + j])
+    return meshbuild.create_mesh(np.array(points), faces, name)
+
+
+@test
+def test_uv_straighten_tubes():
+    """Un tubo curvado y cónico, desplegado en una sola isla con el corte a lo largo: con 'Enderezar tubos' las dos orillas
+    del corte casan (de ~17 % a más del 80 % de su longitud), sin estirar más, sin solapes ni espejos; sin la opción no
+    se toca nada y el aviso del registro no sale."""
+    from mbl_engine import uv_quality
+    settings = dict(uv_split_big_shells=0.0, uv_split_shells=0.0, uv_tailor_seams=False)
+    results = {}
+    for enabled in (False, True):
+        mesh = make_bent_tube("bentTube{}".format(int(enabled)))
+        lines = []
+        uv.unwrap(mesh, base_settings(uv_straighten_strips=enabled, **settings), lambda m, level="info": lines.append(m))
+        assert_good_uvs(mesh)
+        rep = uv_quality.report(*uv_arrays(mesh))
+        results[enabled] = (rep, any("enderezadas" in line for line in lines))
+        print("    enderezar {}: casan {:.1f}%, estiramiento {:.3f}, {:.1f}% de caras > 1,5x, textura aprovechada {:.1f}%".format(
+            enabled, rep["racord_rot_lt_15"], rep["stretch_mean"], rep["over_1_5_percent"], rep["used_percent"]))
+    (off, logged_off), (on, logged_on) = results[False], results[True]
+    assert logged_on and not logged_off, (logged_on, logged_off)
+    assert off["islands"] == 1 and on["islands"] == 1, (off["islands"], on["islands"])
+    assert on["racord_rot_lt_15"] > 80.0 and on["racord_rot_lt_15"] > off["racord_rot_lt_15"] + 30.0, (off, on)
+    assert on["stretch_mean"] <= off["stretch_mean"] + 0.005 and on["over_1_5_percent"] <= off["over_1_5_percent"], (off, on)
+    assert on["used_percent"] >= off["used_percent"] - 3.0, (off["used_percent"], on["used_percent"])
+    # los ajustes traen la opción y la interfaz tiene su casilla (test_ui_builds)
+    assert config.DEFAULTS["uv_straighten_strips"] is True
+
+
 @test
 def test_retopo_result_is_manifold():
     """Si el resultado del retopo trae no-manifold, se repara y las UVs funcionan sin limpiar a mano."""

@@ -17,7 +17,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from mbl_engine import analyze, cleanup, closest, decimate, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry, uv_quality  # noqa: E402
+from mbl_engine import analyze, cleanup, closest, decimate, fit, metrics, orient, quality, quadopt, repair, resources, retopo, sizefield, symmetry, uv_quality, uv_straighten  # noqa: E402
 from mbl_engine import scale  # noqa: E402
 from mbl_engine.mesh import Mesh  # noqa: E402
 
@@ -1349,6 +1349,143 @@ def test_uv_quality_is_fast_and_grades_the_baseline_as_acceptable():
         case = dict(rep, used_percent=used, over_1_5_percent=over, stretch_mean=mean, racord_percent=racord,
                     seam_percent=seam, islands=20, margin_min=margin, texel_variation_percent=texel)
         assert uv_quality.grade(case) == (0, []), (uv_quality.grade(case), case)
+
+
+# ------------------------------------------------------------------ enderezado de islas de UV (uv_straighten)
+
+def uv_tube(rows, columns, radius=1.0, height=4.0, taper=1.0, fan=0.5):
+    """Tubo de quads (columns alrededor, rows a lo largo, abierto por los dos extremos) cortado a lo largo por una costura
+    y desplegado en abanico: las filas son arcos y las columnas, radios. `fan` = giro total entre las dos orillas del corte
+    (radianes). `taper`: radio del extremo de arriba frente al de abajo. Devuelve (puntos, caras, UV, caras UV)."""
+    points, uv = [], []
+    for i in range(rows + 1):
+        t = i / rows
+        r = radius * (1.0 + (taper - 1.0) * t)
+        for j in range(columns + 1):
+            a = 2.0 * np.pi * j / columns
+            if j < columns:
+                points.append((r * np.cos(a), r * np.sin(a), height * t))
+            # abanico: radio de giro grande frente al ancho del tubo, así cada fila mide casi lo que mide en 3D
+            rho = 2.0 * np.pi * radius / fan + height * t
+            theta = fan * j / columns
+            uv.append((rho * np.sin(theta), rho * np.cos(theta)))
+
+    def point_id(i, j):
+        return i * columns + j % columns
+
+    def uv_id(i, j):
+        return i * (columns + 1) + j
+    faces = [[point_id(i, j), point_id(i, j + 1), point_id(i + 1, j + 1), point_id(i + 1, j)]
+             for i in range(rows) for j in range(columns)]
+    uv_faces = [[uv_id(i, j), uv_id(i, j + 1), uv_id(i + 1, j + 1), uv_id(i + 1, j)]
+                for i in range(rows) for j in range(columns)]
+    return np.array(points), faces, np.array(uv), uv_faces
+
+
+def island_stretch(points, faces, uv, uv_faces):
+    """(estiramiento medio, % de caras > 1,5x) de unas UV, con la densidad de la propia malla como referencia."""
+    world = uv_quality.face_areas(points, faces)
+    flat = np.abs(uv_quality.uv_face_areas(uv, uv_faces)[0])
+    rep = uv_quality.stretch_stats(world, flat)
+    return rep["stretch_mean"], rep["over_1_5_percent"]
+
+
+@test
+def test_straighten_tube_cut_lengthwise():
+    """Un tubo de quads cortado a lo largo y desplegado en abanico: las dos orillas del corte no casan (giro de unos 29
+    grados); tras enderezarlo casan del todo, sin estirar más y sin caras en espejo ni solapes."""
+    points, faces, uv, uv_faces = uv_tube(10, 16, fan=0.5)
+    before = uv_quality.seam_continuity(points, faces, uv, uv_faces)
+    assert before["racord_rot_lt_15"] < 1.0, before
+    new, done = uv_straighten.straighten(points, faces, uv, uv_faces)
+    assert len(done) == 1 and done[0]["matched"][0] < 1.0 and done[0]["matched"][1] > 99.0, done
+    after = uv_quality.seam_continuity(points, faces, new, uv_faces)
+    assert after["racord_rot_lt_15"] > 99.0 and after["racord_scale_lt_10"] > 99.0, after
+    old_mean, old_over = island_stretch(points, faces, uv, uv_faces)
+    mean, over = island_stretch(points, faces, new, uv_faces)
+    assert mean <= old_mean + uv_straighten.STRETCH_TOLERANCE and over <= old_over, (old_mean, mean, old_over, over)
+    rep = uv_quality.report(points, faces, new, uv_faces)
+    assert rep["overlapping_faces"] == 0 and rep["flipped_faces"] == 0, rep
+    # las filas quedan rectas: la primera arista del corte, en las dos orillas, es la misma (misma dirección y longitud)
+    first = uv_faces[0]
+    left, right = new[first[3]] - new[first[0]], new[uv_faces[15][2]] - new[uv_faces[15][1]]
+    assert np.allclose(left, right, atol=5e-2 * np.linalg.norm(left)), (left, right)
+
+
+@test
+def test_straighten_ring_of_quads():
+    """Un anillo de una sola fila de quads (un cinturón) cortado por un sitio también se endereza: la arista del corte
+    casa en las dos orillas."""
+    points, faces, uv, uv_faces = uv_tube(1, 12, radius=1.0, height=0.3, fan=0.6)
+    assert uv_quality.seam_continuity(points, faces, uv, uv_faces)["racord_rot_lt_15"] < 1.0
+    new, done = uv_straighten.straighten(points, faces, uv, uv_faces)
+    assert len(done) == 1, done
+    assert uv_quality.seam_continuity(points, faces, new, uv_faces)["racord_rot_lt_15"] > 99.0
+    result = uv_straighten.straighten_island(points, faces, uv, uv_faces, range(len(faces)))
+    assert result is not None and len(result["uv_ids"]) == len(uv) and result["uv"].shape == (len(uv), 2)
+
+
+@test
+def test_straighten_leaves_islands_that_are_not_tubes():
+    """Sin corte contra sí misma (rejilla plana, o un tubo con la costura ya casada), con un n-gon o demasiado grande, la
+    isla se deja como está: None."""
+    plane = grid(6)
+    points = np.asarray(plane.points, dtype=float)
+    faces = [list(f) for f in plane.faces()]
+    uv = points[:, :2] * 0.1
+    assert uv_straighten.straighten_island(points, faces, uv, faces, range(len(faces))) is None
+    new, done = uv_straighten.straighten(points, faces, uv, faces)
+    assert not done and np.array_equal(new, uv)
+    # tubo desplegado sin abanico (fan casi 0): las dos orillas ya casan y no hay nada que ganar
+    points, faces, uv, uv_faces = uv_tube(8, 12, fan=0.01)
+    assert uv_quality.seam_continuity(points, faces, uv, uv_faces)["racord_rot_lt_15"] > 99.0
+    assert uv_straighten.straighten_island(points, faces, uv, uv_faces, range(len(faces))) is None
+    # un pentágono en la isla
+    points, faces, uv, uv_faces = uv_tube(6, 12, fan=0.5)
+    faces[3], uv_faces[3] = faces[3] + [faces[3][0]], uv_faces[3] + [uv_faces[3][0]]
+    assert uv_straighten.straighten_island(points, faces, uv, uv_faces, range(len(faces))) is None
+    # más vértices que el límite
+    points, faces, uv, uv_faces = uv_tube(6, 12, fan=0.5)
+    keep = uv_straighten.MAX_VERTICES
+    uv_straighten.MAX_VERTICES = 10
+    try:
+        assert uv_straighten.straighten_island(points, faces, uv, uv_faces, range(len(faces))) is None
+    finally:
+        uv_straighten.MAX_VERTICES = keep
+
+
+@test
+def test_straighten_never_raises_the_stretch():
+    """El estiramiento de una isla no sube: en un cono muy cónico, donde un tubo recto exigiría estirar el desplegado
+    (que es exacto), la isla no se toca; en el resto de tubos el estiramiento medio y las caras > 1,5x no suben."""
+    for rows, columns, taper, fan in ((10, 16, 3.0, 0.5), (10, 16, 1.0, 1.2), (14, 10, 0.6, 0.8), (6, 24, 1.0, 0.3),
+                                      (10, 16, 0.2, 1.0)):
+        points, faces, uv, uv_faces = uv_tube(rows, columns, taper=taper, fan=fan)
+        old_mean, old_over = island_stretch(points, faces, uv, uv_faces)
+        new, done = uv_straighten.straighten(points, faces, uv, uv_faces)
+        mean, over = island_stretch(points, faces, new, uv_faces)
+        assert mean <= old_mean + uv_straighten.STRETCH_TOLERANCE and over <= old_over, (taper, fan, old_mean, mean, old_over, over)
+        rep = uv_quality.report(points, faces, new, uv_faces)
+        assert rep["overlapping_faces"] == 0 and rep["flipped_faces"] == 0, (taper, fan, rep)
+        if done:
+            assert done[0]["matched"][1] > done[0]["matched"][0]
+
+
+@test
+def test_straighten_only_touches_the_islands_that_improve():
+    """Con un tubo y una rejilla plana en la misma malla, las UV de la rejilla no cambian y las del tubo sí."""
+    points, faces, uv, uv_faces = uv_tube(8, 12, fan=0.5)
+    plane = grid(4)
+    count = len(points)
+    points = np.vstack([points, np.asarray(plane.points, dtype=float)])
+    faces = faces + [[v + count for v in f] for f in plane.faces()]
+    flat_uv = np.asarray(plane.points, dtype=float)[:, :2] * 0.1 + 5.0
+    uv_count = len(uv)
+    uv = np.vstack([uv, flat_uv])
+    uv_faces = uv_faces + [[v + uv_count for v in f] for f in plane.faces()]
+    new, done = uv_straighten.straighten(points, faces, uv, uv_faces)
+    assert len(done) == 1 and done[0]["faces"] == 8 * 12, done
+    assert np.array_equal(new[uv_count:], uv[uv_count:]) and not np.allclose(new[:uv_count], uv[:uv_count])
 
 
 # ------------------------------------------------------------------ escala de trabajo

@@ -80,6 +80,10 @@ DEFAULTS = {
     "uv_tailor_seams": True,
     # islas rectas (alineadas y solo giros de 90°) y nunca boca abajo: más fáciles de pintar
     "uv_straight_islands": True,
+    # tubos cortados a lo largo (brazos, piernas, dedos, cables): las dos orillas del corte pasan a ser paralelas para que
+    # el dibujo de la textura (vetas, rayones) siga la misma dirección al cruzar la costura. Solo se toca una isla si no
+    # estira más que antes
+    "uv_straighten_strips": True,
     # en "resolution", las islas con más de esta fracción del área se vuelven a cortar (0 = nunca).
     # Águila: tres islas con el 90% del área -> textura aprovechada 42% -> 68%, estiramiento 8% -> 4%
     "uv_split_big_shells": 0.12,

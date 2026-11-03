@@ -133,14 +133,14 @@ def _judge_checks(report, levels, compared):
         checks.append(_check(levels["bad_shape_percent"],
                              "{:.1f}% de quads deformados (ángulos muy agudos o abiertos, lados muy desiguales)".format(
                                  values["bad_shape_percent"]),
-                             "La textura se estiraría en esas caras. Con Maya, QuadWild o Instant Meshes sube 'Relajar "
-                             "quads' (en 'Más opciones'); o prueba otro motor: 'Automático' elige el mejor."))
+                             "La textura se estiraría en esas caras. Con Maya o Instant Meshes sube 'Relajar quads' "
+                             "(en 'Avanzado'); o prueba otro motor: 'Automático' elige el mejor."))
     if levels["size_jump_percent"]:
         checks.append(_check(levels["size_jump_percent"],
                              "{:.1f}% de saltos de tamaño entre caras vecinas (una cara más de {:g} veces mayor que la "
                              "de al lado)".format(values["size_jump_percent"], quality.SIZE_JUMP),
-                             "Con Maya, QuadWild o Instant Meshes sube 'Relajar quads' (en 'Más opciones') para igualar "
-                             "los tamaños, o prueba otro motor. Si pintaste detalle, el salto en el borde de lo pintado "
+                             "Con Maya o Instant Meshes sube 'Relajar quads' (en 'Avanzado') para igualar los tamaños, "
+                             "o prueba otro motor. Si pintaste detalle, el salto en el borde de lo pintado "
                              "es normal: baja 'Densidad en lo pintado'."))
     if levels["flipped_percent"]:
         checks.append(_check(levels["flipped_percent"],

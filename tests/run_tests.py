@@ -1715,13 +1715,38 @@ assert collected["uv_udim"] is True and collected["retopo_target_faces"] == 777,
 assert collected["uv_map_size"] == 8192, collected
 window.save_settings()
 assert config.load(sys.argv[2])["retopo_target_faces"] == 777
-# el desplegable de motores: solo los que existen (un motor que ya no existe se queda en Automático)
+# el desplegable de motores: solo los que existen, Maya primero y recomendado, y el Motor MBL como experimental con su aviso
+# (un motor que ya no existe se queda en el de por defecto, Maya)
 combo = window.widgets["retopo_engine"]
-assert [combo.itemData(i) for i in range(combo.count())] == ["auto", "mbl", "maya", "instant_meshes"]
-window.apply_settings(dict(config.DEFAULTS, retopo_engine="maya"))
-assert window.collect_settings()["retopo_engine"] == "maya"
+assert [combo.itemData(i) for i in range(combo.count())] == ["maya", "auto", "mbl", "instant_meshes"]
+assert "recomendado" in combo.itemText(0) and "experimental" in combo.itemText(combo.findData("mbl")), combo.itemText(0)
+assert "EXPERIMENTAL" in ui.ENGINE_NOTES["mbl"] and "Recomendado" in ui.ENGINE_NOTES["maya"]
+window.apply_settings(dict(config.DEFAULTS))
+assert window.collect_settings()["retopo_engine"] == "maya" and "Recomendado" in window.engine_note.text()
+for engine in ("auto", "mbl", "instant_meshes"):
+    window.apply_settings(dict(config.DEFAULTS, retopo_engine=engine))
+    assert window.collect_settings()["retopo_engine"] == engine
+window.apply_settings(dict(config.DEFAULTS, retopo_engine="mbl"))
+assert "EXPERIMENTAL" in window.engine_note.text()
 window.apply_settings(dict(config.DEFAULTS, retopo_engine="quadwild"))
-assert window.collect_settings()["retopo_engine"] == "auto"
+assert window.collect_settings()["retopo_engine"] == "maya"
+# lo principal fuera de «Avanzado» y todo lo demás dentro, plegado; ninguna opción se quita
+internal = {"uv_split_big_shells", "retopo_orient", "uv_rotate_step", "uv_pack_iterations", "uv_pre_rotate"}  # sin casilla en la ventana
+assert set(window.widgets) == set(config.DEFAULTS) - internal, set(window.widgets) ^ (set(config.DEFAULTS) - internal)
+assert not window.advanced_box.isChecked() and window.advanced_box.title() == "Avanzado"
+main = ("retopo_engine", "retopo_target_faces", "uv_map_size")
+for key, widget in window.widgets.items():
+    assert window.advanced_box.isAncestorOf(widget) != (key in main), key
+# Instant Meshes sin su programa: «Avanzado» se despliega para que se vea dónde indicar la ruta
+real_find = config.find_instant_meshes
+config.find_instant_meshes = lambda settings, platform=None: None
+try:
+    window.apply_settings(dict(config.DEFAULTS, retopo_engine="instant_meshes"))
+    assert window.advanced_box.isChecked()
+finally:
+    config.find_instant_meshes = real_find
+window.advanced_box.setChecked(False)
+window.apply_settings(dict(config.DEFAULTS))
 window.show_status({"|pieza": [{"step": "uv", "level": 2,
                                  "checks": [{"level": 2, "text": "3 caras solapadas", "advice": "Repite 'UVs'."}]}]})
 top = window.status_tree.topLevelItem(0)

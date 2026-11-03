@@ -18,6 +18,8 @@ import maya.api.OpenMaya as om
 import maya.cmds as cmds
 import numpy as np
 
+from mbl_engine import uv_quality
+
 from . import config
 from .common import UVError, components, dag_path, default_log, flat_indices, mesh_shape, short_name
 
@@ -727,7 +729,7 @@ def layout_udim(transform, settings, log=default_log):
     return tiles
 
 
-def _layout_udim(transform, settings, target, log=default_log):
+def _layout_udim(transform, settings, target, log=default_log, boost=1):
     """Escala a la densidad objetivo y reparte las islas en los UDIMs necesarios."""
     name = short_name(transform)
     map_size = settings["uv_map_size"]
@@ -776,6 +778,10 @@ def _layout_udim(transform, settings, target, log=default_log):
     pending = [group["shells"] for group in groups]
 
     kwargs = _layout_kwargs(settings)
+    if boost > 1:
+        # reintento: el empaquetador dejó islas más juntas que el padding; se le pide más separación y más resolución
+        kwargs["resolution"] = int(kwargs["resolution"]) * 2
+        kwargs["shellSpacing"] *= 1.0 + 0.5 * (boost - 1)
     tile = 0
     while pending:
         shells = pending.pop(0)
@@ -803,6 +809,13 @@ def _layout_udim(transform, settings, target, log=default_log):
     if report["crossing_tiles"] or report["overlapping_faces"] > baseline_overlaps:
         raise UVError("{}: no se consiguió repartir las islas en UDIMs sin solapes. "
                       "Baja la densidad de texel o el padding.".format(name))
+    # el margen real (en píxeles de la textura final) debe respetar el padding; si no, se reempaqueta con más separación
+    from . import status
+    margin_px = uv_quality.island_margin(*status.uv_arrays(transform)[2:]) if tile > 1 or len(sizes) > 1 else None
+    if margin_px is not None and margin_px * map_size < config.padding_px(settings) - 1.0 and boost < 3:
+        log("{}: margen entre islas de {:.1f} px (padding {} px); se reempaqueta con más separación."
+            .format(name, margin_px * map_size, config.padding_px(settings)), "warning")
+        return _layout_udim(transform, settings, target, log, boost + 1)
     return tile
 
 

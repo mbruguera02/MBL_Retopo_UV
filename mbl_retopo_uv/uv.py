@@ -1034,3 +1034,66 @@ def _unwrap(transform, settings, log, tick):
         log("{}: {} islas cruzan el borde de un UDIM.".format(name, len(report["crossing_tiles"])), "warning")
     report["texel_density"] = density
     return report
+
+
+# ---------------------------------------------------------------- «Ver cuadrícula»
+
+CHECKER_NODE = "mblCheckerShader"
+# material anterior de cada malla mientras se ve la cuadrícula: {malla: [(shadingEngine, [componentes])]}
+_checker_saved = {}
+
+
+def has_checker(transform):
+    return transform in _checker_saved
+
+
+def _own_members(sg, shape):
+    """Elementos del shadingEngine que son de esta malla (la forma, su transform o sus caras)."""
+    owners = {shape.split("|")[-1], cmds.listRelatives(shape, parent=True)[0]}
+    return [m for m in (cmds.sets(sg, query=True) or []) if m.split(".")[0].split("|")[-1] in owners]
+
+
+def toggle_checker(transform):
+    """Pone a la malla un material temporal con una textura de cuadros (checker de Maya, sin archivos) para ver a ojo el
+    estiramiento de las UVs; una segunda llamada lo quita y devuelve el material de antes. No cambia las UVs.
+    Devuelve True si queda la cuadrícula puesta, False si se quitó."""
+    shape = mesh_shape(transform)
+    if transform in _checker_saved:
+        saved = _checker_saved.pop(transform)
+        for sg, members in saved:
+            if cmds.objExists(sg) and members:
+                cmds.sets(members, edit=True, forceElement=sg)
+        if not saved:
+            cmds.sets(transform, edit=True, forceElement="initialShadingGroup")
+        _drop_checker_nodes(transform)
+        return False
+    saved = []
+    for sg in cmds.listConnections(shape, type="shadingEngine") or []:
+        if sg not in [s for s, _ in saved]:
+            saved.append((sg, _own_members(sg, shape)))
+    _checker_saved[transform] = saved
+    tag = short_name(transform)
+    check = cmds.shadingNode("checker", asTexture=True, name="mblChecker_" + tag)
+    place = cmds.shadingNode("place2dTexture", asUtility=True, name="mblChecker_place_" + tag)
+    cmds.connectAttr(place + ".outUV", check + ".uvCoord")
+    cmds.connectAttr(place + ".outUvFilterSize", check + ".uvFilterSize")
+    for attr in ("repeatUV", "rotateUV", "offset", "stagger", "mirrorU", "mirrorV", "wrapU", "wrapV",
+                 "coverage", "translateFrame", "rotateFrame", "noiseUV", "vertexUvOne", "vertexUvTwo",
+                 "vertexUvThree", "vertexCameraOne"):
+        if cmds.attributeQuery(attr, node=place, exists=True) and cmds.attributeQuery(attr, node=check, exists=True):
+            cmds.connectAttr("{}.{}".format(place, attr), "{}.{}".format(check, attr), force=True)
+    cmds.setAttr(place + ".repeatUV", 8, 8, type="double2")
+    shader = cmds.shadingNode("lambert", asShader=True, name="mblChecker_mat_" + tag)
+    cmds.connectAttr(check + ".outColor", shader + ".color")
+    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=shader + "SG")
+    cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader")
+    cmds.sets(transform, edit=True, forceElement=sg)
+    return True
+
+
+def _drop_checker_nodes(transform):
+    tag = short_name(transform)
+    for name in ("mblChecker_mat_{}SG".format(tag), "mblChecker_mat_" + tag, "mblChecker_" + tag,
+                 "mblChecker_place_" + tag):
+        if cmds.objExists(name):
+            cmds.delete(name)

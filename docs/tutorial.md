@@ -127,6 +127,7 @@ Están en **Avanzado**, apartado *UVs* (la **Resolución textura** está a la vi
 | **Costuras de sastre** | Cortes rectos y lógicos, como un patrón de ropa | Torso cortado por la espalda, nada por delante |
 | **Islas rectas y de pie** | Ninguna isla torcida ni boca abajo | Que el «arriba» del modelo sea el arriba de la textura |
 | **Enderezar tubos** | Brazos, piernas, dedos y cables cortados a lo largo salen en abanico y las dos orillas del corte no casan. Esto las deja paralelas y de la misma longitud, sin estirar la isla | Vetas o rayones que cruzan el corte de un brazo o una pierna sin girar |
+| **Ver cuadrícula** (botón) | Pone a la malla seleccionada una textura de cuadros temporal para ver a ojo si las UVs estiran; otro clic la quita y devuelve el material de antes. No cambia las UVs | Comprobar el estiramiento antes de texturizar |
 | **Optimize** | Reduce la distorsión | Más alto = un poco mejor y más lento |
 | **Resolución textura** / **Padding** | Tamaño de textura y separación entre islas. Con el padding en 0 (automático) se usa 1/256 del lado: 8 px a 2048, 16 a 4096, 32 a 8192 | 4096 con el padding automático va bien para casi todo |
 | **Permitir rotar islas** | Deja tumbar islas 90° para aprovechar más | Desmarcado (recomendado): las vetas y rayones siguen la misma dirección a los dos lados de un corte |

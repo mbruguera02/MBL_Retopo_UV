@@ -375,6 +375,11 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_tailor_seams"])
         form.addRow(w["uv_straight_islands"])
         form.addRow(w["uv_straighten_strips"])
+        checker = QtWidgets.QPushButton("Ver cuadrícula")
+        checker.setToolTip("Pone a la malla seleccionada una textura de cuadros temporal para ver a ojo el estiramiento "
+                           "de las UVs. Un segundo clic la quita y devuelve el material de antes. No cambia las UVs.")
+        checker.clicked.connect(self._toggle_checker)
+        form.addRow(checker)
         form.addRow("Optimize", w["uv_optimize_iterations"])
         form.addRow("Padding (0 = automático)", w["uv_padding_px"])
         form.addRow(w["uv_allow_rotation"])
@@ -614,6 +619,21 @@ class RetopoUVWindow(QtWidgets.QDialog):
             QtWidgets.QApplication.restoreOverrideCursor()
 
     # ------------------------------------------------------------------ guías y detalle
+
+    def _toggle_checker(self):
+        """«Ver cuadrícula»: material de cuadros temporal en la malla seleccionada (otro clic lo quita)."""
+        meshes = selected_mesh_transforms()
+        if not meshes:
+            self.log("Selecciona la malla en la que ver la cuadrícula.", "warning")
+            return
+        from . import uv
+        for mesh in meshes:
+            try:
+                cmds.undoInfo(openChunk=True)
+                shown = uv.toggle_checker(mesh)
+            finally:
+                cmds.undoInfo(closeChunk=True)
+            self.log("{}: cuadrícula {}.".format(short_name(mesh), "puesta" if shown else "quitada (material anterior)"))
 
     def _source_mesh(self):
         """Malla original sobre la que se dibuja o pinta: la seleccionada, o su original si es un retopo."""

@@ -1663,6 +1663,32 @@ def test_duplicates_grouping_is_fast_with_many_copies():
     assert elapsed < 2.0, elapsed
 
 
+@test
+def test_uv_metrics_per_island():
+    """Dos islas de un plano (una bien, otra con parte de sus caras estiradas 3x): la segunda estira más, y la
+    distorsión por cara coincide con la de uv_quality."""
+    from mbl_engine import uv_metrics, uv_quality
+    points, faces, uv, uv_faces = [], [], [], []
+    for isl in range(2):
+        for j in range(4):
+            for i in range(4):
+                points.append((i + 10.0 * isl, j, 0.0))
+                uv.append((i * 0.1 + 2.0 * isl, j * 0.1))
+    for isl in range(2):
+        for j in range(3):
+            for i in range(3):
+                a = isl * 16 + j * 4 + i
+                faces.append([a, a + 1, a + 5, a + 4])
+                uv_faces.append([a, a + 1, a + 5, a + 4])
+    points, uv = np.array(points, dtype=float), np.array(uv, dtype=float)
+    uv[16 + 8:, 1] *= 3.0
+    rows = uv_metrics.island_stats(points, faces, uv, uv_faces)
+    assert len(rows) == 2 and rows[1]["mean"] > rows[0]["mean"] and rows[1]["over_percent"] > 0, rows
+    dist, _ = uv_metrics.face_stretch(points, faces, uv, uv_faces)
+    rep = uv_quality.report(points, faces, uv, uv_faces)
+    assert abs(100.0 * float((dist > 1.5).mean()) - rep["over_1_5_percent"]) < 1e-9
+
+
 if __name__ == "__main__":
     only = sys.argv[1:]
     for func in TESTS:

@@ -286,16 +286,17 @@ def straighten_island(points, faces, uv_points, uv_faces, face_ids, world=None, 
             stretch1 = _stretch(world, np.abs(signed))
             if stretch1[1] > stretch0[1] or stretch1[0] > stretch0[0] + STRETCH_TOLERANCE:
                 continue
+            if overlaps0 is None:
+                overlaps0 = int(uv_quality.overlapping_faces(uv0, lfaces).sum())
+            if int(uv_quality.overlapping_faces(new, lfaces).sum()) > overlaps0:
+                continue
             options.append((after, mu, new, stretch1[0]))
             break
-    # solapes: solo se comprueban las soluciones que se van a usar, de la que más casa a la que menos
-    for after, mu, new, stretch1 in sorted(options, key=lambda o: -o[0]):
-        if overlaps0 is None:
-            overlaps0 = int(uv_quality.overlapping_faces(uv0, lfaces).sum())
-        if int(uv_quality.overlapping_faces(new, lfaces).sum()) <= overlaps0:
-            return {"uv_ids": local, "uv": new, "mu": mu, "matched": (100.0 * before / total, 100.0 * after / total),
-                    "stretch": (stretch0[0], stretch1), "length": total}
-    return None
+    if not options:
+        return None
+    after, mu, new, stretch1 = max(options, key=lambda o: o[0])
+    return {"uv_ids": local, "uv": new, "mu": mu, "matched": (100.0 * before / total, 100.0 * after / total),
+            "stretch": (stretch0[0], stretch1), "length": total}
 
 
 # ------------------------------------------------------------------ toda la malla

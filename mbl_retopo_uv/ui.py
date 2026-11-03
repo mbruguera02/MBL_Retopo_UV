@@ -328,6 +328,10 @@ class RetopoUVWindow(QtWidgets.QDialog):
                                            "se enderezan para que las dos orillas del corte sean paralelas y el dibujo de "
                                            "la textura (vetas, rayones) siga la misma dirección al cruzar la costura. Solo "
                                            "se toca una isla si no estira más que antes.")
+        w["uv_fix_stretch"] = _check("Corregir islas estiradas",
+                                     "Mide el estiramiento de cada isla tras desplegar y, si una estira de más, prueba a "
+                                     "relajarla con Optimize más fuerte o a darle un corte extra. Solo se acepta si la isla "
+                                     "mejora, sin solapes ni caras en espejo.")
         w["uv_optimize_iterations"] = _spin(0, 100, 5, tip="Iteraciones de Optimize (reduce distorsión).")
         w["uv_map_size"] = QtWidgets.QComboBox()
         for size in config.MAP_SIZES:
@@ -375,6 +379,7 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_tailor_seams"])
         form.addRow(w["uv_straight_islands"])
         form.addRow(w["uv_straighten_strips"])
+        form.addRow(w["uv_fix_stretch"])
         checker = QtWidgets.QPushButton("Ver cuadrícula")
         checker.setToolTip("Pone a la malla seleccionada una textura de cuadros temporal para ver a ojo el estiramiento "
                            "de las UVs. Un segundo clic la quita y devuelve el material de antes. No cambia las UVs.")

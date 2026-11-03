@@ -521,6 +521,114 @@ def straighten_islands(transform, log=default_log):
     return len(done)
 
 
+def _mesh_arrays(transform):
+    """(puntos, caras, UV, caras de UV) de la malla como arrays, o None si no tiene UVs."""
+    fn = om.MFnMesh(dag_path(mesh_shape(transform)))
+    if fn.numUVs() == 0:
+        return None
+    points = np.array([(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)], dtype=float)
+    counts, vertices = fn.getVertices()
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    us, vs = fn.getUVs()
+    faces, uv_faces, start, uv_start = [], [], 0, 0
+    for count, uv_count in zip(counts, uv_counts):
+        faces.append(list(vertices[start:start + count]))
+        uv_faces.append(list(uv_ids[uv_start:uv_start + uv_count]))
+        start += count
+        uv_start += uv_count
+    return points, faces, np.column_stack([us, vs]), uv_faces
+
+
+# islas que se intentan corregir como máximo (las peores primero), y fuerza de la relajación
+FIX_MAX_ISLANDS = 8
+FIX_OPTIMIZE_ITERATIONS = 40
+FIX_OPTIMIZE_POWER = 4
+# un corte extra solo se acepta si la isla pierde al menos esta fracción de sus caras > 1,5x
+FIX_CUT_GAIN = 0.5
+
+
+def _island_state(arrays, face_ids, world):
+    """(estiramiento propio, hay espejos) de un grupo de caras."""
+    from mbl_engine import uv_metrics, uv_quality
+    points, faces, uv, uv_faces = arrays
+    sub = [uv_faces[f] for f in face_ids]
+    signed = uv_quality.uv_face_areas(uv, sub)[0]
+    return uv_metrics.own_stretch(world[face_ids], np.abs(signed)), bool((signed <= 0).any())
+
+
+def fix_stretched_islands(transform, settings, log=default_log):
+    """Mide el estiramiento de cada isla y corrige las malas (más del 10 % de caras > 1,5x o estiramiento medio > 1,3).
+
+    Por isla, sobre una copia y como mucho dos intentos: (1) Optimize con más iteraciones y más potencia solo en esa isla;
+    (2) si no basta, un corte extra desde la zona más estirada hasta la costura más cercana y se vuelve a desplegar. Se
+    acepta un intento solo si la isla pierde caras estiradas sin subir su estiramiento medio, sin caras en espejo y sin
+    solapes dentro de la isla. Devuelve cuántas islas mejoraron."""
+    from mbl_engine import uv_metrics, uv_quality
+    arrays = _mesh_arrays(transform)
+    if arrays is None:
+        return 0
+    points, faces, uv, uv_faces = arrays
+    bad = [s for s in uv_metrics.island_stats(points, faces, uv, uv_faces) if s["bad"] and s["faces"] >= 4]
+    if not bad:
+        return 0
+    bad.sort(key=lambda s: -s["over_percent"] * s["faces"])
+    island, _ = uv_quality.islands(uv_faces)
+    world = uv_quality.face_areas(points, faces)
+    members = [np.flatnonzero(island == s["island"]) for s in bad[:FIX_MAX_ISLANDS]]
+    map_size = int(settings["uv_map_size"])
+    pad = config.padding_px(settings)
+    edge_of = {}
+    it = om.MItMeshEdge(dag_path(mesh_shape(transform)))
+    while not it.isDone():
+        a, b = it.vertexId(0), it.vertexId(1)
+        edge_of[(min(a, b), max(a, b))] = it.index()
+        it.next()
+
+    def optimize(mesh, face_ids, iterations, power):
+        cmds.u3dOptimize(components(mesh, "f", [int(f) for f in face_ids]), iterations=iterations, power=power,
+                         surfangle=1.0, borderintersection=1, triangleflip=1, mapsize=map_size, roomspace=pad)
+
+    done = 0
+    for face_ids in members:
+        before, _ = _island_state(arrays, face_ids, world)
+        for attempt in (1, 2):
+            copy = cmds.ls(cmds.duplicate(transform, name="mblStretchTry")[0], long=True)[0]
+            try:
+                if attempt == 1:
+                    optimize(copy, face_ids, FIX_OPTIMIZE_ITERATIONS, FIX_OPTIMIZE_POWER)
+                    gain = 0.0
+                else:
+                    worst = int(face_ids[np.argmax(uv_metrics.face_stretch(points, faces, uv, uv_faces)[0][face_ids])])
+                    path = uv_metrics.cut_path(points, faces, face_ids, worst)
+                    if not path:
+                        break
+                    cmds.polyMapCut(components(copy, "e", sorted({edge_of[(min(a, b), max(a, b))] for a, b in path})),
+                                    constructionHistory=True)
+                    cmds.u3dUnfold(components(copy, "f", [int(f) for f in face_ids]), iterations=1, pack=0,
+                                   borderintersection=1, triangleflip=1, mapsize=map_size, roomspace=pad)
+                    optimize(copy, face_ids, int(settings["uv_optimize_iterations"]) or 5, 1)
+                    fix_flipped_shells(copy)
+                    gain = FIX_CUT_GAIN
+                trial = _mesh_arrays(copy)
+                own, flipped = _island_state(trial, face_ids, world)
+                if flipped or not uv_metrics.improved(before, own, gain):
+                    continue
+                if int(uv_quality.overlapping_faces(trial[2], [trial[3][f] for f in face_ids]).sum()):
+                    continue
+                cmds.polyTransfer(transform, uvSets=True, vertices=False, vertexColor=False, alternateObject=copy)
+                arrays = _mesh_arrays(transform)
+                points, faces, uv, uv_faces = arrays
+                done += 1
+                log("{}: isla de {} caras: {} -> {} caras > 1.5x, estiramiento {:.3f} -> {:.3f}{}.".format(
+                    short_name(transform), len(face_ids), before[1], own[1], before[0], own[0],
+                    " (con un corte extra)" if attempt == 2 else ""))
+                break
+            finally:
+                if cmds.objExists(copy):
+                    cmds.delete(copy)
+    return done
+
+
 def layout_0_1(transform, settings):
     cmds.u3dLayout(transform, preScaleMode=1, packBox=(0.0, 1.0, 0.0, 1.0), **_layout_kwargs(settings))
 
@@ -994,6 +1102,11 @@ def _unwrap(transform, settings, log, tick):
         known_overlaps = _tailor_seams(transform, unfold_and_split, known_overlaps, log, symmetric, hidden,
                                        seam_graph())
 
+    fixed_stretch = 0
+    if settings.get("uv_fix_stretch", True):
+        fixed_stretch = fix_stretched_islands(transform, settings, log)
+        if fixed_stretch:
+            known_overlaps = None
     straightened = 0
     if settings.get("uv_straighten_strips", True):
         straightened = straighten_islands(transform, log)
@@ -1012,7 +1125,7 @@ def _unwrap(transform, settings, log, tick):
         known_overlaps = None
         if tick:
             tick()
-    elif straightened:
+    elif straightened or fixed_stretch:
         # sin empaquetado final: lo enderezado puede pisar a las islas vecinas
         layout_0_1(transform, settings)
 

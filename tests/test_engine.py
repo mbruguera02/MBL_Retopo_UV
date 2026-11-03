@@ -1689,6 +1689,29 @@ def test_uv_metrics_per_island():
     assert abs(100.0 * float((dist > 1.5).mean()) - rep["over_1_5_percent"]) < 1e-9
 
 
+@test
+def test_uv_metrics_cut_path_and_acceptance():
+    """El corte extra va de la cara estirada a la orilla más cercana, y una corrección solo se acepta si la isla pierde
+    caras estiradas sin subir la media."""
+    from mbl_engine import uv_metrics
+    points, faces = [], []
+    for j in range(5):
+        for i in range(5):
+            points.append((i, j, 0.0))
+    for j in range(4):
+        for i in range(4):
+            a = j * 5 + i
+            faces.append([a, a + 1, a + 6, a + 5])
+    start = 1 * 4 + 1                      # una cara cerca de la esquina: la orilla más cercana está a una arista
+    path = uv_metrics.cut_path(np.array(points, dtype=float), faces, range(16), start)
+    assert len(path) == 1, path
+    assert uv_metrics.cut_path(np.array(points, dtype=float), faces, [0], 0) == []      # una cara sola: todo es orilla
+    assert uv_metrics.improved((1.20, 10), (1.19, 4))
+    assert not uv_metrics.improved((1.20, 10), (1.19, 10))
+    assert not uv_metrics.improved((1.20, 10), (1.25, 2))
+    assert not uv_metrics.improved((1.20, 10), (1.20, 7), gain=0.5)
+
+
 if __name__ == "__main__":
     only = sys.argv[1:]
     for func in TESTS:

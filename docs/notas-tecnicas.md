@@ -799,3 +799,48 @@ Lo que hizo falta en `uv_seams.py` es el concepto de **costura fija** (`SeamGrap
 Ninguna isla mezcla dos materiales, y con `uv_material_seams = False` los bordes dejan de ser costura (esfera de 3 bandas y de octantes: menos del 95 %).
 
 **Lo que no hace.** Con `uv_respect_existing` y una malla que ya trae costuras se respetan las que tiene y no se añaden las de material (son las del artista). Con las costuras simétricas y materiales repartidos sin simetría, el reflejo de un borde de material también se corta aunque en ese lado no haya cambio de material (sale una costura de más, nunca una de menos). Las caras sin material asignado cuentan como un material más. Si el reparto de materiales es muy fragmentado (por ejemplo un material distinto por cara) habrá una isla por trozo; la opción `uv_material_seams` (sin casilla en la interfaz) lo apaga.
+
+## Enderezar tubos: casar las dos orillas de los cortes de una isla (3 de noviembre, tarea U3 = B1)
+
+**Qué.** Después de desplegar y de colocar las costuras, cada isla que tiene un corte contra sí misma (el tajo a lo largo de un brazo, una pierna, un dedo, un cable, una cola) se deforma lo mínimo para que las dos copias de cada arista cortada sean la misma arista en UV: misma dirección y misma longitud. Así la costura es una traslación y una textura con vetas o rayones sigue el mismo rumbo al cruzarla. Núcleo sin Maya en `mbl_engine/uv_straighten.py` (`straighten_island`, `straighten`); `uv.straighten_islands` lo llama entre `_tailor_seams` y `orient_upright`, y solo reescribe las islas aceptadas. Ajuste `uv_straighten_strips` (activado por defecto, casilla «Enderezar tubos» en Avanzado > UVs; ajuste nuevo, no hace falta subir `SETTINGS_VERSION`).
+
+**Cómo.** Por isla: (1) pares de aristas 3D con dos caras en la isla y UV distintas; solo se fuerzan los que giran poco entre sí (límites de 25°, 40°, 60° y 90°) y los que no acaban en un vértice de la isla (la punta de un corte). (2) ARAP local-global (rígido lo más posible) sobre las UV de Unfold3D, con un tirón suave de cada cara hacia el área que le toca por su tamaño 3D (`AREA_PULL` 0,3) y las dos copias de cada arista cortada pesando `mu`; se prueba una escalera de `mu` (30, 10, 3, 1, 0,3) para cada límite de giro. El paso global es denso: se invierte una sola vez el Laplaciano de la isla y cada `mu` se resuelve con Woodbury sobre una matriz k × k (k = pares). (3) Se acepta una solución solo si la isla no estira más que antes (media y caras > 1,5x, con la densidad propia de la isla como referencia, que es lo que deja el empaquetado; tolerancia 0,005 en la media), sin caras en espejo, sin solapes nuevos y casando más longitud de corte; entre las que valen, la que más casa. Islas con n-gons, con más de 1.600 vértices UV o sin cortes propios se dejan (None).
+
+**Por qué no una rejilla recta de filas y columnas.** Es lo que pedía la tarea y se miró primero: en los retopos del banco casi ninguna isla es una rejilla de quads pura (cuadrilátero sin polos dentro): humano 0 de 28 islas; hardsurface 1 (40 caras); midnight 12 (32 caras en total); criatura 9 (22 caras); prop 4 (2.605 caras, pero ya salían rectas y casaban el 98-100 % de su corte propio). Los brazos y las piernas llevan polos, manos y dedos. Enderezar solo rejillas no movía la continuidad. El ARAP con costura de traslación hace lo mismo (filas rectas, orillas paralelas) sin pedir esa estructura.
+
+**Enfoques probados** (continuidad `racord_rot_lt_15`, puntos ganados sobre la línea base; los 4 primeros sobre las UV previas al empaquetado, con el mismo código que se entrega; el giro no cambia al empaquetar porque las islas no giran):
+
+| enfoque | humano | prop | midnight | criatura |
+|---|---|---|---|---|
+| 1. rejillas puras (la tarea tal cual) | 0 | 0 | 0 | 0 |
+| 2. ARAP con costura de traslación, sin tirón de áreas, estiramiento sin subir | +2,3 | +3,9 | +5,2 | +2,2 |
+| 3. + tirón hacia el área ideal (0,5) y escalera de `mu` | +12,6 | +6,3 | +9,2 | +2,6 |
+| 4. + límites de giro escalonados (25-40-60-90) y tirón 0,3 (el entregado) | +10,6 | +6,7 | +11,1 | +5,6 |
+| referencia: pares de menos de 45° con `mu` ≥ 10, sin tirón de áreas y sin aceptar por estiramiento | +14,0 | +6,1 | +7,5 | +6,3 |
+
+Sin el tirón hacia el área (2) casi nada pasa la regla de no estirar, porque Unfold3D ya deja las islas cerca de su mínimo de distorsión y cualquier deformación sube la media; con él las islas gastan un poco del margen que dejó Unfold3D (la media baja, en vez de subir) y entran las deformaciones grandes. Otra prueba descartada: tolerancia de estiramiento 0,02 en vez del tirón (humano +11,6 y midnight +8,1, pero la media de estiramiento sube).
+
+**Cifras del banco** (`python tests\bench.py --models <bench_models.json> --engines maya --out ... --compare tests\baseline.json`, commit `e4de94b`; los dos motores no se midieron, solo `maya`):
+
+| modelo | continuidad (giro < 15°) | textura aprovechada | caras > 1,5x | estiramiento medio | escala dentro del 10 % | islas |
+|---|---|---|---|---|---|---|
+| humano | 27,46 → 38,11 (+10,7) | 60,31 → 60,97 | 3,51 → 3,06 | 1,077 → 1,072 | 56,8 → 60,7 | 28 → 28 |
+| prop | 15,73 → 22,72 (+7,0) | 60,28 → 61,36 | 1,23 → 0,79 | 1,069 → 1,065 | 63,3 → 61,7 | 21 → 21 |
+| hardsurface | 2,91 → 2,91 | 56,03 → 56,03 | 9,73 → 9,73 | 1,141 → 1,141 | 54,1 → 54,1 | 6 → 6 |
+| criatura | 23,11 → 29,74 (+6,6) | 64,59 → 66,20 | 7,41 → 6,45 | 1,120 → 1,113 | 48,3 → 53,0 | 68 → 68 |
+| midnight | 15,53 → 27,25 (+11,7) | 56,07 → 57,35 | 6,52 → 5,60 | 1,140 → 1,123 | 47,6 → 52,6 | 43 → 43 |
+
+Ninguna de las cinco mallas queda con solapes ni caras en espejo (medido con `uv_quality.report` sobre los mismos retopos). El resto de cifras del banco (retopo, calidad, error) no cambian: solo se toca el paso de UVs.
+
+**Qué no se arregla.**
+- **Los cortes entre dos islas distintas.** En el humano, el 41 % de la longitud de corte es de una isla contra sí misma y el 59 % entre islas distintas (855 de 1.459; casa el 37 %): ahí no hay deformación de una sola isla que valga, y girar islas (lo que arreglaría parte) está descartado por «Islas rectas y de pie». Sigue pendiente.
+- **Geometría.** Un tubo cónico desplegado es un abanico; ponerlo recto exige cambiar el ancho de las filas, o sea estirar. La regla de no estirar deja pasar lo que cabe en el margen de Unfold3D y rechaza el resto (en el humano se enderezan 16 de 28 islas, 3.864 de 5.095 caras). Los pares que giran más de 90° (pliegues, esquinas de corte en T) no se tocan.
+- **Hardsurface:** sin cambios. Sus dos islas grandes tienen 3.157 y 1.021 caras (más de 1.600 vértices UV, tope del sistema denso) y la otra con corte propio es de 40 caras.
+
+**Dos cosas que costaron tiempo.**
+- **Hilos de BLAS.** Con los hilos por defecto de OpenBLAS (16) y el equipo ocupado, `np.linalg.inv` de 200 × 200 tardaba 0,16 s y la de 800 × 800 0,5-0,7 s; con un hilo, 1 ms y 0,09 s. `straighten` fija un hilo mientras trabaja y lo restaura (`ctypes` sobre el DLL de numpy; si no lo encuentra, no toca nada). El núcleo tarda 0,75-1,2 s por malla en las cinco del banco (humano ~0,8 s, criatura ~1,2 s), alrededor del 10 % del paso de UVs; los tiempos del banco bailan mucho con la carga (humano 32,8 s en la línea base frente a 10,0 s ahora con el mismo código de UVs).
+- **La textura aprovechada es sensible a cualquier cambio.** El empaquetado de Unfold3D mueve ±2 puntos con cambios mínimos en las islas: con el humano y un solo límite de giro (50°), `AREA_PULL` 0,3 / 0,5 / 0,7 / 1,0 dio 61,3 / 57,4 / 57,3 / 59,1 % (línea base 60,31) y continuidad 38,8 / 40,4 / 40,4 / 39,5; con los límites escalonados, 0,2 y 0,3 dieron 59,9 y 61,0 % (38,0 y 38,2). Se eligió 0,3, que además deja los otros tres modelos por encima de la línea base, pero conviene saber que la cifra de un solo modelo no es una garantía: una versión que solo comprobaba los solapes de la solución final (misma idea, 83 llamadas menos a `overlapping_faces`) dio humano 38,44 y 58,70 % (−1,6), y se deshizo por eso.
+
+**Pruebas.** `tests/test_engine.py`: `test_straighten_tube_cut_lengthwise` (tubo en abanico: casa del 0 al 100 %, sin estirar más ni solapes), `test_straighten_ring_of_quads` (anillo de una fila), `test_straighten_leaves_islands_that_are_not_tubes` (rejilla plana, tubo ya casado, n-gon y isla demasiado grande: None), `test_straighten_never_raises_the_stretch` (cinco tubos, entre ellos conos muy cónicos) y `test_straighten_only_touches_the_islands_that_improve`. `tests/run_tests.py`: `test_uv_straighten_tubes` (tubo curvado y cónico en una sola isla: de 17 % a 92 % de corte casado, estiramiento igual, sin solapes ni espejos y sin el aviso cuando la opción está apagada).
+
+**Lo que no se ha comprobado.** Mallas grandes, hasta las 150.000 caras que admite el plugin (el sistema denso crece con el cuadrado de los vértices de la isla; el tope de 1.600 acota la memoria a unas decenas de MB por isla pero no el tiempo de una malla con muchas islas grandes); modo UDIM con 8K; mallas con varios conjuntos de UV; la casilla en la ventana de Maya con la interfaz abierta (solo `test_ui_builds`, que la construye sin pantalla).

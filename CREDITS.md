@@ -19,6 +19,7 @@ Proyectos que hemos estudiado o probado y que **no** forman parte del plugin: no
 | Proyecto | Autores | Licencia | Qué queda |
 |---|---|---|---|
 | [QuadWild-BiMDF](https://github.com/cgg-bern/quadwild-bimdf) | QuadWild: Nico Pietroni, Stefano Nuvoli, Thomas Alderighi, Paolo Cignoni y Marco Tarini (SIGGRAPH 2021). BiMDF: Martin Heistermann, Jethro Warnett y David Bommes (SIGGRAPH 2023) | GPL-3 | Lo probamos como programa externo y lo descartamos (cifras en «Motores descartados» de `docs/notas-tecnicas.md`). El plugin ya no lleva sus binarios ni los ejecuta; sus artículos quedan como referencia de investigación. |
+| Parveen (ArtStation, `parveencad4`) | Parveen | De pago y cerrado | Solo inspiración: hacer una vez el retopo y las UVs de las piezas repetidas y copiar el resultado a las demás. No se usa ni se copia nada suyo (es cerrado). |
 
 ## Bibliotecas usadas al compilar
 

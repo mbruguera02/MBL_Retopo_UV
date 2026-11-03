@@ -1683,6 +1683,34 @@ def test_uv_padding_follows_resolution():
         assert pixels / 8.0 >= 1.0, "{}: a 1/8 de la resolución el margen es {:.2f} px".format(size, pixels / 8)
 
 
+@test
+def test_uv_udim_margin_follows_padding():
+    """Con UDIM el margen entre islas, medido en píxeles de la textura final, también sigue al padding automático
+    (8 y 16 px a 2048 y 4096, con 1 px de tolerancia)."""
+    from mbl_engine import uv_quality
+    for size in (2048, 4096):
+        pieces = [cmds.polySphere(radius=1.2, subdivisionsX=12, subdivisionsY=8, constructionHistory=False)[0],
+                  cmds.polyCube(width=2, height=3, depth=1, constructionHistory=False)[0],
+                  cmds.polyCylinder(radius=0.8, height=3, subdivisionsX=12, constructionHistory=False)[0]]
+        for k in range(30):
+            pieces.append(cmds.polySphere(radius=0.4 + 0.05 * k, subdivisionsX=10, subdivisionsY=6,
+                                          constructionHistory=False)[0])
+        for i, piece in enumerate(pieces):
+            cmds.move(i * 4.0, 0, 0, piece)
+        mesh = cmds.ls(cmds.polyUnite(pieces, constructionHistory=False, name="udimpad{}".format(size))[0],
+                       long=True)[0]
+        settings = base_settings(uv_map_size=size, uv_padding_px=0, uv_udim=True, uv_udim_tiles=2)
+        pad = config.padding_px(settings)
+        report = uv.unwrap(mesh, settings, quiet_log)
+        assert report["overlapping_faces"] == 0, (size, report)
+        margin = uv_quality.island_margin(*uv_arrays(mesh)[2:])
+        assert margin is not None
+        pixels = margin * size
+        print("    UDIM {} px: {} islas, padding {} px, margen mínimo {:.2f} px".format(
+            size, report["shells"], pad, pixels))
+        assert pixels >= pad - 1.0, "UDIM {}: margen {:.2f} px, se pedían {} px".format(size, pixels, pad)
+
+
 def make_material_sphere(name, octants=False):
     """Esfera con tres materiales en bandas horizontales o, con `octants`, con ocho materiales (uno por octante)."""
     mesh = cmds.ls(cmds.polySphere(name=name, radius=2, subdivisionsX=24, subdivisionsY=18,

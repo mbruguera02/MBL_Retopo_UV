@@ -890,3 +890,12 @@ Ninguna de las cinco mallas queda con solapes ni caras en espejo (medido con `uv
 ### Corrección de islas estiradas (U6): medida, no cumple, apagada por defecto
 
 Banco con `maya` (>1,5× / textura aprovechada, antes → con la corrección): humano 3,06 → 3,00 / 60,97 → 58,10; prop 0,79 → 0,38 / 61,36 → 60,90; hardsurface 9,73 → 9,54 / 56,03 → 52,19; criatura 6,45 → 5,75 / 66,20 → 61,99; midnight 5,60 → 5,40 / 57,35 → 58,16. El paso de UVs del humano pasa de ~10 s a 34 s. Criterio (−30 % de caras estiradas, ≤ 2 puntos de textura, ≤ +25 % de tiempo): no se cumple, así que `uv_fix_stretch` queda en `False`. Sigue disponible con la casilla «Corregir islas estiradas». Ideas sin probar en la nota de U6.
+
+## U7: margen en UDIM y exceso de islas (parcial)
+
+- Margen en UDIM: con mallas pequeñas (hasta 65 islas, 2 tiles, 2048 y 4096 px) el margen ya salía bien (8,9 y 17,9 px); no
+  se reprodujo el 0,5 px del registro real. Red de seguridad en `_layout_udim`: tras empaquetar mide `island_margin` y, si
+  queda por debajo de padding - 1 px, reempaqueta (hasta 2 veces) con `resolution` x2 y `shellSpacing` x1,5. Prueba:
+  `test_uv_udim_margin_follows_padding`. Sin verificar con el retopo denso real.
+- Tope a la fragmentación (islas 106-122 por separar solapes): NO hecho. Idea pendiente: tras `unfold_and_split`, si las
+  islas > 2x las de Unfold3D o una nueva < 0,3 % del área, recoser a la vecina más parecida si no genera solape.

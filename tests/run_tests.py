@@ -2390,6 +2390,36 @@ def test_optional_fbx():
         assert_good_uvs(mesh)
 
 
+@test
+def test_uv_checker_toggle_and_undo():
+    """«Ver cuadrícula»: pone un material de cuadros sin tocar las UVs, un segundo toggle devuelve el material de antes
+    (también con dos materiales por caras) y Ctrl+Z deshace la puesta."""
+    cmds.file(new=True, force=True)
+    mesh = cmds.polyCube(name="checkerCube")[0]
+    lam = cmds.shadingNode("lambert", asShader=True, name="oldMat")
+    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name="oldMatSG")
+    cmds.connectAttr(lam + ".outColor", sg + ".surfaceShader")
+    cmds.sets(mesh + ".f[0:2]", edit=True, forceElement=sg)
+    uvs_before = cmds.polyEvaluate(mesh, uv=True)
+    shape = cmds.listRelatives(mesh, shapes=True, fullPath=True)[0]
+    engines = lambda: set(cmds.listConnections(shape, type="shadingEngine") or [])
+    before = engines()
+    assert uv.toggle_checker(mesh) is True
+    assert engines() == {"checkerCubeSG"} or any("mblChecker" in e for e in engines()), engines()
+    assert cmds.ls(type="checker")
+    assert uv.toggle_checker(mesh) is False
+    assert engines() == before, (engines(), before)
+    assert "oldMatSG" in engines() and not cmds.ls(type="checker")
+    assert len(cmds.ls(cmds.sets("oldMatSG", query=True), flatten=True)) == 3
+    cmds.undoInfo(state=True)
+    cmds.undoInfo(openChunk=True)
+    uv.toggle_checker(mesh)
+    cmds.undoInfo(closeChunk=True)
+    cmds.undo()
+    assert not any("mblChecker" in e for e in engines()), engines()
+    assert cmds.polyEvaluate(mesh, uv=True) == uvs_before
+
+
 if __name__ == "__main__":
     # mayapy tests/run_tests.py [parte_del_nombre ...]: solo las pruebas cuyo nombre contenga alguna
     only = sys.argv[1:]

@@ -3,6 +3,15 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.3 (4 de noviembre de 2026)
+
+- **Crash con mallas densas:** Unfold3D rompía Maya al pedirle que partiera islas (comprobado con 60.000 caras). El plugin ya no se lo pide.
+- **Divisor de islas propio:** la malla se parte en zonas casi planas y luego solo se vuelven a partir las islas que siguen estirando. Medido a 20.000 caras: caras estiradas más de 1,5x de 8-9 % a 3-4 % en humano y midnight, la mitad de islas y sin cortes en zigzag. Aprovecha algo menos la textura en 0-1 (46-52 % frente a 60-62 %).
+- **UDIM:** las islas se reparten según lo que ocupan de verdad y se parten las que frenan la densidad: 48-54 % de cada tile con 3 tiles, frente al 32-37 %.
+- **Error E62044 de Unfold3D:** ya no aborta la pasada; y unas pocas caras solapadas en UDIM avisan en vez de hacerla fallar.
+- **«Ver cuadrícula»** usa una textura de casillas numeradas (ver `CREDITS.md`).
+- Publicada sin terminar la verificación completa: faltaban las suites y el banco de 5 modelos a 5.000 caras con el divisor nuevo.
+
 ## 1.0.2 (3 de noviembre de 2026)
 
 - **UDIM:** si tras empaquetar el margen entre islas queda por debajo del padding, se reempaqueta con más separación (hasta 2 veces).

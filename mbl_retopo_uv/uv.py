@@ -13,6 +13,7 @@ Flags comprobados en Maya 2026.3.2 con cmds.help() y con los scripts que usa el 
 """
 
 import math
+import os
 
 import maya.api.OpenMaya as om
 import maya.cmds as cmds
@@ -24,9 +25,19 @@ from . import config
 from .common import UVError, components, dag_path, default_log, flat_indices, mesh_shape, short_name
 
 UDIM_COLUMNS = 10
-# fracción de cada tile (por área de la caja de las islas) que se llena antes de pasar al siguiente.
-# 0.75: águila en 4 UDIMs 187 -> 214-226 px/unidad (0.5 dejaba medio tile vacío); 0.95 ya no cabe
-UDIM_FILL = 0.75
+# fracción de cada tile (por área real de las islas con su padding) que se espera llenar al calcular cuántos hacen falta:
+# el empaquetador llega al 60-66 % con islas ya desplegadas
+UDIM_FILL = 0.62
+# si los tiles pedidos no dan para una densidad, se reintenta con esta fracción
+UDIM_DENSITY_STEP = 0.97
+UDIM_DENSITY_STEPS = 8
+# rondas de pasar islas entre tiles para igualarlos, y diferencia de crecimiento con la que ya no merece la pena
+UDIM_BALANCE_ROUNDS = 6
+UDIM_BALANCE_GAIN = 1.05
+# una isla frena el reparto si, a la densidad que llenaría los tiles, ocuparía más de esta fracción del lado de un tile.
+# 0,5: midnight y humano en 3 tiles pasan del 35-41 % al 48-52 % de textura aprovechada, y con menos estiramiento
+UDIM_SPLIT_SIZE = 0.5
+UDIM_SPLIT_ROUNDS = 6
 
 
 def ensure_unfold3d():
@@ -167,48 +178,43 @@ def fix_nonmanifold_uvs(transform):
     return found
 
 
-def auto_seams(transform, split_shells, cut_pipes):
+def _auto_seam_selection(split_shells, cut_pipes, log=None, name=""):
+    """u3dAutoSeam sobre la selección. A veces falla por dentro con una malla sana (E62044 con un retopo de 21.000 caras)
+    según lo que se le pida partir, y sin tocar nada: se reintenta pidiendo menos; lo que quede sin abrir lo cortan luego
+    fix_charts y el despliegue. Devuelve False si no pudo con ninguna combinación."""
+    wanted = (float(split_shells), bool(cut_pipes))
+    tries = [wanted] + [t for t in ((wanted[0], False), (0.0, wanted[1]), (0.0, False)) if t != wanted]
+    for index, (split, pipes) in enumerate(tries):
+        try:
+            cmds.u3dAutoSeam(splitShells=split, cutPipes=pipes)
+        except RuntimeError as exc:
+            # una malla que Unfold3D rechaza de verdad no se arregla pidiéndole menos: que lo diga
+            if "non-manifold" in str(exc):
+                raise
+            if index == len(tries) - 1:
+                if log:
+                    log("{}: Unfold3D no pudo añadir costuras automáticas ({}).".format(
+                        name, str(exc).splitlines()[0].strip()), "warning")
+                return False
+            continue
+        if index and log:
+            log("{}: Unfold3D falló con los ajustes pedidos; costuras automáticas con división {:g} y cortar tubos {}."
+                .format(name, split, "sí" if pipes else "no"), "warning")
+        return True
+    return False
+
+
+def auto_seams(transform, split_shells, cut_pipes, log=None):
     previous = cmds.ls(selection=True, long=True) or []
     try:
         # u3dAutoSeam no hace nada si se le pasa el nombre: trabaja sobre la selección
         cmds.select(transform, replace=True)
-        cmds.u3dAutoSeam(splitShells=float(split_shells), cutPipes=bool(cut_pipes))
+        return _auto_seam_selection(split_shells, cut_pipes, log, short_name(transform))
     finally:
         if previous:
             cmds.select(previous, replace=True)
         else:
             cmds.select(clear=True)
-
-
-def split_big_shells(transform, max_fraction):
-    """Vuelve a pasar u3dAutoSeam (al máximo) solo sobre las islas con más de `max_fraction` del área 3D.
-
-    Las islas enormes empaquetan mal: con el águila de prueba, tres islas con el 90% del área dejaban
-    la textura aprovechada en el 42%; partidas, 68% y además con menos estiramiento.
-    Devuelve cuántas islas se partieron."""
-    area = {}
-    it = om.MItMeshPolygon(dag_path(mesh_shape(transform)))
-    while not it.isDone():
-        area[it.index()] = it.getArea(om.MSpace.kWorld)
-        it.next()
-    total = sum(area.values()) or 1.0
-    by_shell = {}
-    for face, shell, _ in _face_shell_areas(transform):
-        by_shell.setdefault(shell, []).append(face)
-    big = [faces for faces in by_shell.values() if sum(area[f] for f in faces) > max_fraction * total]
-    if not big:
-        return 0
-    previous = cmds.ls(selection=True, long=True) or []
-    try:
-        # u3dAutoSeam trabaja sobre la selección: con caras seleccionadas solo corta esas
-        cmds.select(components(transform, "f", [f for faces in big for f in faces]), replace=True)
-        cmds.u3dAutoSeam(splitShells=1.0, cutPipes=True)
-    finally:
-        if previous:
-            cmds.select(previous, replace=True)
-        else:
-            cmds.select(clear=True)
-    return len(big)
 
 
 def texel_density(transform, map_size):
@@ -700,6 +706,91 @@ def _best_layout(transform, settings):
     return 100.0 * best_area
 
 
+def _shell_footprints(transform, pad):
+    """{isla: lo que ocupa en la textura}: su área UV más el anillo de padding (aprox. caja: pad x (ancho + alto))."""
+    sizes = {shell: pad * (b[1] - b[0] + b[3] - b[2]) for shell, b in enumerate(shell_bounds(transform))}
+    for shell, area in _areas_by_shell(transform).items():
+        sizes[shell] += abs(area)
+    return sizes
+
+
+def _areas_by_shell(transform):
+    """{isla: suma del área UV con signo de sus caras}."""
+    areas = {}
+    for _, shell, area in _face_shell_areas(transform):
+        areas[shell] = areas.get(shell, 0.0) + area
+    return areas
+
+
+def _balanced_groups(sizes, count):
+    """Reparte las islas en `count` grupos de tamaño parecido: de mayor a menor, cada una al grupo que menos lleva."""
+    groups = [{"shells": [], "used": 0.0} for _ in range(count)]
+    for shell in sorted(sizes, key=sizes.get, reverse=True):
+        group = min(groups, key=lambda g: g["used"])
+        group["shells"].append(shell)
+        group["used"] += sizes[shell]
+    return [group["shells"] for group in groups if group["shells"]]
+
+
+def _shell_elements(transform):
+    """({isla: UVs}, {isla: caras})."""
+    _, shell_ids = _mesh_fn(transform).getUvShellsIds()
+    uvs_by_shell, faces_by_shell = {}, {}
+    for uv_index, shell in enumerate(shell_ids):
+        uvs_by_shell.setdefault(shell, []).append(uv_index)
+    for face, shell, _ in _face_shell_areas(transform):
+        faces_by_shell.setdefault(shell, []).append(face)
+    return uvs_by_shell, faces_by_shell
+
+
+def _tile_box(tile):
+    tile_u, tile_v = tile % UDIM_COLUMNS, tile // UDIM_COLUMNS
+    return float(tile_u), tile_u + 1.0, float(tile_v), tile_v + 1.0
+
+
+def _fitting_density(transform, settings, count):
+    """Densidad de texel más alta con la que caben las islas en `count` tiles, y el reparto que la da: empieza con grupos
+    de área parecida, deja que el empaquetador escale cada grupo hasta llenar su tile (layoutScaleMode=2; menos de un
+    segundo con 20.000 caras) y pasa islas pequeñas del grupo que menos crece al que más: una isla muy abierta llena su
+    tile mucho antes de lo que dice su área. Estropea la colocación: quien llama vuelve a empaquetar."""
+    map_size = settings["uv_map_size"]
+    pad = float(config.padding_px(settings)) / map_size
+    layout_0_1(transform, settings)
+    current = texel_density(transform, map_size)
+    sizes = _shell_footprints(transform, pad)
+    groups = _balanced_groups(sizes, count)
+    _, faces_by_shell = _shell_elements(transform)
+    kwargs = _layout_kwargs(settings)
+    before = _areas_by_shell(transform)
+    best, best_growth = groups, 0.0
+    for _ in range(UDIM_BALANCE_ROUNDS):
+        for tile, shells in enumerate(groups):
+            faces = [face for shell in shells for face in faces_by_shell.get(shell, [])]
+            cmds.u3dLayout(components(transform, "f", faces), preScaleMode=0, layoutScaleMode=2, packBox=_tile_box(tile),
+                           **kwargs)
+        after = _areas_by_shell(transform)
+        growths = [math.sqrt(sum(abs(after[s]) for s in shells) / max(sum(abs(before[s]) for s in shells), 1e-12))
+                   for shells in groups]
+        if min(growths) > best_growth:
+            best, best_growth = [list(shells) for shells in groups], min(growths)
+        low, high = growths.index(min(growths)), growths.index(max(growths))
+        if len(groups) < 2 or growths[high] < growths[low] * UDIM_BALANCE_GAIN:
+            break
+        # sale del grupo que frena lo que le sobra para igualar, de las islas pequeñas (la mayor se queda)
+        mean = sum(growths) / len(growths)
+        excess = sum(sizes[s] for s in groups[low]) * (1.0 - (growths[low] / mean) ** 2)
+        moved = 0.0
+        for shell in sorted(groups[low], key=sizes.get)[:-1]:
+            if moved + sizes[shell] > excess:
+                break
+            moved += sizes[shell]
+            groups[low].remove(shell)
+            groups[high].append(shell)
+        if not moved:
+            break
+    return current * best_growth, best
+
+
 def layout_udim(transform, settings, log=default_log):
     """Reparte las islas en UDIMs. Con uv_udim_tiles > 0 se busca la densidad que llena ese nº de
     tiles; si no, se usa la densidad de texel indicada. Devuelve el nº de tiles usados."""
@@ -708,19 +799,8 @@ def layout_udim(transform, settings, log=default_log):
         return _layout_udim(transform, settings, float(settings["uv_texel_density"]), log)
     name = short_name(transform)
     map_size = settings["uv_map_size"]
-    layout_0_1(transform, settings)
-    pad = float(config.padding_px(settings)) / map_size
-    # área de las cajas de las islas (lo que cuenta al repartir en tiles) a la escala actual
-    boxes = sum((b[1] - b[0] + pad) * (b[3] - b[2] + pad) for b in shell_bounds(transform))
-    current = texel_density(transform, map_size)
-    fill = float(settings.get("uv_udim_fill", UDIM_FILL))
-    target = current * math.sqrt(tiles_wanted * fill / max(boxes, 1e-9))
-    quiet = lambda message, level="info": None
-    for _ in range(6):
-        tiles = _layout_udim(transform, settings, target, quiet)
-        if tiles <= tiles_wanted:
-            break
-        target *= 0.92
+    target, groups = _fitting_density(transform, settings, tiles_wanted)
+    tiles = _layout_udim(transform, settings, target, log, max_tiles=tiles_wanted, groups=groups)
     log("{}: densidad de texel {:.2f} px/unidad para llenar {} UDIM(s).".format(
         name, texel_density(transform, map_size), tiles))
     if tiles < tiles_wanted:
@@ -729,8 +809,9 @@ def layout_udim(transform, settings, log=default_log):
     return tiles
 
 
-def _layout_udim(transform, settings, target, log=default_log, boost=1):
-    """Escala a la densidad objetivo y reparte las islas en los UDIMs necesarios."""
+def _layout_udim(transform, settings, target, log=default_log, boost=1, max_tiles=0, groups=None):
+    """Escala a la densidad objetivo y reparte las islas en los UDIMs necesarios (hasta `max_tiles`, si se da: se usan
+    menos si con menos ya caben; si no caben, se baja la densidad)."""
     name = short_name(transform)
     map_size = settings["uv_map_size"]
     margin = 2.0 * config.padding_px(settings) / map_size
@@ -755,67 +836,72 @@ def _layout_udim(transform, settings, target, log=default_log, boost=1):
 
     # Agrupamos las islas por tile nosotros: u3dLayout con -u/-v trata todos los tiles como una
     # sola región y deja islas a caballo entre dos UDIMs (comprobado en Maya 2026.3.2).
-    fn = _mesh_fn(transform)
-    _, shell_ids = fn.getUvShellsIds()
-    uvs_by_shell, faces_by_shell = {}, {}
-    for uv_index, shell in enumerate(shell_ids):
-        uvs_by_shell.setdefault(shell, []).append(uv_index)
-    for face, shell, _ in _face_shell_areas(transform):
-        faces_by_shell.setdefault(shell, []).append(face)
+    uvs_by_shell, faces_by_shell = _shell_elements(transform)
     pad = float(config.padding_px(settings)) / map_size
-    sizes = {shell: (b[1] - b[0] + pad) * (b[3] - b[2] + pad) for shell, b in enumerate(shell_bounds(transform))}
-
-    fill = float(settings.get("uv_udim_fill", UDIM_FILL))
-    groups = []
-    for shell in sorted(sizes, key=sizes.get, reverse=True):
-        for group in groups:
-            if group["used"] + sizes[shell] <= fill:
-                group["shells"].append(shell)
-                group["used"] += sizes[shell]
-                break
-        else:
-            groups.append({"shells": [shell], "used": sizes[shell]})
-    pending = [group["shells"] for group in groups]
+    sizes = _shell_footprints(transform, pad)
 
     kwargs = _layout_kwargs(settings)
     if boost > 1:
         # reintento: el empaquetador dejó islas más juntas que el padding; se le pide más separación y más resolución
         kwargs["resolution"] = int(kwargs["resolution"]) * 2
         kwargs["shellSpacing"] *= 1.0 + 0.5 * (boost - 1)
-    tile = 0
-    while pending:
-        shells = pending.pop(0)
-        tile_u, tile_v = tile % UDIM_COLUMNS, tile // UDIM_COLUMNS
-        faces = [face for shell in shells for face in faces_by_shell.get(shell, [])]
-        cmds.u3dLayout(components(transform, "f", faces), preScaleMode=0, layoutScaleMode=1,
-                       packBox=(float(tile_u), tile_u + 1.0, float(tile_v), tile_v + 1.0), **kwargs)
-        uv_list = components(transform, "map", [i for shell in shells for i in uvs_by_shell[shell]])
-        (umin, umax), (vmin, vmax) = cmds.polyEvaluate(uv_list, boundingBoxComponent2d=True)
-        inside = (umin >= tile_u - 1e-5 and umax <= tile_u + 1 + 1e-5 and
-                  vmin >= tile_v - 1e-5 and vmax <= tile_v + 1 + 1e-5)
-        if not inside:
-            if len(shells) == 1:
-                raise UVError("{}: una isla no cabe en un UDIM. Baja la densidad de texel o el padding.".format(name))
-            # no caben todas: la cuarta parte más pequeña pasa a un tile nuevo y se repite este
-            # (las grandes son las que definen el tile; las pequeñas rellenan huecos en otro)
-            ordered = sorted(shells, key=sizes.get, reverse=True)
-            keep = max(1, (len(ordered) * 3) // 4)
-            pending.insert(0, ordered[:keep])
-            pending.append(ordered[keep:])
+    fill = float(settings.get("uv_udim_fill", UDIM_FILL))
+    count = max(1, int(math.ceil(sum(sizes.values()) / fill)))
+    if max_tiles:
+        count = min(count, max_tiles)
+    steps = 0
+    wanted_groups = groups
+    areas = _areas_by_shell(transform)
+    while True:
+        groups = wanted_groups if wanted_groups and len(wanted_groups) == count else _balanced_groups(sizes, min(count, len(sizes)))
+        fits = True
+        for tile, shells in enumerate(groups):
+            box = _tile_box(tile)
+            faces = [face for shell in shells for face in faces_by_shell.get(shell, [])]
+            cmds.u3dLayout(components(transform, "f", faces), preScaleMode=0, layoutScaleMode=0, packBox=box, **kwargs)
+            # una isla sin área no la sabe colocar el empaquetador: no debe hacer creer que el tile no da para más
+            placed = [i for shell in shells if abs(areas.get(shell, 0.0)) >= COLLAPSED_AREA for i in uvs_by_shell[shell]]
+            if not placed:
+                continue
+            uv_list = components(transform, "map", placed)
+            (umin, umax), (vmin, vmax) = cmds.polyEvaluate(uv_list, boundingBoxComponent2d=True)
+            if not (umin >= box[0] - 1e-5 and umax <= box[1] + 1e-5 and vmin >= box[2] - 1e-5 and vmax <= box[3] + 1e-5):
+                if len(shells) == 1:
+                    raise UVError("{}: una isla no cabe en un UDIM. Baja la densidad de texel o el padding.".format(name))
+                fits = False
+                break
+        if fits:
+            break
+        if max_tiles and count >= max_tiles and steps < UDIM_DENSITY_STEPS:
+            # los tiles pedidos ya no dan para esta densidad: se baja un poco y se vuelve a repartir
+            steps += 1
+            cmds.polyEditUV(transform + ".map[*]", pivotU=0.0, pivotV=0.0, scaleU=UDIM_DENSITY_STEP, scaleV=UDIM_DENSITY_STEP)
+            factor *= UDIM_DENSITY_STEP
+            sizes = _shell_footprints(transform, pad)
             continue
-        tile += 1
+        if count >= len(sizes):
+            raise UVError("{}: no se consiguió repartir las islas en UDIMs. Baja la densidad de texel o el padding."
+                          .format(name))
+        count += 1
+    tile = len(groups)
 
     report = check(transform, udim=True)
-    if report["crossing_tiles"] or report["overlapping_faces"] > baseline_overlaps:
-        raise UVError("{}: no se consiguió repartir las islas en UDIMs sin solapes. "
+    if report["crossing_tiles"]:
+        raise UVError("{}: no se consiguió repartir las islas en UDIMs sin que crucen un tile. "
                       "Baja la densidad de texel o el padding.".format(name))
+    if report["overlapping_faces"] > baseline_overlaps:
+        if boost < 3:
+            return _layout_udim(transform, settings, current * factor, log, boost + 1, max_tiles, wanted_groups)
+        # no se pierde la pasada entera por unas caras: el semáforo las marca y se ven en el log
+        log("{}: {} caras solapadas tras repartir en UDIMs ({} antes).".format(
+            name, report["overlapping_faces"], baseline_overlaps), "warning")
     # el margen real (en píxeles de la textura final) debe respetar el padding; si no, se reempaqueta con más separación
     from . import status
     margin_px = uv_quality.island_margin(*status.uv_arrays(transform)[2:]) if tile > 1 or len(sizes) > 1 else None
     if margin_px is not None and margin_px * map_size < config.padding_px(settings) - 1.0 and boost < 3:
         log("{}: margen entre islas de {:.1f} px (padding {} px); se reempaqueta con más separación."
             .format(name, margin_px * map_size, config.padding_px(settings)), "warning")
-        return _layout_udim(transform, settings, target, log, boost + 1)
+        return _layout_udim(transform, settings, target, log, boost + 1, max_tiles, wanted_groups)
     return tile
 
 
@@ -876,6 +962,79 @@ def symmetric_seams(transform, graph=None):
     return True
 
 
+# rondas de partir las islas que siguen estirando, y % de caras > 1,5x con el que ya se para
+REFINE_ROUNDS = 5
+REFINE_TARGET = 5.0
+# por debajo de esta área en UV una isla está aplastada
+COLLAPSED_AREA = 1e-10
+
+
+def split_limiting_islands(transform, settings, graph, seams):
+    """Costuras que parten en dos las islas que no caben en un tile a la densidad que llenaría los UDIM pedidos.
+    Devuelve (costuras, caras de esas islas), sin caras si ninguna frena."""
+    from .uv_seams import CHART_MIN_FACES, flat_regions
+    layout_0_1(transform, settings)
+    grow = math.sqrt(int(settings["uv_udim_tiles"]) * float(settings.get("uv_udim_fill", UDIM_FILL)) / max(uv_area(transform), 1e-9))
+    _, faces_by_shell = _shell_elements(transform)
+    limiting = [faces_by_shell[shell] for shell, b in enumerate(shell_bounds(transform))
+                if shell in faces_by_shell and max(b[1] - b[0], b[3] - b[2]) * grow > UDIM_SPLIT_SIZE
+                and len(faces_by_shell[shell]) >= 2 * CHART_MIN_FACES]
+    if not limiting:
+        return seams, []
+    mask = graph.seam_mask(seams)
+    added = set()
+    for faces in limiting:
+        edges, _ = flat_regions(graph, np.array(faces, dtype=np.int64), 2, mask)
+        added.update(edges)
+    wanted = set(seams) | added
+    if not graph.all_disks(wanted)[0]:
+        wanted = graph.make_disks(wanted)
+    return wanted, [face for faces in limiting for face in faces]
+
+
+def _collapsed_faces(transform):
+    """Caras de las islas que no tienen área en UV (aplastadas en un punto o una línea)."""
+    areas, by_shell = {}, {}
+    for face, shell, area in _face_shell_areas(transform):
+        areas[shell] = areas.get(shell, 0.0) + abs(area)
+        by_shell.setdefault(shell, []).append(face)
+    return [face for shell, area in areas.items() if area < COLLAPSED_AREA for face in by_shell[shell]]
+
+
+def seed_charts(transform, faces=None):
+    """Aplana cada isla (o solo las de `faces`) sin caras invertidas (mbl_engine.uv_seed) para que Unfold3D no parta de
+    algo arrugado."""
+    from mbl_engine import uv_seed
+    fn = _mesh_fn(transform)
+    points = np.array([(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)], dtype=float)
+    counts, vertices = fn.getVertices()
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    positions = np.zeros((fn.numUVs(), 3))
+    positions[np.asarray(uv_ids, dtype=np.int64)] = points[np.asarray(vertices, dtype=np.int64)]
+    uv_faces, start = [], 0
+    uv_ids = list(uv_ids)
+    for count in uv_counts:
+        uv_faces.append(uv_ids[start:start + count])
+        start += count
+    used = None
+    if faces is not None:
+        uv_faces = [uv_faces[f] for f in faces]
+        used = np.unique(np.fromiter((i for f in uv_faces for i in f), dtype=np.int64))
+    new = uv_seed.tutte(positions, uv_faces)
+    if used is not None:
+        us, vs = fn.getUVs()
+        old = np.column_stack([us, vs])
+        old[used] = new[used]
+        new = old
+    # las UVs de una malla con historial no se pueden escribir directamente: se escriben en una copia y se pasan
+    copy = cmds.ls(cmds.duplicate(transform, name="mblSeedTry")[0], long=True)[0]
+    try:
+        _mesh_fn(copy).setUVs(om.MFloatArray(new[:, 0].tolist()), om.MFloatArray(new[:, 1].tolist()))
+        cmds.polyTransfer(transform, uvSets=True, vertices=False, vertexColor=False, alternateObject=copy)
+    finally:
+        cmds.delete(copy)
+
+
 def _swap_seams(transform, current, wanted):
     """Cose las costuras que sobran y corta las nuevas, sobre las UVs ya desplegadas (partir de una
     proyección nueva dejaba un punto de partida tan arrugado que el unfold no lo deshacía)."""
@@ -884,108 +1043,6 @@ def _swap_seams(transform, current, wanted):
     if wanted - current:
         cmds.polyMapCut(components(transform, "e", sorted(wanted - current)), constructionHistory=True)
     fix_nonmanifold_uvs(transform)
-
-
-# estiramiento extra que se acepta a cambio de esconder costuras (puntos de % de caras > 1.5x)
-HIDDEN_SEAMS_MAX_EXTRA_STRETCH = 4.0
-# por encima de este extra se buscan las islas culpables y se les devuelven sus costuras originales
-TAILOR_MAX_EXTRA_STRETCH = 1.0
-TAILOR_LOCAL_ROUNDS = 2
-# una isla es culpable si gana caras estiradas (> 1.5x) en al menos esta fracción de sus caras
-TAILOR_SHELL_EXTRA = 0.05
-
-
-def _revert_stretched(copy, transform, seams, old, before_faces):
-    """Costuras con los cambios deshechos en las islas de `copy` que estiran más que antes."""
-    after_faces, shells = face_stretch(copy)
-    worse = (after_faces > 1.5) & ~(before_faces > 1.5)
-    better = (before_faces > 1.5) & ~(after_faces > 1.5)
-    culprit = []
-    for shell in np.unique(shells[worse]):
-        members = shells == shell
-        if (worse[members].sum() - better[members].sum()) >= max(2, TAILOR_SHELL_EXTRA * members.sum()):
-            culprit.append(shell)
-    if not culprit:
-        return seams, 0
-    faces = np.nonzero(np.isin(shells, culprit))[0]
-    edges = set()
-    path = dag_path(mesh_shape(transform))
-    it = om.MItMeshPolygon(path)
-    for f in faces:
-        it.setIndex(int(f))
-        edges.update(it.getEdges())
-    return (seams - edges) | (old & edges), len(culprit)
-
-
-def _tailor_seams(transform, unfold_and_split, known_overlaps, log, symmetric=False, hidden=False, graph=None):
-    """Costuras "de sastre": recoloca las de Unfold3D (uv_seams) y vuelve a desplegar.
-
-    - Los cortes que abren un tubo (torso, brazos) se llevan a la espalda o bajo los brazos.
-    - Los tramos se enderezan y se llevan a zonas poco visibles.
-    - Las islas diminutas se cosen a su vecina.
-    - Solo con 'Costuras escondidas': se quitan tramos visibles que unen islas pequeñas (menos islas,
-      algo menos de resolución).
-    Se prueba sobre una copia: si estira bastante más que con las costuras de Unfold3D (con el águila
-    de prueba pasaba al mover los cortes de las plumas), la malla se queda como estaba. Antes se
-    volvía atrás cosiendo y desplegando otra vez, y el resultado salía peor que el original.
-    """
-    from .uv_seams import fix_charts, optimize_seams
-    name = short_name(transform)
-    before = stretch(transform)
-    old = set(uv_seam_edges(transform, graph))
-    # tras partir las islas grandes puede quedar alguna que no es un disco (Unfold3D la despliega
-    # igual) y optimize_seams no tocaba nada: en el humano completo, 0 cambios. Se parte de las
-    # costuras con los cortes que faltan
-    completed = fix_charts(transform, old, graph)
-    start = set(completed[0]) if completed else old
-    seams, info = optimize_seams(transform, start, remove_exposed=True if hidden else "light", graph=graph)
-    if not (info["moved"] or info["merged"] or info["rerouted"]):
-        return known_overlaps
-    if symmetric:
-        from .uv_seams import symmetrize_seams
-        seams = symmetrize_seams(transform, seams, graph) or seams
-    seams = set(seams)
-    before_faces, _ = face_stretch(transform)
-
-    def attempt(wanted):
-        copy = cmds.ls(cmds.duplicate(transform, name="mblSeamTry")[0], long=True)[0]
-        _swap_seams(copy, old, wanted)
-        return copy, unfold_and_split(copy), stretch(copy)
-
-    copy, overlaps, after = attempt(seams)
-    try:
-        # tolerancia por isla: si algunas islas estiran más que con las costuras de Unfold3D, se
-        # deshacen solo los cambios de costura de esas islas y se vuelve a desplegar
-        for _ in range(TAILOR_LOCAL_ROUNDS):
-            if after["over_1_5_percent"] <= before["over_1_5_percent"] + TAILOR_MAX_EXTRA_STRETCH:
-                break
-            seams, reverted = _revert_stretched(copy, transform, seams, old, before_faces)
-            if not reverted:
-                break
-            cmds.delete(copy)
-            copy, overlaps, after = attempt(seams)
-            log("{}: {} isla(s) estiraban con las costuras nuevas; se les devuelven las de Unfold3D ({:.1f}% "
-                "de caras > 1.5x).".format(name, reverted, after["over_1_5_percent"]))
-        if after["over_1_5_percent"] > before["over_1_5_percent"] + HIDDEN_SEAMS_MAX_EXTRA_STRETCH:
-            log("{}: recolocar las costuras estiraba demasiado ({:.1f}% de caras > 1.5x frente a {:.1f}%); se "
-                "dejan las de Unfold3D.".format(name, after["over_1_5_percent"], before["over_1_5_percent"]),
-                "warning")
-            return known_overlaps
-        # ni un solape más que con las costuras de Unfold3D (malla densa de prueba: 0 -> 2)
-        base = known_overlaps if known_overlaps is not None else len(overlapping_faces(transform))
-        overlaps = overlaps if overlaps is not None else len(overlapping_faces(copy))
-        if overlaps > base:
-            log("{}: con las costuras recolocadas quedaban {} caras solapadas (frente a {}); se dejan las de "
-                "Unfold3D.".format(name, overlaps, base), "warning")
-            return known_overlaps
-        cmds.polyTransfer(transform, uvSets=True, vertices=False, vertexColor=False, alternateObject=copy)
-    finally:
-        cmds.delete(copy)
-    log("{}: costuras recolocadas: {} cortes de tubo llevados atrás o bajo los brazos, {} tramos "
-        "enderezados o escondidos, {} uniones de islas; visibilidad de las costuras {:.0f}% menor.".format(
-            name, info["rerouted"], info["moved"], info["merged"],
-            100.0 * (1.0 - info["cost_after"] / max(info["cost_before"], 1e-9))))
-    return overlaps
 
 
 def unwrap(transform, settings, log=default_log, tick=None):
@@ -1086,18 +1143,40 @@ def _unwrap(transform, settings, log, tick):
     if fixed:
         log("{}: {} puntos UV no-manifold separados.".format(name, fixed))
     if automatic and settings["uv_auto_seams"]:
-        auto_seams(transform, settings["uv_split_shells"], settings["uv_cut_pipes"])
-        log("{}: costuras automáticas de Unfold3D añadidas donde hacían falta para desplegar.".format(name))
+        # sin pedirle que parta islas (con mallas densas rompe Maya): solo los cortes que hacen falta para abrir la malla
+        if auto_seams(transform, 0.0, settings["uv_cut_pipes"], log):
+            log("{}: costuras automáticas de Unfold3D añadidas donde hacían falta para desplegar.".format(name))
         # Unfold3D a veces deja islas que no se pueden aplanar (un toro abierto por un solo tajo)
-        from .uv_seams import fix_charts
+        from .uv_seams import fix_charts, optimize_seams, split_big_charts
         current = set(uv_seam_edges(transform, seam_graph()))
         fixed = fix_charts(transform, current, seam_graph())
         if fixed:
             _swap_seams(transform, current, set(fixed[0]))
             log("{}: {} aristas de corte añadidas para que todas las islas se puedan aplanar.".format(
                 name, fixed[1]))
+            current = set(fixed[0])
+        wanted = current
+        big_fraction = float(settings.get("uv_split_big_shells", 0.0)) * (1.75 - float(settings["uv_split_shells"]))
+        if settings["uv_split_shells"] > 0 and big_fraction > 0 and settings.get("uv_seam_style") != "hidden":
+            wanted, split = split_big_charts(seam_graph(), current, big_fraction)
+            if split:
+                log("{}: {} isla(s) muy grandes partidas en zonas casi planas.".format(name, split))
+        if settings.get("uv_tailor_seams", True):
+            # antes de desplegar: esconde y endereza los cortes y cose las islas diminutas
+            wanted, info = optimize_seams(transform, wanted, remove_exposed=(
+                True if settings.get("uv_seam_style") == "hidden" else "light"), graph=seam_graph())
+            wanted = set(wanted)
+            log("{}: costuras colocadas: {} cortes de tubo llevados atrás o bajo los brazos, {} tramos enderezados o "
+                "escondidos, {} uniones de islas.".format(name, info["rerouted"], info["moved"], info["merged"]))
+            # coser restos diminutos puede cerrar una pieza suelta (un cubito sin costuras): no se podría aplanar
+            fixed = fix_charts(transform, wanted, seam_graph())
+            if fixed:
+                wanted = set(fixed[0])
+        if wanted != current:
+            _swap_seams(transform, current, wanted)
         if settings.get("uv_symmetric", True) and symmetric_seams(transform, seam_graph()):
             log("{}: costuras simétricas: cada isla de un lado tiene su gemela en el otro.".format(name))
+        seed_charts(transform)
     symmetric = automatic and settings["uv_auto_seams"] and settings.get("uv_symmetric", True)
     hidden = automatic and settings["uv_auto_seams"] and settings.get("uv_seam_style") == "hidden"
     if tick:
@@ -1121,9 +1200,9 @@ def _unwrap(transform, settings, log, tick):
         if tick:
             tick()
 
-    def unfold_and_split(mesh=transform):
-        """Despliega todo y separa las zonas que se pisan. Devuelve los solapes medidos (o None)."""
-        unfold(mesh)
+    def unfold_and_split(mesh=transform, target=None):
+        """Despliega todo (o `target`) y separa las zonas que se pisan. Devuelve los solapes medidos (o None)."""
+        unfold(mesh, target)
         # Unfold3D a veces deja cortes que no abren del todo la malla y la isla se pisa a sí misma:
         # se separa esa zona en una isla nueva y se despliega solo ella (volver a desplegar toda la
         # malla movía el problema a otra parte: con el águila de prueba los solapes pasaban de 23 a 134)
@@ -1136,24 +1215,56 @@ def _unwrap(transform, settings, log, tick):
                 return len(bad)
             log("{}: {} caras solapadas, se separan en una isla nueva (intento {}).".format(
                 name, len(bad), attempt + 1))
-            unfold(mesh, region)
+            # de cero, sin caras invertidas: lo que se pisaba (y los restos que el corte deja sin área) no se arregla
+            # desplegando desde como estaba
+            faces = sorted(set(flat_indices(region)) | set(_collapsed_faces(mesh)))
+            seed_charts(mesh, faces)
+            unfold(mesh, components(mesh, "f", faces))
         return None
 
     # solapes ya medidos sin cambios posteriores (evita repetir polyUVOverlap)
     known_overlaps = unfold_and_split()
-    big_fraction = float(settings.get("uv_split_big_shells", 0.0))
-    if automatic and settings["uv_auto_seams"] and not hidden and big_fraction > 0:
-        split = split_big_shells(transform, big_fraction)
-        if split:
-            log("{}: {} isla(s) muy grandes partidas para aprovechar mejor la textura.".format(name, split))
-            fixed = fix_nonmanifold_uvs(transform)
-            if symmetric:
-                symmetric_seams(transform, seam_graph())
-            known_overlaps = unfold_and_split()
-    if automatic and settings["uv_auto_seams"] and settings.get("uv_tailor_seams", True):
-        known_overlaps = _tailor_seams(transform, unfold_and_split, known_overlaps, log, symmetric, hidden,
-                                       seam_graph())
 
+    if automatic and settings["uv_auto_seams"] and settings["uv_split_shells"] > 0 and not hidden:
+        # lo que sigue estirando pide más cortes: se parten solo esas islas y se despliegan solo ellas
+        from .uv_seams import symmetrize_seams, split_stretched_charts
+        for _ in range(REFINE_ROUNDS):
+            values, _shells = face_stretch(transform)
+            if 100.0 * float(np.mean(values > 1.5)) <= REFINE_TARGET:
+                break
+            current = set(uv_seam_edges(transform, seam_graph()))
+            wanted, split = split_stretched_charts(seam_graph(), current, values)
+            if not split:
+                break
+            if symmetric:
+                wanted = set(symmetrize_seams(transform, wanted, seam_graph()) or wanted)
+            _swap_seams(transform, current, wanted)
+            chart, _count = seam_graph().charts(wanted)
+            touched = [f for e in current ^ wanted for f in seam_graph().edge_f[e]]
+            faces = np.nonzero(np.isin(chart, np.unique(chart[touched])))[0].tolist()
+            seed_charts(transform, faces)
+            known_overlaps = unfold_and_split(transform, components(transform, "f", faces))
+            log("{}: {} isla(s) que estiraban partidas otra vez ({:.1f}% de caras > 1.5x antes de partirlas).".format(
+                name, split, 100.0 * float(np.mean(values > 1.5))))
+        if settings["uv_udim"] and int(settings.get("uv_udim_tiles", 0)) > 0:
+            # una isla tan grande o tan abierta que no cabe en un tile a la densidad pedida frena a todas las demás
+            for _ in range(UDIM_SPLIT_ROUNDS):
+                current = set(uv_seam_edges(transform, seam_graph()))
+                wanted, faces = split_limiting_islands(transform, settings, seam_graph(), current)
+                if not faces:
+                    break
+                if symmetric:
+                    wanted = set(symmetrize_seams(transform, wanted, seam_graph()) or wanted)
+                _swap_seams(transform, current, wanted)
+                chart, _count = seam_graph().charts(wanted)
+                touched = [f for e in current ^ wanted for f in seam_graph().edge_f[e]]
+                faces = np.nonzero(np.isin(chart, np.unique(chart[touched])))[0].tolist()
+                seed_charts(transform, faces)
+                known_overlaps = unfold_and_split(transform, components(transform, "f", faces))
+
+    collapsed = _collapsed_faces(transform)
+    if collapsed:
+        seed_charts(transform, collapsed)
     fixed_stretch = 0
     if settings.get("uv_fix_stretch", True):
         fixed_stretch = fix_stretched_islands(transform, settings, log)
@@ -1204,6 +1315,8 @@ def _unwrap(transform, settings, log, tick):
 # ---------------------------------------------------------------- «Ver cuadrícula»
 
 CHECKER_NODE = "mblCheckerShader"
+# la textura ya trae 8 x 8 casillas: una copia por tile (en UDIM se repite igual en cada uno)
+CHECKER_TEXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "textures", "uv_checker.png")
 # material anterior de cada malla mientras se ve la cuadrícula: {malla: [(shadingEngine, [componentes])]}
 _checker_saved = {}
 
@@ -1219,10 +1332,13 @@ def _own_members(sg, shape):
 
 
 def toggle_checker(transform):
-    """Pone a la malla un material temporal con una textura de cuadros (checker de Maya, sin archivos) para ver a ojo el
-    estiramiento de las UVs; una segunda llamada lo quita y devuelve el material de antes. No cambia las UVs.
+    """Pone a la malla un material temporal con la textura de cuadros numerados (textures/uv_checker.png) para ver a ojo
+    el estiramiento y la orientación de las UVs; una segunda llamada lo quita y devuelve el material de antes. No cambia
+    las UVs.
     Devuelve True si queda la cuadrícula puesta, False si se quitó."""
     shape = mesh_shape(transform)
+    if transform not in _checker_saved and not os.path.isfile(CHECKER_TEXTURE):
+        raise UVError("No se encuentra la textura de la cuadrícula ({}). Vuelve a instalar el plugin.".format(CHECKER_TEXTURE))
     if transform in _checker_saved:
         saved = _checker_saved.pop(transform)
         for sg, members in saved:
@@ -1238,7 +1354,8 @@ def toggle_checker(transform):
             saved.append((sg, _own_members(sg, shape)))
     _checker_saved[transform] = saved
     tag = short_name(transform)
-    check = cmds.shadingNode("checker", asTexture=True, name="mblChecker_" + tag)
+    check = cmds.shadingNode("file", asTexture=True, isColorManaged=True, name="mblChecker_" + tag)
+    cmds.setAttr(check + ".fileTextureName", CHECKER_TEXTURE.replace("\\", "/"), type="string")
     place = cmds.shadingNode("place2dTexture", asUtility=True, name="mblChecker_place_" + tag)
     cmds.connectAttr(place + ".outUV", check + ".uvCoord")
     cmds.connectAttr(place + ".outUvFilterSize", check + ".uvFilterSize")
@@ -1247,7 +1364,6 @@ def toggle_checker(transform):
                  "vertexUvThree", "vertexCameraOne"):
         if cmds.attributeQuery(attr, node=place, exists=True) and cmds.attributeQuery(attr, node=check, exists=True):
             cmds.connectAttr("{}.{}".format(place, attr), "{}.{}".format(check, attr), force=True)
-    cmds.setAttr(place + ".repeatUV", 8, 8, type="double2")
     shader = cmds.shadingNode("lambert", asShader=True, name="mblChecker_mat_" + tag)
     cmds.connectAttr(check + ".outColor", shader + ".color")
     sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name=shader + "SG")

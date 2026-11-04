@@ -47,6 +47,10 @@ def _components(count, a, b):
         label = new
 
 
+# vértices en los que se lanzan rayos de visibilidad como mucho; las mallas más densas comparten rayos por celdas
+VISIBILITY_SAMPLES = 20000
+
+
 class SeamGraph:
     def __init__(self, transform):
         path = dag_path(mesh_shape(transform))
@@ -83,6 +87,10 @@ class SeamGraph:
         newell = np.zeros((self.face_count, 3))
         np.add.at(newell, face_id, np.cross(self.points[flat], self.points[flat[following]]))
         self.face_area = 0.5 * np.linalg.norm(newell, axis=1)
+        self.face_normal = newell / np.maximum(2.0 * self.face_area, 1e-30)[:, None]
+        center = np.zeros((self.face_count, 3))
+        np.add.at(center, face_id, self.points[flat])
+        self.face_center = center / counts[:, None]
         self._cost = None
         self.loops = []
         seen = set()
@@ -137,6 +145,30 @@ class SeamGraph:
             self._cost_list = self._cost.tolist()
         return self._cost
 
+    def _visibility_samples(self):
+        """(vértices donde se lanzan rayos, índice de su vértice para cada vértice de la malla).
+
+        Hasta VISIBILITY_SAMPLES vértices, cada uno lanza los suyos. En una malla más densa (un retopo de 200.000 caras
+        tardaba más de un minuto solo en rayos), los vértices de una misma celda de rejilla que miran al mismo octante
+        comparten los de uno: la apertura cambia poco en una celda y la celda se agranda hasta que quedan
+        VISIBILITY_SAMPLES grupos como mucho."""
+        count = len(self.points)
+        if count <= VISIBILITY_SAMPLES:
+            everyone = np.arange(count)
+            return everyone, everyone
+        low = self.points.min(axis=0)
+        extent = float((self.points.max(axis=0) - low).max()) or 1.0
+        octant = ((self.normals > 0) * np.array([1, 2, 4])).sum(axis=1)
+        cell = extent / math.sqrt(VISIBILITY_SAMPLES)
+        while True:
+            index = np.floor((self.points - low) / cell).astype(np.int64)
+            side = index.max(axis=0) + 1
+            key = ((index[:, 0] * side[1] + index[:, 1]) * side[2] + index[:, 2]) * 8 + octant
+            _, first, owner = np.unique(key, return_index=True, return_inverse=True)
+            if len(first) <= VISIBILITY_SAMPLES:
+                return first, owner
+            cell *= 1.2
+
     def _visibility(self, ray_count=32):
         """0 = escondido (hueco o detrás), 1 = muy expuesto (frente, convexo)."""
         golden = math.pi * (3.0 - math.sqrt(5.0))
@@ -152,8 +184,10 @@ class SeamGraph:
         accel = self.fn.autoUniformGridParams()
         any_hit = self.fn.anyIntersection
         world = om.MSpace.kWorld
-        openness = np.ones(len(self.points))
-        for v, (p, n) in enumerate(zip(self.points, self.normals)):
+        reps, owner = self._visibility_samples()
+        openness = np.ones(len(reps))
+        for k, v in enumerate(reps.tolist()):
+            p, n = self.points[v], self.normals[v]
             facing = dirs @ n
             use = np.nonzero(facing > 0.05)[0]
             if not len(use):
@@ -165,7 +199,8 @@ class SeamGraph:
                 total += w
                 if hit is None:
                     free += w
-            openness[v] = free / total if total else 1.0
+            openness[k] = free / total if total else 1.0
+        openness = openness[owner]
         front = 0.5 * (1.0 + self.normals[:, 2])  # 1 mirando a +Z (frente), 0 mirando atrás
         return openness * (0.3 + 0.7 * front)
 
@@ -309,6 +344,13 @@ class SeamGraph:
             if c not in anchored and (c not in cheapest or cost[e] < cost[cheapest[c]]):
                 cheapest[c] = e
         forced = set(cheapest.values())
+        # una sola arista no abre nada (sus dos extremos siguen siendo un punto UV cada uno): hacen falta dos seguidas
+        for e in list(forced):
+            around = [x for v in self.edge_v[e] for x in self.vertex_edges[v] if x != e and x in candidates]
+            if not around:
+                around = [x for v in self.edge_v[e] for x in self.vertex_edges[v] if x != e and x not in self.border]
+            if around:
+                forced.add(min(around, key=lambda x: cost[x]))
         candidates -= forced
         seams = seams | forced
         anchors |= forced
@@ -565,6 +607,146 @@ def fix_charts(transform, seams, graph=None):
     if fixed == seams:
         return None
     return sorted(fixed), len(fixed - seams)
+
+
+# Divisor de islas propio. u3dAutoSeam con splitShells > 0 rompe Maya por dentro con mallas densas (violación de acceso
+# con 60.000 caras; no se puede capturar desde Python), a veces da error con 20.000 (E62044) y corta en zigzag.
+# Cuánto cuesta entrar en una región una cara cuya normal se aparta de la media de la región (idea de D-Charts,
+# Julius, Kraevoy y Sheffer 2005): así las regiones son casi planas y sus fronteras caen donde la superficie gira.
+CHART_FLATNESS = 3.0
+CHART_ROUNDS = 4
+# las regiones salen desiguales: se pide un poco más de la cuenta para que pocas se pasen del tamaño máximo
+CHART_TARGET = 0.7
+CHART_MIN_FACES = 32
+
+
+def _grow_regions(neighbors, normals, seeds, proxies):
+    """Crece las regiones a la vez desde sus semillas por el camino más barato entre caras. proxies: normal media de cada
+    región, o None para distancia pura. Devuelve (región de cada cara, distancia a su semilla)."""
+    count = len(neighbors)
+    region = [-1] * count
+    dist = [math.inf] * count
+    heap = []
+    for k, seed in enumerate(seeds):
+        dist[seed] = 0.0
+        heap.append((0.0, seed, k))
+    heapq.heapify(heap)
+    pop, push = heapq.heappop, heapq.heappush
+    done = [False] * count
+    while heap:
+        d, f, k = pop(heap)
+        if done[f]:
+            continue
+        done[f] = True
+        region[f] = k
+        for g, step in neighbors[f]:
+            if done[g]:
+                continue
+            if proxies is not None:
+                n, m = normals[g], proxies[k]
+                step *= 1.0 + CHART_FLATNESS * (1.0 - (n[0] * m[0] + n[1] * m[1] + n[2] * m[2]))
+            nd = d + step
+            if nd < dist[g]:
+                dist[g] = nd
+                push(heap, (nd, g, k))
+    return np.array(region, dtype=np.int64), np.array(dist)
+
+
+def flat_regions(graph, faces, count, mask):
+    """Parte las caras `faces` (una isla, sin cruzar las costuras de `mask`) en `count` regiones compactas y casi planas.
+    Semillas por el punto más lejano (acaban en las puntas: manos, pies, cabeza) y unas vueltas de Lloyd. Devuelve
+    (aristas de frontera entre regiones, región de cada cara de `faces`)."""
+    index = np.full(graph.face_count, -1, dtype=np.int64)
+    index[faces] = np.arange(len(faces))
+    a, b = index[graph.interior_first], index[graph.interior_second]
+    keep = (a >= 0) & (b >= 0) & ~mask[graph.interior_edges]
+    a, b, edges = a[keep], b[keep], graph.interior_edges[keep]
+    centers = graph.face_center[faces]
+    steps = np.linalg.norm(centers[a] - centers[b], axis=1)
+    neighbors = [[] for _ in range(len(faces))]
+    for x, y, step in zip(a.tolist(), b.tolist(), steps.tolist()):
+        neighbors[x].append((y, step))
+        neighbors[y].append((x, step))
+    normals = graph.face_normal[faces]
+    normal_list = normals.tolist()
+    area = graph.face_area[faces]
+    # semillas: la cara más lejana de todas las anteriores
+    _, dist = _grow_regions(neighbors, normal_list, [0], None)
+    seeds = [int(np.argmax(np.where(np.isfinite(dist), dist, -1.0)))]
+    for _ in range(count - 1):
+        _, dist = _grow_regions(neighbors, normal_list, seeds, None)
+        seeds.append(int(np.argmax(np.where(np.isfinite(dist), dist, -1.0))))
+    proxies = None
+    region = None
+    for _ in range(CHART_ROUNDS):
+        region, _ = _grow_regions(neighbors, normal_list, seeds, proxies)
+        proxies, seeds = [], []
+        for k in range(count):
+            members = np.nonzero(region == k)[0]
+            mean = (normals[members] * area[members, None]).sum(axis=0)
+            proxies.append((mean / max(float(np.linalg.norm(mean)), 1e-12)).tolist())
+            # nueva semilla: la cara más cercana al centro de la región
+            middle = (centers[members] * area[members, None]).sum(axis=0) / max(float(area[members].sum()), 1e-30)
+            seeds.append(int(members[np.argmin(((centers[members] - middle) ** 2).sum(axis=1))]))
+    region, _ = _grow_regions(neighbors, normal_list, seeds, proxies)
+    return edges[region[a] != region[b]].tolist(), region
+
+
+def split_big_charts(graph, seams, max_fraction):
+    """Parte las islas con más de `max_fraction` del área en regiones casi planas. Devuelve (costuras, islas partidas)."""
+    seams = set(seams) - graph.border
+    total = float(graph.face_area.sum()) or 1.0
+    split = 0
+    for _ in range(3):
+        chart, charts = graph.charts(seams)
+        area = np.bincount(chart, weights=graph.face_area, minlength=charts)
+        sizes = np.bincount(chart, minlength=charts)
+        big = np.nonzero((area > max_fraction * total) & (sizes >= CHART_MIN_FACES))[0]
+        if not len(big):
+            break
+        mask = graph.seam_mask(seams)
+        added = set()
+        for c in big.tolist():
+            count = max(2, int(math.ceil(area[c] / (max_fraction * CHART_TARGET * total))))
+            count = min(count, int(sizes[c] // CHART_MIN_FACES))
+            if count < 2:
+                continue
+            edges, _ = flat_regions(graph, np.nonzero(chart == c)[0], count, mask)
+            added.update(edges)
+            split += 1
+        if not added:
+            break
+        seams |= added
+        if not graph.all_disks(seams)[0]:
+            seams = graph.make_disks(seams)
+    return seams, split
+
+
+# una isla se vuelve a partir si más de esta fracción de sus caras estira más de 1,5x
+REFINE_BAD_SHARE = 0.10
+
+
+def split_stretched_charts(graph, seams, stretch):
+    """Parte en zonas casi planas las islas que siguen estirando tras desplegarlas: una superficie muy curva (alas, pelo,
+    un animal) no se aplana sin más cortes, y son las cifras las que dicen dónde hacen falta. Devuelve (costuras, partidas)."""
+    seams = set(seams) - graph.border
+    chart, charts = graph.charts(seams)
+    sizes = np.bincount(chart, minlength=charts)
+    bad = np.bincount(chart, weights=(np.asarray(stretch) > 1.5).astype(float), minlength=charts) / np.maximum(sizes, 1)
+    mask = graph.seam_mask(seams)
+    added = set()
+    split = 0
+    for c in np.nonzero((bad > REFINE_BAD_SHARE) & (sizes >= 2 * CHART_MIN_FACES))[0].tolist():
+        count = min(2 + int(bad[c] > 0.3), int(sizes[c] // CHART_MIN_FACES))
+        edges, _ = flat_regions(graph, np.nonzero(chart == c)[0], count, mask)
+        if edges:
+            added.update(edges)
+            split += 1
+    if added:
+        seams |= added
+        if not graph.all_disks(seams)[0]:
+            seams = graph.make_disks(seams)
+    return seams, split
 
 
 def _chain_cost(graph, chain):

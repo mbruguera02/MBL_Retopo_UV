@@ -47,6 +47,10 @@ Los ejecutables de `mbl_retopo_uv/bin` llevan al lado el texto de la licencia de
 
 El código del plugin es MIT, y ningún programa que se distribuye con él es GPL.
 
+## Textura de «Ver cuadrícula»
+
+`mbl_retopo_uv/textures/uv_checker.png` se generó con [UV Checker Map Maker](https://uvchecker.atlux.one/), de Jorge Valle Hurtado (Atlux). Sus [condiciones de uso](https://uvchecker.atlux.one/EULA.html) dicen que las imágenes creadas son de uso libre; la aplicación no se distribuye ni se usa aquí, solo una imagen generada con ella.
+
 ## Dentro de Maya
 
 El plugin usa herramientas de Autodesk Maya: polyRetopo y Unfold3D. Son de Autodesk y vienen con Maya; el plugin no las distribuye.

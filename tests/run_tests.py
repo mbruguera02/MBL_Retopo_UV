@@ -2434,10 +2434,16 @@ def test_uv_checker_toggle_and_undo():
     before = engines()
     assert uv.toggle_checker(mesh) is True
     assert engines() == {"checkerCubeSG"} or any("mblChecker" in e for e in engines()), engines()
-    assert cmds.ls(type="checker")
+    textures = [n for n in cmds.ls(type="file") if "mblChecker" in n]
+    assert len(textures) == 1 and os.path.isfile(cmds.getAttr(textures[0] + ".fileTextureName")), textures
+    # es la textura numerada y al derecho: casilla A0 (arriba a la izquierda) oscura, A1 clara
+    dark = cmds.colorAtPoint(textures[0], output="RGB", u=0.01, v=0.99)
+    light = cmds.colorAtPoint(textures[0], output="RGB", u=0.135, v=0.99)
+    assert dark[0] < 0.3 and light[0] > 0.6, (dark, light)
+    assert cmds.getAttr(cmds.listConnections(textures[0] + ".uvCoord")[0] + ".repeatU") == 1.0
     assert uv.toggle_checker(mesh) is False
     assert engines() == before, (engines(), before)
-    assert "oldMatSG" in engines() and not cmds.ls(type="checker")
+    assert "oldMatSG" in engines() and not [n for n in cmds.ls(type="file") if "mblChecker" in n]
     assert len(cmds.ls(cmds.sets("oldMatSG", query=True), flatten=True)) == 3
     cmds.undoInfo(state=True)
     cmds.undoInfo(openChunk=True)

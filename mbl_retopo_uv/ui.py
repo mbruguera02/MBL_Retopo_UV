@@ -381,8 +381,9 @@ class RetopoUVWindow(QtWidgets.QDialog):
         form.addRow(w["uv_straighten_strips"])
         form.addRow(w["uv_fix_stretch"])
         checker = QtWidgets.QPushButton("Ver cuadrícula")
-        checker.setToolTip("Pone a la malla seleccionada una textura de cuadros temporal para ver a ojo el estiramiento "
-                           "de las UVs. Un segundo clic la quita y devuelve el material de antes. No cambia las UVs.")
+        checker.setToolTip("Pone a la malla seleccionada una textura de casillas numeradas temporal para ver a ojo el "
+                           "estiramiento y la orientación de las UVs (en el visor, tecla 6 para ver texturas). Un segundo "
+                           "clic la quita y devuelve el material de antes. No cambia las UVs.")
         checker.clicked.connect(self._toggle_checker)
         form.addRow(checker)
         form.addRow("Optimize", w["uv_optimize_iterations"])
@@ -640,9 +641,13 @@ class RetopoUVWindow(QtWidgets.QDialog):
             try:
                 cmds.undoInfo(openChunk=True)
                 shown = uv.toggle_checker(mesh)
+            except MBLError as exc:
+                self.log(str(exc), "error")
+                continue
             finally:
                 cmds.undoInfo(closeChunk=True)
-            self.log("{}: cuadrícula {}.".format(short_name(mesh), "puesta" if shown else "quitada (material anterior)"))
+            self.log("{}: cuadrícula {}.".format(short_name(mesh), "puesta (tecla 6 en el visor para verla)" if shown
+                                                 else "quitada (material anterior)"))
 
     def _source_mesh(self):
         """Malla original sobre la que se dibuja o pinta: la seleccionada, o su original si es un retopo."""

@@ -1712,6 +1712,51 @@ def test_uv_metrics_cut_path_and_acceptance():
     assert not uv_metrics.improved((1.20, 10), (1.20, 7), gain=0.5)
 
 
+@test
+def test_uv_rectify_grid_straightens_a_banana():
+    """Una tira curvada en UV sale recta, con sus medidas en 3D; una isla con un polo no se toca."""
+    import math
+    from mbl_engine import uv_straighten
+    points, faces, uv_points, uv_faces = [], [], [], []
+    columns, rows = 12, 3
+    for i in range(columns + 1):
+        for j in range(rows + 1):
+            points.append((float(i), float(j), 0.0))
+            bend = 0.5 * i
+            radius = 20.0 + j
+            uv_points.append((radius * math.cos(bend / 20.0), radius * math.sin(bend / 20.0)))
+    for i in range(columns):
+        for j in range(rows):
+            a, b = i * (rows + 1) + j, (i + 1) * (rows + 1) + j
+            faces.append([a, b, b + 1, a + 1])
+            uv_faces.append([a, b, b + 1, a + 1])
+    new, done = uv_straighten.rectify_grids(np.array(points), faces, np.array(uv_points), uv_faces)
+    assert done == 1, done
+    # cada fila y cada columna, recta en un eje de la textura
+    for j in range(rows + 1):
+        row = new[[i * (rows + 1) + j for i in range(columns + 1)]]
+        assert min(np.ptp(row[:, 0]), np.ptp(row[:, 1])) < 1e-9, row
+    mean, bad = uv_quality.shape_stats(np.array(points), faces, new, uv_faces)
+    assert mean < 1.001 and bad == 0.0, (mean, bad)
+    # un polo: la rejilla no cuadra y la isla se queda como estaba
+    pts = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (-1, 1, 0), (-1, 0, 0), (0, -1, 0)]
+    fan = [[0, 1, 2, 3], [0, 3, 4, 5], [0, 5, 6, 1]]  # tres quads alrededor de un vértice
+    same, done = uv_straighten.rectify_grids(np.array(pts, dtype=float), fan, np.array(pts, dtype=float)[:, :2], fan)
+    assert done == 0 and np.array_equal(same, np.array(pts, dtype=float)[:, :2])
+
+
+@test
+def test_uv_shape_stats_sees_rectangles():
+    """Un plano aplastado a la mitad en V y el doble en U conserva el área: el estiramiento no lo ve, la prueba del tablero sí."""
+    points = np.array([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], dtype=float)
+    faces = [[0, 1, 2, 3]]
+    mean, bad = uv_quality.shape_stats(points, faces, points[:, :2], faces)
+    assert abs(mean - 1.0) < 1e-9 and bad == 0.0, (mean, bad)
+    squashed = points[:, :2] * np.array([2.0, 0.5])
+    mean, bad = uv_quality.shape_stats(points, faces, squashed, faces)
+    assert abs(mean - 4.0) < 1e-9 and bad == 100.0, (mean, bad)
+
+
 if __name__ == "__main__":
     only = sys.argv[1:]
     for func in TESTS:

@@ -359,6 +359,40 @@ def seam_continuity(points, faces, uv_points, uv_faces):
 
 # ------------------------------------------------------------------ informe y nota
 
+def shape_stats(points, faces, uv_points, uv_faces):
+    """Si los cuadrados siguen siendo cuadrados (la prueba del tablero): el estiramiento mide área, y un rectángulo con la
+    misma área pasaría por bueno. Por triángulo, razón entre el mayor y el menor estiramiento de la transformación de 3D a
+    UV. Devuelve (media ponderada por área, % del área con más de 1,5x)."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    uv = np.asarray(uv_points, dtype=np.float64).reshape(-1, 2)
+    a3, b3, c3, a2, b2, c2 = [], [], [], [], [], []
+    for verts, corners in zip(faces, uv_faces):
+        if len(corners) != len(verts):
+            continue
+        for k in range(1, len(verts) - 1):
+            a3.append(verts[0]); b3.append(verts[k]); c3.append(verts[k + 1])
+            a2.append(corners[0]); b2.append(corners[k]); c2.append(corners[k + 1])
+    if not a3:
+        return 1.0, 0.0
+    e1, e2 = points[b3] - points[a3], points[c3] - points[a3]
+    f1, f2 = uv[b2] - uv[a2], uv[c2] - uv[a2]
+    len1 = np.maximum(np.linalg.norm(e1, axis=1), 1e-30)
+    x = e1 / len1[:, None]
+    ex2 = (e2 * x).sum(axis=1)
+    ey2 = np.linalg.norm(e2 - ex2[:, None] * x, axis=1)
+    area = 0.5 * len1 * ey2
+    ok = area > 1e-30
+    # J = [f1 f2] [[len1, ex2], [0, ey2]]^-1
+    j1 = f1[ok] / len1[ok][:, None]
+    j2 = (f2[ok] - j1 * ex2[ok][:, None]) / ey2[ok][:, None]
+    e, f, g = (j1 * j1).sum(axis=1), (j1 * j2).sum(axis=1), (j2 * j2).sum(axis=1)
+    root = np.sqrt(np.maximum((e - g) ** 2 + 4.0 * f * f, 0.0))
+    big, small = np.sqrt((e + g + root) / 2.0), np.sqrt(np.maximum((e + g - root) / 2.0, 0.0))
+    ratio = np.minimum(big / np.maximum(small, 1e-12), STRETCH_CAP)
+    weight = area[ok] / max(float(area[ok].sum()), 1e-30)
+    return float((ratio * weight).sum()), float(100.0 * weight[ratio > STRETCH_BAD].sum())
+
+
 def report(points, faces, uv_points, uv_faces):
     """Todas las cifras de calidad de unas UVs.
 
@@ -381,6 +415,7 @@ def report(points, faces, uv_points, uv_faces):
            "texel_variation_percent": texel_variation(world, flat, island, count),
            "margin_min": island_margin(uv_points, uv_faces, island, count)}
     rep.update(stretch_stats(world, flat))
+    rep["shape_mean"], rep["shape_bad_percent"] = shape_stats(points, faces, uv_points, uv_faces)
     rep.update(seam_continuity(points, faces, uv_points, uv_faces))
     return rep
 

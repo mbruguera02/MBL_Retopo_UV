@@ -3,6 +3,13 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.6 (5 de noviembre de 2026)
+
+- **Cortes por ángulo:** «Ángulo de costura» ya solo corta cadenas largas, sin migajas. Sigue apagado por defecto (180°): a 90° empeoraba criatura y midnight. Para piezas duras, bájalo a 90°.
+- **Enderezar:** las islas que son una rejilla sin polos quedan como una cuadrícula recta, como Straighten UV a mano.
+- **La prueba del tablero:** el registro dice qué parte del área tiene cuadrados deformados; el estiramiento solo miraba el área.
+- **Avisos** de escala no uniforme y de n-gons antes de desplegar.
+
 ## 1.0.5 (5 de noviembre de 2026)
 
 - **Menos micro cortes:** una isla que se pisa se parte en dos trozos grandes en vez de pelarle lo que se pisa, se parten menos las islas, los restos pequeños se cosen a su vecina y se quitan los cortes en punta muy cortos. Se acepta algo más de estiramiento a cambio.

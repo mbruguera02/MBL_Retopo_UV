@@ -1,6 +1,6 @@
 // mbl_core: núcleo nativo del Motor MBL. Por ahora, etapas S0 (entrada), S1 (análisis) y S3 (campo de direcciones).
 //
-//   mbl_core entrada.obj salida.json [--field campo.bin] [--memory-mb N] [--feature-angle grados]
+//   mbl_core entrada.obj salida.json [--field campo.bin] [--faces caras] [--memory-mb N] [--feature-angle grados]
 //
 // Se ejecuta aparte de Maya: si falla, Maya no se cae. Es deliberadamente poco invasivo: prioridad baja, un solo hilo y
 // tope de memoria impuesto por el sistema. Determinista: la misma malla da siempre el mismo resultado.
@@ -217,6 +217,9 @@ static double mirror_match(const Mesh& mesh, const Vec3& center, int axis, doubl
     return mesh.points.empty() ? 0.0 : static_cast<double>(matched) / mesh.points.size();
 }
 
+// longitud mínima de una cadena de canto, como fracción de la diagonal del modelo
+static const double FEATURE_MIN_CHAIN = 0.05;
+
 static Analysis analyze(const Mesh& mesh, double feature_degrees) {
     Analysis result;
     Vec3 low = mesh.points[0], high = mesh.points[0];
@@ -243,6 +246,29 @@ static Analysis analyze(const Mesh& mesh, double feature_degrees) {
         }
     }
     result.mean_edge = edge_sum / std::max<size_t>(edge_total, 1);
+    // un pliegue de verdad es largo: las cadenas cortas de aristas marcadas son ruido o detalle fino de una malla orgánica.
+    // Los bordes abiertos siempre cuentan.
+    std::vector<int> parent(mesh.points.size());
+    for (size_t i = 0; i < parent.size(); ++i) parent[i] = static_cast<int>(i);
+    auto find = [&](int x) {
+        while (parent[x] != x) x = parent[x] = parent[parent[x]];
+        return x;
+    };
+    auto is_crease = [&](size_t t, int k) { return result.feature_side[t * 3 + k] && mesh.across[t][k] >= 0; };
+    for (size_t t = 0; t < mesh.tris.size(); ++t)
+        for (int k = 0; k < 3; ++k)
+            if (is_crease(t, k)) parent[find(mesh.tris[t][k])] = find(mesh.tris[t][(k + 1) % 3]);
+    std::vector<double> chain(mesh.points.size(), 0.0);
+    for (size_t t = 0; t < mesh.tris.size(); ++t)
+        for (int k = 0; k < 3; ++k)
+            if (is_crease(t, k) && static_cast<int>(t) < mesh.across[t][k])
+                chain[find(mesh.tris[t][k])] += (mesh.points[mesh.tris[t][(k + 1) % 3]] - mesh.points[mesh.tris[t][k]]).norm();
+    for (size_t t = 0; t < mesh.tris.size(); ++t)
+        for (int k = 0; k < 3; ++k)
+            if (is_crease(t, k) && chain[find(mesh.tris[t][k])] < FEATURE_MIN_CHAIN * result.diagonal) {
+                result.feature_side[t * 3 + k] = 0;
+                if (static_cast<int>(t) < mesh.across[t][k]) --result.features;
+            }
     Vec3 center = (low + high) * 0.5;
     // tolerancia: una fracción de la arista media, para no llamar simétrica a una malla densa cualquiera
     for (int axis = 0; axis < 3; ++axis) result.mirror[axis] = mirror_match(mesh, center, axis, 0.25 * result.mean_edge);
@@ -261,6 +287,8 @@ struct Level {
     std::vector<double> weight;
     std::vector<Complex> constraint;
     std::vector<Complex> align;   // tirón suave hacia las direcciones de curvatura (solo donde la superficie es anisótropa)
+    std::vector<double> node_area;
+    bool use_align = true;        // en niveles más finos que la cara pedida, el detalle no debe crear polos
     std::vector<int> parent;      // nodo del nivel siguiente
     std::vector<Complex> to_parent;  // e^(i 4 δ): del marco de este nodo al de su padre
 };
@@ -303,6 +331,7 @@ static Level finest_level(const Mesh& mesh, const Analysis& analysis) {
     level.count = static_cast<int>(mesh.tris.size());
     level.constraint.assign(level.count, Complex(0, 0));
     level.align.assign(level.count, Complex(0, 0));
+    level.node_area = mesh.area;
     std::vector<LooseEdge> edges;
     edges.reserve(mesh.tris.size() * 3);
     for (int t = 0; t < level.count; ++t) {
@@ -354,11 +383,13 @@ static Level coarsen(Level& fine) {
     }
     coarse.constraint.assign(coarse.count, Complex(0, 0));
     coarse.align.assign(coarse.count, Complex(0, 0));
+    coarse.node_area.assign(coarse.count, 0.0);
     std::vector<LooseEdge> edges;
     edges.reserve(fine.target.size());
     for (int i = 0; i < fine.count; ++i) {
         coarse.constraint[fine.parent[i]] += fine.constraint[i] * fine.to_parent[i];
         coarse.align[fine.parent[i]] += fine.align[i] * fine.to_parent[i];
+        coarse.node_area[fine.parent[i]] += fine.node_area[i];
         for (int e = fine.first[i]; e < fine.first[i + 1]; ++e) {
             int j = fine.target[e];
             if (fine.parent[i] == fine.parent[j]) continue;
@@ -381,7 +412,7 @@ static void smooth(const Level& level, std::vector<Complex>& z, int rounds) {
                 for (int e = level.first[i]; e < level.first[i + 1]; ++e)
                     // la red guarda i -> j; para traer j a i se usa la inversa
                     sum += z[level.target[e]] * std::conj(level.conn[e]) * level.weight[e];
-                sum += level.align[i];
+                if (level.use_align) sum += level.align[i];
             }
             double length = std::abs(sum);
             if (length > 1e-14) z[i] = sum / length;
@@ -389,7 +420,7 @@ static void smooth(const Level& level, std::vector<Complex>& z, int rounds) {
     }
 }
 
-static std::vector<Complex> solve_field(const Mesh& mesh, const Analysis& analysis, int& levels_used) {
+static std::vector<Complex> solve_field(const Mesh& mesh, const Analysis& analysis, int target_faces, int& levels_used) {
     std::vector<Level> levels;
     levels.push_back(finest_level(mesh, analysis));
     while (levels.back().count > 64 && levels.size() < 24) {
@@ -398,6 +429,14 @@ static std::vector<Complex> solve_field(const Mesh& mesh, const Analysis& analys
         levels.push_back(std::move(next));
     }
     levels_used = static_cast<int>(levels.size());
+    if (target_faces > 0) {
+        const double face_area = analysis.total_area / target_faces;
+        for (Level& level : levels) {
+            double sum = 0;
+            for (double a : level.node_area) sum += a;
+            level.use_align = sum / std::max(level.count, 1) >= 0.5 * face_area;
+        }
+    }
     std::vector<Complex> z(levels.back().count, Complex(1, 0));
     smooth(levels.back(), z, 200);
     for (int l = static_cast<int>(levels.size()) - 2; l >= 0; --l) {
@@ -508,17 +547,19 @@ static bool write_field(const char* path, const Mesh& mesh, const std::vector<Co
 
 static int run(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "uso: mbl_core entrada.obj salida.json [--field campo.bin] [--memory-mb N] [--feature-angle grados]\n");
+        fprintf(stderr, "uso: mbl_core entrada.obj salida.json [--field campo.bin] [--faces caras] [--memory-mb N] [--feature-angle grados]\n");
         return 2;
     }
     const char* field_path = nullptr;
     size_t memory_mb = 0;
     double feature_degrees = 40.0;
+    int target_faces = 0;
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string name = argv[i];
         if (name == "--field") field_path = argv[i + 1];
         else if (name == "--memory-mb") memory_mb = static_cast<size_t>(atoll(argv[i + 1]));
         else if (name == "--feature-angle") feature_degrees = atof(argv[i + 1]);
+        else if (name == "--faces") target_faces = atoi(argv[i + 1]);
     }
     limit_resources(memory_mb);
     auto started = std::chrono::steady_clock::now();
@@ -530,7 +571,7 @@ static int run(int argc, char** argv) {
     build_topology(mesh);
     Analysis analysis = analyze(mesh, feature_degrees);
     int levels = 0;
-    std::vector<Complex> z = solve_field(mesh, analysis, levels);
+    std::vector<Complex> z = solve_field(mesh, analysis, target_faces, levels);
     FieldReport field = inspect_field(mesh, analysis, z);
     if (field_path && !write_field(field_path, mesh, z)) fprintf(stderr, "no se pudo escribir %s\n", field_path);
     double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();

@@ -437,7 +437,8 @@ class SeamGraph:
                             stack.append(w)
         return loop
 
-    TURN_PENALTY = 1.0
+    # girar cuesta bastante: una escalera sale el triple de cara que seguir el loop
+    TURN_PENALTY = 2.0
 
     def _sharing(self, edge):
         """Aristas que comparten cara con `edge` (para el castigo por girar)."""
@@ -723,7 +724,7 @@ def split_big_charts(graph, seams, max_fraction):
 
 
 # una isla se vuelve a partir si más de esta fracción de sus caras estira más de 1,5x
-REFINE_BAD_SHARE = 0.10
+REFINE_BAD_SHARE = 0.20
 
 
 def split_stretched_charts(graph, seams, stretch):
@@ -747,6 +748,98 @@ def split_stretched_charts(graph, seams, stretch):
         if not graph.all_disks(seams)[0]:
             seams = graph.make_disks(seams)
     return seams, split
+
+
+def split_charts_in_two(graph, seams, bad_faces):
+    """Parte en dos cada isla (con caras de sobra) que tiene caras de `bad_faces`. Devuelve (costuras, caras de esas islas);
+    sin caras si ninguna se puede partir."""
+    seams = set(seams) - graph.border
+    chart, count = graph.charts(seams)
+    sizes = np.bincount(chart, minlength=count)
+    mask = graph.seam_mask(seams)
+    added = set()
+    touched = []
+    for c in np.unique(chart[np.asarray(bad_faces, dtype=np.int64)]).tolist():
+        if sizes[c] < 2 * CHART_MIN_FACES:
+            continue
+        faces = np.nonzero(chart == c)[0]
+        edges, _ = flat_regions(graph, faces, 2, mask)
+        if edges:
+            added.update(edges)
+            touched.append(faces)
+    if not added:
+        return seams, []
+    wanted = seams | added
+    if not graph.all_disks(wanted)[0]:
+        tolerated = graph.tolerated
+        graph.all_disks(seams)
+        graph.tolerated = int(np.count_nonzero(graph._euler != 1))
+        if not graph.all_disks(wanted)[0]:
+            wanted = graph.make_disks(wanted)
+        graph.tolerated = tolerated
+    return wanted, np.concatenate(touched).tolist()
+
+
+# un corte en punta más corto que esta fracción de la diagonal no compensa: es un micro corte
+SHORT_SLIT = 0.03
+SMALL_MERGE_ROUNDS = 200
+
+
+def clean_small_cuts(graph, seams, merge_area):
+    """Quita los micro cortes: cortes en punta muy cortos (no separan nada) e islas diminutas cosidas a la vecina con la que
+    más borde comparten. Si alguna isla de la malla ya no era un disco, eso no impide coser las demás: basta con que no
+    aparezca ninguna nueva. Devuelve (costuras, cortes quitados, islas cosidas)."""
+    seams = (set(seams) | graph.fixed) - graph.border
+    tolerated = graph.tolerated
+    graph.all_disks(seams)
+    graph.tolerated = int(np.count_nonzero(graph._euler != 1))
+    try:
+        size = float(np.linalg.norm(graph.points.max(axis=0) - graph.points.min(axis=0))) or 1.0
+        slits = merged = 0
+        chains, degree = graph.chains(seams)
+        for chain, a, b in chains:
+            tip = (degree.get(a, 0) == 1 and a not in graph.border_vertices) or (
+                degree.get(b, 0) == 1 and b not in graph.border_vertices)
+            if not tip or graph.fixed.intersection(chain) or sum(graph.length[e] for e in chain) >= SHORT_SLIT * size:
+                continue
+            trial = seams - set(chain)
+            if graph.all_disks(trial)[0]:
+                seams = trial
+                slits += 1
+        total = float(graph.face_area.sum())
+        refused = set()
+        for _ in range(SMALL_MERGE_ROUNDS):
+            chart, count = graph.charts(seams)
+            area = np.bincount(chart, weights=graph.face_area, minlength=count)
+            sides = {}
+            for e in seams:
+                faces = graph.edge_f[e]
+                if len(faces) == 2 and chart[faces[0]] != chart[faces[1]]:
+                    for mine, other in ((faces[0], faces[1]), (faces[1], faces[0])):
+                        if area[chart[mine]] < merge_area * total:
+                            sides.setdefault(int(chart[mine]), {}).setdefault(int(chart[other]), []).append(e)
+            done = False
+            for c in sorted(sides, key=lambda c: area[c]):
+                key = frozenset(np.nonzero(chart == c)[0][:8].tolist())
+                if key in refused:
+                    continue
+                for other, edges in sorted(sides[c].items(), key=lambda item: -len(item[1])):
+                    if graph.fixed.intersection(edges):
+                        continue
+                    trial = seams - set(edges)
+                    if graph.all_disks(trial)[0]:
+                        seams = trial
+                        merged += 1
+                        done = True
+                        break
+                if done:
+                    break
+                refused.add(key)
+            if not done:
+                break
+        return seams, slits, merged
+    finally:
+        graph.tolerated = tolerated
 
 
 def _chain_cost(graph, chain):
@@ -824,6 +917,8 @@ def reroute_slits(graph, seams):
     return seams, moved
 
 
+# un tramo se vuelve a trazar si el camino nuevo cuesta menos de esta fracción del actual
+RELOCATE_GAIN = 0.95
 # un corte de tubo solo se mueve si el camino nuevo cuesta menos de esta fracción del actual
 SLIT_GAIN = 0.85
 # exposición (coste / longitud) a partir de la cual una costura central se considera visible
@@ -890,7 +985,7 @@ def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, 
                 if not reachable:
                     continue
                 end = min(reachable, key=dist.get)
-                if dist[end] >= 0.85 * old_cost:
+                if dist[end] >= RELOCATE_GAIN * old_cost:
                     continue
                 path = graph._trace(prev, None, end)
                 trial = others | set(path)
@@ -912,7 +1007,7 @@ def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, 
             end = b
             if end not in dist:
                 continue
-            if dist[end] >= 0.85 * old_cost:
+            if dist[end] >= RELOCATE_GAIN * old_cost:
                 continue
             path = graph._trace(prev, a, end)
             trial = others | set(path)

@@ -2419,6 +2419,23 @@ def test_optional_fbx():
 
 
 @test
+def test_uv_islands_aligned_to_loops():
+    """Una rejilla girada 30° en UV vuelve a tener los loops rectos en U y V; una ya recta no se toca."""
+    cmds.file(new=True, force=True)
+    mesh = cmds.polyPlane(subdivisionsX=6, subdivisionsY=6, constructionHistory=False)[0]
+    cmds.polyEditUV(mesh + ".map[*]", pivotU=0.5, pivotV=0.5, angle=30.0)
+    assert uv.align_islands_to_loops(mesh) == 1
+    us = cmds.polyEditUV(mesh + ".map[0]", query=True)
+    corners = cmds.polyEvaluate(mesh, boundingBoxComponent2d=True) if False else None
+    fn = uv._mesh_fn(mesh)
+    u, v = map(np.asarray, fn.getUVs())
+    edge = np.hypot(u[1] - u[0], v[1] - v[0])
+    angle = abs(math.degrees(math.atan2(v[1] - v[0], u[1] - u[0]))) % 90.0
+    assert edge > 0 and min(angle, 90.0 - angle) < 0.5, (angle, us, corners)
+    assert uv.align_islands_to_loops(mesh) == 0
+
+
+@test
 def test_uv_checker_toggle_and_undo():
     """«Ver cuadrícula»: pone un material de cuadros sin tocar las UVs, un segundo toggle devuelve el material de antes
     (también con dos materiales por caras) y Ctrl+Z deshace la puesta."""

@@ -57,6 +57,16 @@ Cómo se usa en la prueba:
 
 Van en `Desktop/geo`, sin subirlos al repositorio, con una línea cada uno en `tests/bench_models.json`. Objetivo: 10-20 modelos con humanos, escaneos sucios, mallas de IA, dedos que se tocan, ropa con capas y piezas muy finas.
 
+## Cómo deben salir las UVs
+
+Referencias de Marc (5 de noviembre): una cara en una sola isla, con la cuadrícula siguiendo los loops, y una pieza dura con islas rectangulares ordenadas. Lo que pide, y que el juez de UVs aún no mide (el águila con islas dentadas sale en verde):
+
+- **Bordes de isla limpios:** siguen edge loops, sin dientes. Falta medirlo: fracción del borde en línea recta o sobre un mismo loop.
+- **Pocas islas, y grandes:** una pieza con sentido (cara, ala) es una isla. Falta medirlo: islas diminutas y tamaño frente a lo que da la anatomía.
+- **Cuadrícula alineada:** los loops van rectos en U y V dentro de la isla, y las piezas de rejilla salen rectangulares. Falta medirlo: desviación de las aristas respecto a los ejes.
+
+Un poco de estiramiento es aceptable a cambio de esto. Con parches debería salir casi solo: las fronteras de parche ya siguen loops y cada parche ya es una rejilla.
+
 ## Qué se rehace y qué se queda
 
 Se rehace de cero todo el motor. No se usa nada de QuadriFlow, Instant Meshes ni de `best_retopo`. `mbl_core` ya está escrito desde cero y es la base.

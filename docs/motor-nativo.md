@@ -10,6 +10,13 @@ Punto de partida para programar el motor desde cero. Rama `f1-mbl-core`. El moto
 - No invasivo: prioridad baja, tope de memoria del sistema, cancelable, hilos limitados.
 - Determinista: la misma malla da el mismo resultado.
 
+- **Polos, los mínimos que sostengan la malla:** son un objetivo que se mide, no un efecto secundario. S3 elimina los pares +/- que no hacen falta para seguir la forma. Se comprueba que quitarlos no suba el error de forma ni deforme los quads.
+- **UVs a partir de la retopología:** una buena malla da casi las UVs. Se reutiliza lo que ya hay (costuras, enderezar, empaquetar). Pero el aplanado de hoy es Unfold3D, de Maya: seguirá siendo el respaldo mientras los parches no lo hagan innecesario, y se quita solo si el banco lo confirma.
+- **Tipo de modelo en la ventana:** "Humano" u "Otro".
+  - **Humano:** el usuario coloca guías (cara, ojos, boca, articulaciones) y el motor aplica los anillos que tocan. Va primero: no pesa y da control.
+  - **Otro:** una IA reconoce qué es cada parte. Va después y como módulo opcional fuera del núcleo. Antes de empezarlo hay que decidir de dónde sale el modelo y con qué licencia, cuánto ocupa y si corre en un PC normal sin invadirlo.
+  - Ninguno de los dos cambia el núcleo: ambos acaban en las mismas restricciones de S1 (guías, zonas, sin polos).
+
 ## Pendiente de confirmar
 
 **Vía de S4-S6: se propone por parches** (trazar el campo, dividir la superficie en parches de cuatro lados, repartir enteros, rellenar con rejillas).
@@ -69,7 +76,8 @@ Cada fase acaba en algo que se puede medir. **Primero una vertical simple de pun
 4. **Calidad.** S2 por zonas, S7 y S8. *Listo si:* fealdad ≤ Maya y anillos cerrados ≥ Maya en humano y criatura, a ≤ 2 veces el tiempo de Maya.
 5. **Entrar en el plugin.** Adaptador en Python, opción experimental en la ventana, respaldo a Maya. *Listo si:* suites en verde.
 6. **UVs desde los parches.** *Listo si:* continuidad en los cortes +10 puntos y aprovechamiento ≥ 60 %.
-7. **Entradas completas y motor único:** guías, materiales, pincel, zonas sin polos.
+7. **Entradas completas y motor único:** modo Humano con guías, materiales, pincel, zonas sin polos.
+8. **Modo Otro con IA**, como módulo opcional.
 
 Objetivo de recursos: a 25.000 caras, ≤ 2 GB y ≤ 90 s en un PC de 16 GB.
 

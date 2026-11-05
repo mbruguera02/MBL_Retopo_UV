@@ -2,6 +2,35 @@
 
 Punto de partida para programar el motor desde cero. Rama `f1-mbl-core`. El motor actual y Maya siguen funcionando al lado hasta que este los supere en el banco.
 
+## Requisitos: lo que hace bueno al motor
+
+El motor se hace de cero para cumplir esto. Público: texturizado, animación y VFX. Se mide con `mbl_engine/quality.py`, salvo lo marcado como "falta medirlo".
+
+| # | La malla o el motor debe | Se comprueba con |
+|---|---|---|
+| 1 | Ser solo quads, sin triángulos sueltos ni uniones en T | % de quads a la salida de S6 |
+| 2 | No tener agujeros nuevos ni caras volteadas o dobladas; conservar ojos y boca | Agujeros nuevos, volteadas, dobladas |
+| 3 | No tener geometría no-manifold | Topología de S6 |
+| 4 | Pegarse al original, sin saltar de capa en dedos y axilas | Error de forma |
+| 5 | Conservar las piezas finas (unas 3 aristas a lo ancho, por calibrar) | Error máximo; falta medirlo por pieza |
+| 6 | Marcar los cantos duros | Falta medirlo: cantos conservados |
+| 7 | Poner densidad según el detalle, sin saltos bruscos | Saltos de tamaño |
+| 8 | Cerrar los anillos en tubos, sin espirales | % en loops cerrados; falta medirlo: anillos por tubo |
+| 9 | Tener solo los polos necesarios | Polos frente a Maya |
+| 10 | Dejar los polos fuera de cara, articulaciones y silueta | Falta medirlo: % de polos en zonas caras |
+| 11 | Tener quads parejos | Quads deformados |
+| 12 | Animación: unos 3 loops por articulación (por calibrar), loops en ojos y boca, simetría | Falta medirlo |
+| 13 | Acercarse al número de caras pedido | Caras frente a objetivo |
+| 14 | Dar siempre el mismo resultado con la misma malla | Huella del resultado |
+
+Los números 8, 9 y 10, junto con el 11, son los que separan una malla correcta de una buena: tienen prioridad cuando haya que elegir. Antes de la fase 2 hay que añadir al juez lo que falta medir.
+
+## Qué se rehace y qué se queda
+
+Se rehace de cero todo el motor. No se usa nada de QuadriFlow, Instant Meshes ni de `best_retopo`. `mbl_core` ya está escrito desde cero y es la base.
+
+Se quedan solo para medir: `tests/bench.py`, `baseline.json` y los jueces. El motor actual y Maya siguen en el plugin hasta que el nuevo los supere en el banco; no se borran antes.
+
 ## Decisiones ya tomadas
 
 - Todo el núcleo es código nuestro en C++. Nada de programas externos en el plugin; lo abierto con licencia MIT/BSD se puede integrar con crédito. Nada GPL.

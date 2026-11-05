@@ -3,6 +3,12 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.4 (5 de noviembre de 2026)
+
+- **UVs:** ya no fallan con mallas que tienen caras sin UVs (fallo de la 1.0.3).
+- **UVs:** las pocas caras que seguían solapadas tras los intentos se separan en islas propias; prop y midnight ya salen en verde.
+- Verificada con las suites completas y el banco de 5 modelos a 5.000 caras, que faltaban en la 1.0.3.
+
 ## 1.0.3 (4 de noviembre de 2026)
 
 - **Crash con mallas densas:** Unfold3D rompía Maya al pedirle que partiera islas (comprobado con 60.000 caras). El plugin ya no se lo pide.

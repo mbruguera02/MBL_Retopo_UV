@@ -967,6 +967,8 @@ REFINE_ROUNDS = 5
 REFINE_TARGET = 5.0
 # por debajo de esta área en UV una isla está aplastada
 COLLAPSED_AREA = 1e-10
+# hasta cuántas caras solapadas se separan una a una al acabar los intentos
+OVERLAP_LAST_RESORT = 200
 
 
 def split_limiting_islands(transform, settings, graph, seams):
@@ -1010,7 +1012,9 @@ def seed_charts(transform, faces=None):
     counts, vertices = fn.getVertices()
     uv_counts, uv_ids = fn.getAssignedUVs()
     positions = np.zeros((fn.numUVs(), 3))
-    positions[np.asarray(uv_ids, dtype=np.int64)] = points[np.asarray(vertices, dtype=np.int64)]
+    # una cara sin UVs (degenerada: la proyección la salta) no tiene esquinas en uv_ids
+    mapped = np.repeat(np.asarray(uv_counts) == np.asarray(counts), np.asarray(counts))
+    positions[np.asarray(uv_ids, dtype=np.int64)] = points[np.asarray(vertices, dtype=np.int64)[mapped]]
     uv_faces, start = [], 0
     uv_ids = list(uv_ids)
     for count in uv_counts:
@@ -1220,7 +1224,18 @@ def _unwrap(transform, settings, log, tick):
             faces = sorted(set(flat_indices(region)) | set(_collapsed_faces(mesh)))
             seed_charts(mesh, faces)
             unfold(mesh, components(mesh, "f", faces))
+        separate_stuck(mesh)
         return None
+
+    def separate_stuck(mesh=transform):
+        """Lo poco que sigue pisándose (siempre las mismas caras): cada cara aparte, sin solapes."""
+        bad = overlapping_faces(mesh)
+        if bad and len(bad) <= OVERLAP_LAST_RESORT:
+            faces = components(mesh, "f", bad)
+            cmds.polyMapCut(cmds.polyListComponentConversion(faces, toEdge=True), constructionHistory=True)
+            seed_charts(mesh, bad)
+            unfold(mesh, faces)
+            log("{}: {} caras que seguían solapadas separadas en islas propias.".format(name, len(bad)))
 
     # solapes ya medidos sin cambios posteriores (evita repetir polyUVOverlap)
     known_overlaps = unfold_and_split()
@@ -1275,6 +1290,9 @@ def _unwrap(transform, settings, log, tick):
         straightened = straighten_islands(transform, log)
         if straightened:
             known_overlaps = None
+            # enderezar mira el estiramiento, no los solapes
+            if automatic:
+                separate_stuck()
     if settings.get("uv_straight_islands", True):
         turned = orient_upright(transform)
         if turned:

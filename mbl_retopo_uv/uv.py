@@ -491,6 +491,42 @@ def orient_upright(transform):
     return turned
 
 
+def align_islands_to_loops(transform):
+    """Gira cada isla lo justo (menos de 45°) para que sus loops vayan rectos en U y V: la cuadrícula se ve ordenada y las
+    islas encajan mejor. Devuelve cuántas se giraron."""
+    fn = _mesh_fn(transform)
+    if fn.numUVs() == 0:
+        return 0
+    count, shell_ids = fn.getUvShellsIds()
+    shells = np.asarray(shell_ids, dtype=np.int64)
+    us, vs = fn.getUVs()
+    us, vs = np.asarray(us), np.asarray(vs)
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    counts, ids = np.asarray(uv_counts, dtype=np.int64), np.asarray(uv_ids, dtype=np.int64)
+    first = np.repeat(np.cumsum(counts) - counts, counts)
+    following = ids[first + (np.arange(len(ids)) - first + 1) % np.repeat(counts, counts)]
+    du, dv = us[following] - us[ids], vs[following] - vs[ids]
+    length = np.hypot(du, dv)
+    angle = np.arctan2(dv, du)
+    # cuatro veces el ángulo: una arista en U y otra en V cuentan como la misma dirección
+    owner = shells[ids]
+    real = np.bincount(owner, weights=length * np.cos(4.0 * angle), minlength=count)
+    imag = np.bincount(owner, weights=length * np.sin(4.0 * angle), minlength=count)
+    total = np.bincount(owner, weights=length, minlength=count)
+    order = np.hypot(real, imag) / np.maximum(total, 1e-30)
+    turns = -np.degrees(np.arctan2(imag, real)) / 4.0
+    by_shell = {}
+    for uv_index, shell in enumerate(shell_ids):
+        by_shell.setdefault(shell, []).append(uv_index)
+    turned = 0
+    for shell in np.nonzero((order >= ALIGN_MIN_ORDER) & (np.abs(turns) >= 0.5))[0].tolist():
+        uvs = components(transform, "map", by_shell[shell])
+        (umin, umax), (vmin, vmax) = cmds.polyEvaluate(uvs, boundingBoxComponent2d=True)
+        cmds.polyEditUV(uvs, pivotU=(umin + umax) * 0.5, pivotV=(vmin + vmax) * 0.5, angle=float(turns[shell]))
+        turned += 1
+    return turned
+
+
 def straighten_islands(transform, log=default_log):
     """Endereza las islas que son tubos cortados a lo largo (brazos, piernas, dedos, cables, colas): las dos orillas de
     cada corte pasan a ser paralelas y de la misma longitud, y el dibujo de una textura (vetas, rayones) sigue la misma
@@ -962,13 +998,18 @@ def symmetric_seams(transform, graph=None):
     return True
 
 
-# rondas de partir las islas que siguen estirando, y % de caras > 1,5x con el que ya se para
-REFINE_ROUNDS = 5
-REFINE_TARGET = 5.0
+# rondas de partir las islas que siguen estirando, y % de caras > 1,5x con el que ya se para: un poco de estiramiento se
+# acepta a cambio de islas grandes y pocos cortes (5 % dejaba un águila en decenas de trozos)
+REFINE_ROUNDS = 3
+REFINE_TARGET = 10.0
 # por debajo de esta área en UV una isla está aplastada
 COLLAPSED_AREA = 1e-10
-# hasta cuántas caras solapadas se separan una a una al acabar los intentos
+# hasta cuántas caras solapadas se separan al acabar los intentos
 OVERLAP_LAST_RESORT = 200
+# por debajo de esta fracción del área total una isla se cose a su vecina, si la pieza no va suelta
+SMALL_ISLAND = 0.003
+# los loops de una isla solo se alinean con los ejes si van más o menos en una dirección (0 = sin orden, 1 = rejilla)
+ALIGN_MIN_ORDER = 0.3
 
 
 def split_limiting_islands(transform, settings, graph, seams):
@@ -1214,25 +1255,32 @@ def _unwrap(transform, settings, log, tick):
             if not automatic:
                 return None
             bad = overlapping_faces(mesh)
-            region = split_overlaps(mesh, bad) if bad else None
-            if not region:
-                return len(bad)
-            log("{}: {} caras solapadas, se separan en una isla nueva (intento {}).".format(
-                name, len(bad), attempt + 1))
-            # de cero, sin caras invertidas: lo que se pisaba (y los restos que el corte deja sin área) no se arregla
-            # desplegando desde como estaba
-            faces = sorted(set(flat_indices(region)) | set(_collapsed_faces(mesh)))
+            if not bad:
+                return 0
+            # la isla que se pisa se parte en dos partes grandes: pelarle solo lo que se pisa dejaba decenas de micro islas
+            from .uv_seams import split_charts_in_two
+            current = set(uv_seam_edges(mesh, seam_graph()))
+            wanted, faces = split_charts_in_two(seam_graph(), current, bad)
+            if not faces:
+                break
+            log("{}: {} caras solapadas, se parte la isla (intento {}).".format(name, len(bad), attempt + 1))
+            _swap_seams(mesh, current, wanted)
             seed_charts(mesh, faces)
             unfold(mesh, components(mesh, "f", faces))
         separate_stuck(mesh)
         return None
 
     def separate_stuck(mesh=transform):
-        """Lo poco que sigue pisándose (siempre las mismas caras): cada cara aparte, sin solapes."""
-        bad = overlapping_faces(mesh)
-        if bad and len(bad) <= OVERLAP_LAST_RESORT:
+        """Lo poco que sigue pisándose (siempre las mismas caras) va aparte: primero las zonas enteras, para no dejar islas
+        de una cara, y cara a cara solo si aun así se pisan."""
+        for border in (True, False):
+            bad = overlapping_faces(mesh)
+            if not bad or len(bad) > OVERLAP_LAST_RESORT:
+                return
             faces = components(mesh, "f", bad)
-            cmds.polyMapCut(cmds.polyListComponentConversion(faces, toEdge=True), constructionHistory=True)
+            cut = cmds.polyListComponentConversion(faces, toEdge=True, border=border)
+            if cut:
+                cmds.polyMapCut(cut, constructionHistory=True)
             seed_charts(mesh, bad)
             unfold(mesh, faces)
             log("{}: {} caras que seguían solapadas separadas en islas propias.".format(name, len(bad)))
@@ -1277,6 +1325,22 @@ def _unwrap(transform, settings, log, tick):
                 seed_charts(transform, faces)
                 known_overlaps = unfold_and_split(transform, components(transform, "f", faces))
 
+    if automatic and settings["uv_auto_seams"] and settings["uv_split_shells"] > 0 and not hidden:
+        # los restos pequeños que han quedado se cosen a su vecina
+        from .uv_seams import clean_small_cuts
+        current = set(uv_seam_edges(transform, seam_graph()))
+        wanted, slits, merged = clean_small_cuts(seam_graph(), current, SMALL_ISLAND)
+        if symmetric:
+            wanted = set(symmetrize_seams(transform, wanted, seam_graph()) or wanted)
+        if wanted != current:
+            _swap_seams(transform, current, wanted)
+            chart, _count = seam_graph().charts(wanted)
+            touched = [f for e in current ^ wanted for f in seam_graph().edge_f[e]]
+            faces = np.nonzero(np.isin(chart, np.unique(chart[touched])))[0].tolist()
+            seed_charts(transform, faces)
+            known_overlaps = unfold_and_split(transform, components(transform, "f", faces))
+            log("{}: micro cortes quitados: {} cortes en punta y {} islas pequeñas cosidas a su vecina.".format(
+                name, slits, merged))
     collapsed = _collapsed_faces(transform)
     if collapsed:
         seed_charts(transform, collapsed)
@@ -1297,6 +1361,9 @@ def _unwrap(transform, settings, log, tick):
         turned = orient_upright(transform)
         if turned:
             log("{}: {} isla(s) puestas de pie (el arriba del modelo, arriba en la textura).".format(name, turned))
+        aligned = align_islands_to_loops(transform)
+        if aligned:
+            log("{}: {} isla(s) con sus loops alineados a los ejes de la textura.".format(name, aligned))
     if settings["uv_udim"]:
         tiles = layout_udim(transform, settings, log)
         log("{}: layout en {} UDIM(s).".format(name, tiles))

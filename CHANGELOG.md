@@ -3,6 +3,12 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.5 (5 de noviembre de 2026)
+
+- **Menos micro cortes:** una isla que se pisa se parte en dos trozos grandes en vez de pelarle lo que se pisa, se parten menos las islas, los restos pequeños se cosen a su vecina y se quitan los cortes en punta muy cortos. Se acepta algo más de estiramiento a cambio.
+- **Cuadrícula ordenada:** cada isla se gira para que sus loops vayan lo más rectos posible en U y V.
+- **Cortes más limpios:** las costuras siguen mejor los loops. Si el flujo de la malla no es limpio, los bordes siguen teniendo algo de dientes.
+
 ## 1.0.4 (5 de noviembre de 2026)
 
 - **UVs:** ya no fallan con mallas que tienen caras sin UVs (fallo de la 1.0.3).

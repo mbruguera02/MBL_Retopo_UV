@@ -27,7 +27,7 @@ Los números 8, 9 y 10, junto con el 11, son los que separan una malla correcta 
 
 ## Referencia: la malla del artista
 
-`human.obj` es la mejor retopología disponible. Medida el 5 de noviembre, frente al banco a unas 5.000 caras:
+`human.obj` es la referencia de cómo debe quedar un humano. **El objetivo es llegar a ella, a sus 14.930 caras, sin bajar el listón a una malla más ligera.** Medida el 5 de noviembre, frente al banco a unas 5.000 caras:
 
 | Malla | Caras | Polos | Polos por 100 caras | Aristas en loops cerrados |
 |---|---|---|---|---|
@@ -40,6 +40,12 @@ Conclusiones, con la cautela de que las densidades son distintas y el humano tie
 - **Contar polos no basta:** el artista tiene más por cara que Maya. Lo que importa es dónde están y a qué sirven. El requisito 10 pesa tanto como el 9.
 - **El % de loops cerrados tampoco basta:** Maya se acerca al artista en esa cifra. Hacen falta medidas por zona: anillos por tubo y loops en ojos, boca y articulaciones.
 - Falta medir el artista con las mismas medidas que el juez, y etiquetar dónde caen sus polos: dice cómo debe ser el resultado.
+
+Cómo se usa en la prueba:
+
+- **La entrada no puede ser la propia malla del artista:** sus aristas ya llevan el flujo y el resultado estaría regalado. Se prueba con una versión que lo borre (subdividida, triangulada y reducida o rehecha sin seguir sus aristas), y lo mismo con cualquier original de alta resolución si aparece.
+- **Prueba de humano:** 15.000 caras pedidas. Se compara con el artista: polos (cuántos y a qué distancia de los suyos), anillos por tubo, loops en ojos, boca y articulaciones, y parches.
+- **Es la referencia de los humanos, no de todo:** para no ajustar el motor solo a esta malla, el resto del banco se juzga con los requisitos generales.
 
 ## Aberturas y guías
 
@@ -72,9 +78,9 @@ Se quedan solo para medir: `tests/bench.py`, `baseline.json` y los jueces. El mo
   - **Otro:** una IA reconoce qué es cada parte. Va después y como módulo opcional fuera del núcleo. Antes de empezarlo hay que decidir de dónde sale el modelo y con qué licencia, cuánto ocupa y si corre en un PC normal sin invadirlo.
   - Ninguno de los dos cambia el núcleo: ambos acaban en las mismas restricciones de S1 (guías, zonas, sin polos).
 
-## Pendiente de confirmar
+## S4-S6: por parches (decidido)
 
-**Vía de S4-S6: se propone por parches** (trazar el campo, dividir la superficie en parches de cuatro lados, repartir enteros, rellenar con rejillas).
+Decisión del 5 de noviembre: trazar el campo, dividir la superficie en parches de cuatro lados, repartir enteros y rellenar con rejillas.
 
 | | Por parches (propuesta) | Red global (tipo QuadCover + QEx) |
 |---|---|---|
@@ -109,7 +115,7 @@ Hecho en `engine/mbl_core/core.cpp`: S0 sin reducción, S1 (cantos, bordes, sime
 
 Medido en humano (29.790 triángulos): 0,12 s y 19 MB. Simetría en X detectada (99,95 %).
 
-**Problema abierto: demasiados polos en el campo.** Referencia del banco a unas 5.000 caras: Maya 174, Motor MBL 166.
+**Polos del campo, aún sin medir contra la referencia.** Estas cifras son del humano con 5.000 caras pedidas (Maya 174, Motor MBL 166), y a esa densidad sobran. A 15.000 caras el artista tiene 1.160, así que la cifra de partida no es alarmante por sí sola: falta ver si están en los sitios buenos.
 
 | Malla de entrada al campo | Polos |
 |---|---|
@@ -119,13 +125,13 @@ Medido en humano (29.790 triángulos): 0,12 s y 19 MB. Simetría en X detectada 
 | Reducido a 10.000 triángulos, 80° | 287 |
 | Reducido a 5.000 triángulos, 80° | 230 |
 
-Conclusiones: los cantos no son la causa principal, y reducir ayuda pero no basta. Falta probar: suavizar la geometría que ve el campo, eliminar pares de polos +/- cercanos, y medir aparte las piezas pequeñas (ojos, dientes: el humano tiene 16). Los polos del campo no son aún los de la malla final: la cifra que decide es la de S6.
+Conclusiones: los cantos no son la causa principal, y reducir ayuda pero no basta. Si sobran o están mal puestos, falta probar: suavizar la geometría que ve el campo, eliminar pares de polos +/- cercanos, y medir aparte las piezas pequeñas (ojos, dientes: el humano tiene 16). Ojo: estas mallas de entrada conservan el flujo del artista, y los polos del campo no son aún los de la malla final: la cifra que decide es la de S6, con la entrada sin flujo.
 
 ## Fases
 
 Cada fase acaba en algo que se puede medir. **Primero una vertical simple de punta a punta** y luego se mejora cada etapa: así hay quads cuanto antes y el riesgo de S4 se ve pronto.
 
-1. **Reducción nativa y polos.** Integrar `engine/mbl_decimate` en el núcleo; bajar los polos. *Listo si:* humano a 5.000 caras con ≤ 250 polos en el campo, en menos de 1 s.
+1. **Referencia y campo.** Medir el artista: juez, polos por zonas y, trazando desde sus polos, en cuántos parches queda dividido. Crear la entrada sin flujo. Integrar `engine/mbl_decimate` en el núcleo. *Listo si:* humano a 15.000 caras con un nº de polos del orden del artista (sin pasar de 1.160) y cerca de los suyos, y el trazado da un nº de parches del orden del suyo.
 2. **Vertical sobre mallas fáciles.** S4-S6 mínimos con enteros simples. *Listo si:* cubo, esfera y toro salen 100 % quads, sin agujeros, y el toro con todos sus anillos cerrados.
 3. **Modelos reales.** Trazado robusto y enteros globales. *Listo si:* los 5 modelos del banco salen sin agujeros ni caras volteadas. Aquí se decide si la vía de parches se queda.
 4. **Calidad.** S2 por zonas, S7 y S8. *Listo si:* fealdad ≤ Maya y anillos cerrados ≥ Maya en humano y criatura, a ≤ 2 veces el tiempo de Maya.

@@ -25,6 +25,32 @@ El motor se hace de cero para cumplir esto. Público: texturizado, animación y 
 
 Los números 8, 9 y 10, junto con el 11, son los que separan una malla correcta de una buena: tienen prioridad cuando haya que elegir. Antes de la fase 2 hay que añadir al juez lo que falta medir.
 
+## Referencia: la malla del artista
+
+`human.obj` es la mejor retopología disponible. Medida el 5 de noviembre, frente al banco a unas 5.000 caras:
+
+| Malla | Caras | Polos | Polos por 100 caras | Aristas en loops cerrados |
+|---|---|---|---|---|
+| Artista (`human.obj`) | 14.930 (70 triángulos) | 1.160 | 7,8 | 20,6 % |
+| Maya | 5.095 | 174 | 3,4 | 18,6 % |
+| Motor MBL actual | 4.667 | 166 | 3,6 | 10,3 % |
+
+Conclusiones, con la cautela de que las densidades son distintas y el humano tiene 16 piezas:
+
+- **Contar polos no basta:** el artista tiene más por cara que Maya. Lo que importa es dónde están y a qué sirven. El requisito 10 pesa tanto como el 9.
+- **El % de loops cerrados tampoco basta:** Maya se acerca al artista en esa cifra. Hacen falta medidas por zona: anillos por tubo y loops en ojos, boca y articulaciones.
+- Falta medir el artista con las mismas medidas que el juez, y etiquetar dónde caen sus polos: dice cómo debe ser el resultado.
+
+## Aberturas y guías
+
+- **Aberturas:** por defecto se conserva todo lo que sea borde. Opción "cerrar agujeros pequeños", apagada por defecto.
+- **Guías del usuario:** puntos que dicen qué es boca, ojos o articulaciones, con una experiencia parecida al Quick Rig de Maya (colocar puntos sobre el modelo, con simetría). Es la entrada del modo Humano.
+- **Las mismas guías sirven para probar:** marcar los modelos del banco es lo mismo que usar la herramienta. El formato se define pronto, con el análisis; la herramienta en la ventana llega con la fase 5. Hasta entonces, localizadores de Maya con nombre (`boca`, `ojo_L`, `codo_R`...).
+
+## Modelos de prueba
+
+Van en `Desktop/geo`, sin subirlos al repositorio, con una línea cada uno en `tests/bench_models.json`. Objetivo: 10-20 modelos con humanos, escaneos sucios, mallas de IA, dedos que se tocan, ropa con capas y piezas muy finas.
+
 ## Qué se rehace y qué se queda
 
 Se rehace de cero todo el motor. No se usa nada de QuadriFlow, Instant Meshes ni de `best_retopo`. `mbl_core` ya está escrito desde cero y es la base.

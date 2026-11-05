@@ -67,8 +67,8 @@ DEFAULTS = {
     "retopo_relax": 10,
     # UVs
     "uv_respect_existing": True,
-    # 180 = sin cortes por ángulo: en orgánicos funciona mejor dejar las costuras a Unfold3D
-    # (águila de prueba: 80° -> 290 islas y 84 caras solapadas; 180° -> 1 isla)
+    # 180 = sin cortes por ángulo. Medido a 90° con cadenas largas (uv._long_chains): criatura pasa a 15 % de caras > 1,5x,
+    # midnight a 20.000 caras a 99 islas y se pierde la simetría de las costuras: no compensa por defecto
     "uv_seam_angle": 180.0,
     "uv_auto_seams": True,
     "uv_cut_pipes": True,

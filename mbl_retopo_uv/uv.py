@@ -116,6 +116,35 @@ def hard_angle_edges(transform, threshold_degrees):
     return result
 
 
+# una cadena de aristas con ángulo agudo solo es un canto si mide al menos esta fracción de la diagonal del modelo
+HARD_CHAIN_MIN = 0.05
+
+
+def _long_chains(transform, edges):
+    """De `edges`, las que forman cadenas largas. Las cortas son detalle o ruido: en un águila, cortar por todo ángulo de
+    80° daba 290 islas."""
+    if not edges:
+        return []
+    fn = _mesh_fn(transform)
+    points = np.array([(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)])
+    ends = [fn.getEdgeVertices(e) for e in edges]
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for a, b in ends:
+        parent[find(a)] = find(b)
+    lengths = {}
+    for a, b in ends:
+        root = find(a)
+        lengths[root] = lengths.get(root, 0.0) + float(np.linalg.norm(points[a] - points[b]))
+    limit = HARD_CHAIN_MIN * float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
+    return [e for e, (a, b) in zip(edges, ends) if lengths[find(a)] >= limit]
+
+
 def material_edges(transform):
     """Aristas entre caras con materiales (shadingEngine) distintos. Vacío si la malla tiene un solo material.
 
@@ -548,7 +577,9 @@ def straighten_islands(transform, log=default_log):
         start += count
         uv_start += uv_count
     new, done = uv_straighten.straighten(points, faces, np.column_stack([us, vs]), uv_faces)
-    if not done:
+    # como Follow Active Quads o Straighten UV a mano, pero solo donde la isla es una rejilla sin polos
+    new, grids = uv_straighten.rectify_grids(points, faces, new, uv_faces)
+    if not done and not grids:
         return 0
     # las UVs de una malla con historial no se pueden escribir directamente: se escriben en una copia y se pasan
     copy = cmds.ls(cmds.duplicate(transform, name="mblStraightenTry")[0], long=True)[0]
@@ -557,12 +588,15 @@ def straighten_islands(transform, log=default_log):
         cmds.polyTransfer(transform, uvSets=True, vertices=False, vertexColor=False, alternateObject=copy)
     finally:
         cmds.delete(copy)
-    total = sum(d["length"] for d in done) or 1.0
-    log("{}: {} isla(s) enderezadas (tubos cortados a lo largo): las orillas del corte casan {:.0f}% -> {:.0f}% "
-        "de su longitud, sin estirar más.".format(
-            short_name(transform), len(done), sum(d["matched"][0] * d["length"] for d in done) / total,
-            sum(d["matched"][1] * d["length"] for d in done) / total))
-    return len(done)
+    if done:
+        total = sum(d["length"] for d in done) or 1.0
+        log("{}: {} isla(s) enderezadas (tubos cortados a lo largo): las orillas del corte casan {:.0f}% -> {:.0f}% "
+            "de su longitud, sin estirar más.".format(
+                short_name(transform), len(done), sum(d["matched"][0] * d["length"] for d in done) / total,
+                sum(d["matched"][1] * d["length"] for d in done) / total))
+    if grids:
+        log("{}: {} isla(s) sin polos enderezadas como una cuadrícula recta.".format(short_name(transform), grids))
+    return len(done) + grids
 
 
 def _mesh_arrays(transform):
@@ -1152,8 +1186,23 @@ def _restore_uvs(transform, backup, transforms_before, log):
             "Deshaz con Ctrl+Z.".format(name, exc), "error")
 
 
+def _warn_before_unwrap(transform, log):
+    """Lo que estropea un despliegue sin dar error: escala sin aplicar y n-gons."""
+    name = short_name(transform)
+    scale = cmds.getAttr(transform + ".scale")[0]
+    if max(scale) - min(scale) > 1e-3:
+        log("{}: la escala no es uniforme ({:.3g}, {:.3g}, {:.3g}). Pulsa 'Limpiar' para aplicarla: las UVs pueden salir "
+            "deformadas.".format(name, *scale), "warning")
+    counts, _ = _mesh_fn(transform).getVertices()
+    ngons = sum(1 for count in counts if count > 4)
+    if ngons:
+        log("{}: {} n-gons (caras de más de 4 lados). Pueden romper el desplegado en zonas curvas.".format(name, ngons),
+            "warning")
+
+
 def _unwrap(transform, settings, log, tick):
     name = short_name(transform)
+    _warn_before_unwrap(transform, log)
     map_size = int(settings["uv_map_size"])
     pad = config.padding_px(settings)
 
@@ -1176,6 +1225,7 @@ def _unwrap(transform, settings, log, tick):
         log("{}: se respetan las {} costuras que ya tiene la malla.".format(name, len(existing)))
     else:
         hard = hard_angle_edges(transform, settings["uv_seam_angle"]) if settings["uv_seam_angle"] < 180 else []
+        hard = _long_chains(transform, hard)
         seed_uvs(transform, sorted(set(hard) | set(materials)))
         log("{}: {} costuras por ángulo (>= {:g}°).".format(name, len(hard), settings["uv_seam_angle"]))
         if materials:
@@ -1355,7 +1405,10 @@ def _unwrap(transform, settings, log, tick):
         if straightened:
             known_overlaps = None
             # enderezar mira el estiramiento, no los solapes
+            # (antes de medirlo se empaqueta: una isla que ha cambiado de forma pisa a su vecina hasta que se recoloca, y eso
+            # no es un solape que haya que cortar)
             if automatic:
+                layout_0_1(transform, quick_layout)
                 separate_stuck()
     if settings.get("uv_straight_islands", True):
         turned = orient_upright(transform)
@@ -1382,6 +1435,11 @@ def _unwrap(transform, settings, log, tick):
     report = check(transform, udim=settings["uv_udim"], known_overlaps=known_overlaps)
     report["stretch"] = stretch(transform)
     density = texel_density(transform, map_size)
+    # la prueba del tablero: cuadrados que siguen siendo cuadrados (el estiramiento solo mira el área)
+    from . import status
+    _shape_mean, shape_bad = uv_quality.shape_stats(*status.uv_arrays(transform))
+    report["shape_bad_percent"] = shape_bad
+    log("{}: {:.1f}% del área con cuadrados deformados más de 1.5x.".format(name, shape_bad))
     log("{}: {} islas, densidad {:.2f} px/unidad a {} px, estiramiento medio {:.2f} ({:.1f}% de caras > 1.5x)."
         .format(name, report["shells"], density, map_size, report["stretch"]["mean"],
                 report["stretch"]["over_1_5_percent"]))

@@ -694,9 +694,9 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
             # sin ninguna variante terminada se estima lo que tardará con lo que ha tardado el motor (y ~50 % más de Python)
             if not can_start_variant(time.time() - start, durations or [1.5 * d for d in engine_durations], time_budget):
                 raise _OutOfTime("sin tiempo")
-            if not resources.wait_for_memory(job_bytes, _process_module.active_jobs, cancel):
-                raise MemoryLow("No hay memoria libre para otra variante ({:.1f} GB libres, hacen falta {:.1f} GB más el "
-                                "margen).".format((resources.available_memory() or 0) / 1024 ** 3, job_bytes / 1024 ** 3))
+            # si hay otras variantes en marcha se espera un poco a que suelten memoria, pero no se renuncia: sin
+            # memoria libre Windows tira de disco y la variante va más lenta, pero termina
+            resources.wait_for_memory(job_bytes, _process_module.active_jobs, cancel)
             hints = {}
             if engine == "quadriflow" and base_options.get("learn_request", LEARN_QUADRIFLOW_REQUEST):
                 if index == 0:
@@ -736,11 +736,11 @@ def best_retopo(points, faces, target_faces, engine, executable, variants=3, tim
     # cada variante gasta memoria por la malla reducida que ve el motor y, sobre todo, por las caras que se le piden
     allowed = resources.max_asked_faces(len(shared.tris))
     if allowed is not None and allowed < asked_max:
+        # no se niega: se avisa y se sigue (irá más lento si Windows tiene que tirar de disco)
         suggested = int(allowed // (QUADRIFLOW_MAX_REQUEST * max(factor for factor, _ in plan)))
-        raise MemoryLow("Con {:,} caras objetivo cada variante necesita unos {:.1f} GB de memoria y solo se pueden usar {:.1f} GB "
-                        "(la memoria libre menos el margen, sin pasar de la mitad de la total). Baja las caras objetivo a unas "
-                        "{:,} o cierra otros programas.".format(int(target_faces), job_bytes / 1024 ** 3,
-                                                                (resources.memory_budget() or 0) / 1024 ** 3, max(suggested, 0)))
+        log("aviso: con {:,} caras objetivo cada variante necesita unos {:.1f} GB y hay unos {:.1f} GB libres; puede ir lento. "
+            "Con unas {:,} caras o cerrando otros programas irá más rápido.".format(
+                int(target_faces), job_bytes / 1024 ** 3, (resources.memory_budget() or 0) / 1024 ** 3, max(suggested, 0)))
     workers = resources.safe_workers(len(shared.tris), workers, asked_faces=asked_max)
     log("{} variantes, {} a la vez (unos {:.1f} GB cada una)".format(len(plan), workers, job_bytes / 1024 ** 3))
     tried = []

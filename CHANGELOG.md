@@ -3,6 +3,10 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.9 (9 de noviembre de 2026)
+
+- **Sin limitador de RAM en ningún motor:** el Motor MBL ya no se para ni se niega por falta de memoria libre. Si va justo, avisa en el registro y sigue; irá más lento si Windows tiene que tirar de disco.
+
 ## 1.0.8 (9 de noviembre de 2026)
 
 - **Motor nativo sin limitador de RAM:** ya no se para por falta de memoria libre. Con Maya abierto y poca RAM, el freno saltaba antes de empezar y el retopo acababa hecho con Maya.

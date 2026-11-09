@@ -447,7 +447,13 @@ def retopo(transform, settings, log=default_log, tick=None):
     if engine == "mbl":
         return _mbl_retopo(transform, settings, log, tick)
     if engine == "nativo":
-        new, fixes = _native_engine(transform, settings, log, tick)
+        try:
+            new, fixes = _native_engine(transform, settings, log, tick)
+        except RetopoError as exc:
+            # en pruebas: si falla (o no está compilado para este sistema), el trabajo sale igual, con Maya
+            log("{}: el motor nativo no ha podido ({}); se hace con Maya.".format(
+                short_name(transform), str(exc).strip().splitlines()[0]), "warning")
+            return _classic_retopo(transform, dict(settings, retopo_engine="maya"), log, tick)
         # sus polos ya salen del campo, donde los pondría un artista: la limpieza de polos de los otros motores los
         # movía y metía algún triángulo (humano: 236 -> 241 polos y 2 triángulos), así que aquí no se usa
         return _finish(transform, new, fixes, ENGINES["nativo"], dict(settings, retopo_pole_cleanup=False), log, tick)
@@ -748,6 +754,7 @@ def _native_engine(transform, settings, log, tick):
         destination = os.path.join(temp_dir, "quads.obj")
         report_path = os.path.join(temp_dir, "report.json")
         prepared = _prepared_copy(transform, settings, log, tick)
+        source_border = border_points(prepared)
         _export_obj(prepared, source)
         target = int(settings["retopo_target_faces"])
         angle = float(settings["retopo_crease_angle"]) if settings["retopo_crease_angle"] > 0 else NATIVE_CREASE_ANGLE
@@ -766,9 +773,11 @@ def _native_engine(transform, settings, log, tick):
         except (OSError, ValueError):
             report = {}
         points, faces = read_obj(destination)
-        points, faces, repair = repair_topology(points, faces, 0.01, int(settings["retopo_fill_holes"]))
+        # sin rellenar agujeros aquí: las aberturas del modelo (ojos, boca) se conservan; solo se cierran los nuevos
+        points, faces, repair = repair_topology(points, faces, 0.01, 0)
         if not faces:
             raise RetopoError("El motor nativo no devolvió ninguna malla.")
+        points, faces, repair["holes"] = fill_new_holes(points, faces, source_border, int(settings["retopo_fill_holes"]))
         new = meshbuild.create_mesh(points, faces, name + "_retopo")
         if report:
             log("{}: motor nativo: {} quads, {} polos, {} parches ({} rellenados a la fuerza), {:.1f} s, {:.0f} MB.".format(
@@ -786,7 +795,7 @@ def _native_engine(transform, settings, log, tick):
     if repair["pieces"]:
         fixes.append("{} restos sueltos borrados".format(repair["pieces"]))
     if repair["holes"]:
-        fixes.append("{} agujeros rellenados".format(repair["holes"]))
+        fixes.append("{} agujeros nuevos cerrados".format(repair["holes"]))
     return new, fixes
 
 

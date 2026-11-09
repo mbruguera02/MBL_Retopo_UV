@@ -134,6 +134,12 @@ class RetopoUVWindow(QtWidgets.QDialog):
                            ("mbl", "Motor MBL (experimental)"), ("instant_meshes", "Instant Meshes"),
                            ("nativo", "Motor nativo (en pruebas)")):
             w["retopo_engine"].addItem(label, key)
+        if not config.find_mbl_core():
+            # sin el ejecutable (otro sistema, o sin compilar) la opción se ve pero no se puede elegir
+            item = w["retopo_engine"].model().item(w["retopo_engine"].findData("nativo"))
+            if item is not None:
+                item.setEnabled(False)
+                item.setToolTip("No está el motor nativo para este sistema (mbl_core).")
         w["retopo_engine"].setToolTip(
             "Maya (polyRetopo): recomendado. En las pruebas, 100% quads, muchos menos polos y menos error que Instant "
             "Meshes, y mejor calidad de malla que el Motor MBL. El más rápido de los buenos.\n"

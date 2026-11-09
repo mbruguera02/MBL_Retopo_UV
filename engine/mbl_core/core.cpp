@@ -2563,6 +2563,9 @@ static bool project_to_surface(const SurfaceGrid& grid, const Vec3& p, Vec3& out
 }
 
 static const int RELAX_ROUNDS = 8;
+static const int UNTANGLE_ROUNDS = 20;
+static int count_flipped(const SurfaceGrid& grid, const QuadMesh& quads, std::vector<int>* which,
+                         const std::vector<int>* subset = nullptr);
 
 static void relax_quads(const Mesh& mesh, QuadMesh& quads, double edge_length) {
     const size_t n = quads.points.size();
@@ -2609,6 +2612,76 @@ static void relax_quads(const Mesh& mesh, QuadMesh& quads, double edge_length) {
         }
         quads.points.swap(next);
     }
+    // desenredar: los quads que quedan al revés que la superficie (dedos, orejas: zonas finas) se alisan del todo,
+    // con sus vecinos, y se vuelven a pegar a la superficie
+    std::vector<int> flipped;
+    count_flipped(grid, quads, &flipped);
+    std::vector<std::vector<int>> vertex_quads(n);
+    for (int i = 0; i < static_cast<int>(quads.quads.size()); ++i)
+        for (int v : quads.quads[i]) vertex_quads[v].push_back(i);
+    for (int round = 0; round < UNTANGLE_ROUNDS && !flipped.empty(); ++round) {
+        std::vector<char> touch(n, 0);
+        for (int i : flipped)
+            for (int v : quads.quads[i]) {
+                touch[v] = 1;
+                for (int w : neighbors[v]) touch[w] = 1;
+            }
+        next = quads.points;
+        for (size_t v = 0; v < n; ++v) {
+            if (!touch[v] || frozen[v] || neighbors[v].empty()) continue;
+            Vec3 mean;
+            for (int w : neighbors[v]) mean = mean + quads.points[w];
+            mean = mean * (1.0 / neighbors[v].size());
+            Vec3 on;
+            next[v] = project_to_surface(grid, mean, on) ? on : mean;
+        }
+        quads.points.swap(next);
+        // solo se vuelve a mirar alrededor de lo que se ha movido
+        std::set<int> nearby;
+        for (size_t v = 0; v < n; ++v)
+            if (touch[v]) for (int i : vertex_quads[v]) nearby.insert(i);
+        std::vector<int> subset(nearby.begin(), nearby.end());
+        flipped.clear();
+        count_flipped(grid, quads, &flipped, &subset);
+    }
+}
+
+// quads cuya normal va al revés que la del triángulo de entrada más cercano (se sombrean al revés)
+static int count_flipped(const SurfaceGrid& grid, const QuadMesh& quads, std::vector<int>* which, const std::vector<int>* subset) {
+    const Mesh& surface = *grid.mesh;
+    int flipped = 0;
+    const size_t total = subset ? subset->size() : quads.quads.size();
+    for (size_t k = 0; k < total; ++k) {
+        const size_t i = subset ? static_cast<size_t>((*subset)[k]) : k;
+        const auto& q = quads.quads[i];
+        Vec3 c = (quads.points[q[0]] + quads.points[q[1]] + quads.points[q[2]] + quads.points[q[3]]) * 0.25;
+        Vec3 n = (quads.points[q[2]] - quads.points[q[0]]).cross(quads.points[q[3]] - quads.points[q[1]]);
+        int ci = static_cast<int>(std::floor((c.x - grid.low.x) / grid.cell));
+        int cj = static_cast<int>(std::floor((c.y - grid.low.y) / grid.cell));
+        int ck = static_cast<int>(std::floor((c.z - grid.low.z) / grid.cell));
+        double best = 1e300;
+        Vec3 normal;
+        for (int a = ci - 1; a <= ci + 1; ++a)
+            for (int b = cj - 1; b <= cj + 1; ++b)
+                for (int d = ck - 1; d <= ck + 1; ++d) {
+                    auto found = grid.cells.find(grid.key(a, b, d));
+                    if (found == grid.cells.end()) continue;
+                    for (int f : found->second) {
+                        const auto& tri = surface.tris[f];
+                        Vec3 on = closest_on_triangle(c, surface.points[tri[0]], surface.points[tri[1]], surface.points[tri[2]]);
+                        double dist = (on - c).dot(on - c);
+                        if (dist < best) {
+                            best = dist;
+                            normal = (surface.points[tri[1]] - surface.points[tri[0]]).cross(surface.points[tri[2]] - surface.points[tri[0]]);
+                        }
+                    }
+                }
+        if (best < 1e300 && n.dot(normal) < 0) {
+            ++flipped;
+            if (which) which->push_back(static_cast<int>(i));
+        }
+    }
+    return flipped;
 }
 
 struct QuadReport {
@@ -2834,6 +2907,14 @@ static int run(int argc, char** argv) {
     }
     if (!getenv("MBL_NO_RELAX")) relax_quads(decimated ? original : mesh, quads, quad_edge);
     QuadReport quad_report = inspect_quads(quads);
+    std::vector<int> flipped_list;
+    const int flipped_quads = count_flipped(surface_grid(decimated ? original : mesh, 1.5 * quad_edge), quads, &flipped_list);
+    if (getenv("MBL_CORE_DEBUG"))
+        for (int i : flipped_list) {
+            const auto& q = quads.quads[i];
+            Vec3 c = (quads.points[q[0]] + quads.points[q[1]] + quads.points[q[2]] + quads.points[q[3]]) * 0.25;
+            fprintf(stderr, "volteado %.4f %.4f %.4f\n", c.x, c.y, c.z);
+        }
 
     if (field_path && !write_field(field_path, mesh, z)) fprintf(stderr, "no se pudo escribir %s\n", field_path);
     if (poles_path) {
@@ -2897,6 +2978,7 @@ static int run(int argc, char** argv) {
     fprintf(out, "},\n \"quant_variables\": %d, \"quant_constraints\": %d, \"quant_violations\": %d, \"quant_solves\": %d, \"quant_error\": %.4f,\n",
             quant.variables, quant.constraints, quant.violations, quant.solves, quant.mean_error);
     fprintf(out, " \"collapsed_patches\": %d, \"dropped_quads\": %d, \"quant_repairs\": %d, \"forced_patches\": %d,\n", quads.patches_collapsed, quads.quads_dropped, quant.repairs, forced_patches);
+    fprintf(out, " \"flipped_quads\": %d,\n", flipped_quads);
     fprintf(out, " \"pillows_removed\": %d, \"doublets_merged\": %d, \"holes_filled\": %d,\n", quads.pillows_removed, quads.doublets_merged, quads.holes_filled);
     fprintf(out, " \"quads\": %d, \"quad_vertices\": %d, \"open_edges\": %d, \"quad_nonmanifold_edges\": %d, \"degenerate_quads\": %d, \"quad_poles\": %d, \"valence\": [",
             quad_report.quads, quad_report.vertices, quad_report.open_edges, quad_report.nonmanifold_edges, quad_report.degenerate, quad_report.poles);

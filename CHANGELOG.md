@@ -3,6 +3,10 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.8 (9 de noviembre de 2026)
+
+- **Motor nativo sin limitador de RAM:** ya no se para por falta de memoria libre. Con Maya abierto y poca RAM, el freno saltaba antes de empezar y el retopo acababa hecho con Maya.
+
 ## 1.0.7 (9 de noviembre de 2026)
 
 - **Motor nativo (en pruebas):** opción nueva de «Motor», hecha desde cero en C++. Traza los loops desde los polos del campo de direcciones y rellena cada parche con una rejilla. Los polos caen donde los pondría un artista, y pone más caras donde la superficie se curva (cara, manos) y menos en las zonas planas. Humano a 15.000 caras en unos 13 s. Si falla, el retopo se hace con Maya y se avisa. Aún puede dejar caras dobladas en piezas duras con cantos vivos.

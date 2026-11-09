@@ -3,6 +3,12 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.7 (9 de noviembre de 2026)
+
+- **Motor nativo (en pruebas):** opción nueva de «Motor», hecha desde cero en C++. Traza los loops desde los polos del campo de direcciones y rellena cada parche con una rejilla. Los polos caen donde los pondría un artista, y pone más caras donde la superficie se curva (cara, manos) y menos en las zonas planas. Humano a 15.000 caras en unos 13 s. Si falla, el retopo se hace con Maya y se avisa. Aún puede dejar caras dobladas en piezas duras con cantos vivos.
+- **UVs con el motor nativo:** las costuras van solo por los loops de la malla. Las islas salen como rectángulos de rejilla, con bordes rectos y sin escalones; en el humano, del 53 % al 62 % de la textura aprovechada.
+- Con el motor nativo se conservan las aberturas del modelo (ojos, boca): solo se cierran los agujeros que abre el retopo.
+
 ## 1.0.6 (5 de noviembre de 2026)
 
 - **Cortes por ángulo:** «Ángulo de costura» ya solo corta cadenas largas, sin migajas. Sigue apagado por defecto (180°): a 90° empeoraba criatura y midnight. Para piezas duras, bájalo a 90°.

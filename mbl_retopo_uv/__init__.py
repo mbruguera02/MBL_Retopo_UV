@@ -7,7 +7,7 @@ Uso rápido desde el Script Editor (Python):
     mbl_retopo_uv.show()
 """
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 
 def show():

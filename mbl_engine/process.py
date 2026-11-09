@@ -22,8 +22,10 @@ class _Stalled(Exception):
     pass
 
 
-# Los motores corren con prioridad baja (Maya y el sistema siguen fluidos) y se vigila la memoria libre mientras
-# trabajan: si baja de resources.MEMORY_CRITICAL_BYTES se detiene el proceso más nuevo, y si no queda otro, ese.
+# Los motores corren con prioridad baja (Maya y el sistema siguen fluidos). Freno por memoria libre: solo si quien
+# lanza el motor lo pide (memory_free_fn); entonces, si baja de resources.MEMORY_CRITICAL_BYTES se detiene el proceso
+# más nuevo. Apagado por defecto desde la 1.0.9: con Maya abierto y poca RAM libre paraba los motores sin dejar ni
+# probarlos (Marc, 9 nov); si falta memoria, Windows tira de disco y el motor va más lento, pero termina.
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 MEMORY_CHECK_SECONDS = 0.5
 
@@ -110,7 +112,7 @@ def _run_once(command, destination, timeout, log_path, tick=None, label="Instant
                 if tick:
                     tick()
                 now = time.time()
-                if now - last_memory_check >= MEMORY_CHECK_SECONDS:
+                if memory_free_fn is not None and now - last_memory_check >= MEMORY_CHECK_SECONDS:
                     last_memory_check = now
                     stop, free = _memory_must_stop(token, memory_free_fn)
                     if stop:

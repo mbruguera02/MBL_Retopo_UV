@@ -178,22 +178,27 @@ def test_memory_guard_stops_a_running_engine_without_hanging():
 
 
 @test
-def test_best_retopo_refuses_when_the_machine_cannot_hold_the_request():
+def test_best_retopo_warns_but_runs_when_memory_is_short():
+    """Desde la 1.0.9 no se niega por memoria (Marc no podía ni probarlo con Maya abierto): avisa y lanza el motor."""
     points, faces = sphere()
-    calls = []
+    calls, lines = [], []
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        raise EngineError("motor de prueba")
     saved = core._run_once, resources._memory_status
-    core._run_once = lambda *args, **kwargs: calls.append(args)
+    core._run_once = fake_run
     resources._memory_status = lambda: (int(3 * GB), int(15.7 * GB))     # 3 GB libres de 15,7
     try:
         try:
-            core.best_retopo(points, faces, 40000, "quadriflow", "no-existe.exe", variants=1, time_budget=30)
-        except MemoryLow as exc:
-            assert "Baja las caras objetivo" in str(exc), exc
-        else:
-            raise AssertionError("con 3 GB libres no se podían pedir 52.000 caras")
+            core.best_retopo(points, faces, 40000, "quadriflow", "no-existe.exe", variants=1, time_budget=30,
+                             log=lines.append)
+        except EngineError:
+            pass
     finally:
         core._run_once, resources._memory_status = saved
-    assert not calls, "se lanzó un motor aunque no cabía en memoria"
+    assert calls, "con poca memoria tenía que intentarlo igualmente"
+    assert any("puede ir lento" in line for line in lines), lines
 
 
 def main():

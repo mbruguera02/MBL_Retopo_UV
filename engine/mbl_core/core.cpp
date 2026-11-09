@@ -777,6 +777,7 @@ struct Tracer {
     std::vector<int> degree;  // aristas trazadas por vértice
     std::vector<int> head;    // línea viva cuya cabeza está en el vértice
     std::vector<char> fixed_edge;  // cantos y bordes: no se borran nunca
+    std::vector<char> extra_node;  // nodos añadidos a mano (mitad de un lado de un parche con solo tres)
     std::map<int, int> pole_quarters;
     int lines = 0;
 };
@@ -1073,6 +1074,47 @@ static std::string build_sides(const Tracer& tracer, const Layout& layout, Patch
     return side == 3 ? "" : "lados";
 }
 
+// un parche disco con solo tres nodos no puede tratarse como rectángulo: se le añade un nodo en el punto medio (por
+// longitud) del tramo de contorno más largo entre dos nodos
+static int add_fourth_nodes(Tracer& tracer, const Layout& layout) {
+    const Mesh& mesh = *tracer.mesh;
+    int added = 0;
+    for (const Patch& patch : layout.patches) {
+        if (patch.good || patch.loops.size() != 1 || patch.euler != 1) continue;
+        const auto& occs = patch.loops[0].occ;
+        const auto& halves = patch.loops[0].halves;
+        const int count = static_cast<int>(occs.size());
+        std::vector<int> nodes;
+        for (int i = 0; i < count; ++i) if (occs[i].node) nodes.push_back(i);
+        if (nodes.size() != 3) continue;
+        auto half_length = [&](int i) {
+            int t = halves[i] / 3, k = halves[i] % 3;
+            return (mesh.points[mesh.tris[t][(k + 1) % 3]] - mesh.points[mesh.tris[t][k]]).norm();
+        };
+        double best = -1;
+        int best_from = -1, best_to = -1;
+        for (int c = 0; c < 3; ++c) {
+            int from = nodes[c], to = nodes[(c + 1) % 3];
+            double length = 0;
+            for (int i = (from + 1) % count; ; i = (i + 1) % count) {
+                length += half_length(i);
+                if (i == to) break;
+            }
+            if (length > best) { best = length; best_from = from; best_to = to; }
+        }
+        double walked = 0;
+        for (int i = (best_from + 1) % count; i != best_to; i = (i + 1) % count) {
+            walked += half_length(i);
+            if (walked >= 0.5 * best) {
+                int v = occs[i].vertex;
+                if (tracer.degree[v] == 2 && !tracer.extra_node[v]) { tracer.extra_node[v] = 1; ++added; }
+                break;
+            }
+        }
+    }
+    return added;
+}
+
 // último recurso para un parche disco que no ha quedado bien tras partir y juntar: se trata como rectángulo con sus
 // cuatro nodos más cerrados como esquinas. El mapa de Tutte sigue sin pliegues aunque la forma sea en L o tenga cinco
 // esquinas; los quads quedan algo deformados ahí, pero no hay agujero.
@@ -1147,7 +1189,7 @@ static Layout build_layout(const Tracer& tracer, double radius) {
     std::vector<double> turn(n, PI);
     std::vector<int> candidates;
     for (size_t v = 0; v < n; ++v)
-        if (tracer.degree[v] > 0 && (tracer.degree[v] != 2 || tracer.pole_quarters.count(static_cast<int>(v)))) layout.node[v] = 1;
+        if (tracer.degree[v] > 0 && (tracer.degree[v] != 2 || tracer.pole_quarters.count(static_cast<int>(v)) || tracer.extra_node[v])) layout.node[v] = 1;
     for (size_t v = 0; v < n; ++v) {
         if (tracer.degree[v] != 2 || layout.node[v]) continue;
         int ends[2], found = 0;
@@ -2036,7 +2078,7 @@ struct QuadMesh {
     std::vector<Vec3> points;
     std::vector<char> pinned;  // sobre un canto o un borde: el relajado no lo mueve
     std::vector<std::array<int, 4>> quads;
-    int patches_filled = 0, patches_collapsed = 0, quads_dropped = 0, pillows_removed = 0, doublets_merged = 0;
+    int patches_filled = 0, patches_collapsed = 0, quads_dropped = 0, pillows_removed = 0, doublets_merged = 0, holes_filled = 0;
 };
 
 // limpieza tras colapsar tiras: almohadas (dos quads con los mismos vértices, uno encima del otro) fuera, y dobletes
@@ -2084,6 +2126,50 @@ static void clean_collapse(QuadMesh& out) {
         for (size_t i = 0; i < out.quads.size(); ++i) if (!removed[i]) kept.push_back(out.quads[i]);
         out.quads.swap(kept);
         out.doublets_merged += merged;
+    }
+}
+
+// red final: un agujero que no es borde de la entrada (sus vértices no están fijos), con un número par de lados y no
+// muy grande, se cierra con un vértice central y quads en abanico; el relajado lo coloca después
+static const int HOLE_MAX_SIDES = 12;
+
+static void fill_small_holes(QuadMesh& out) {
+    std::map<std::pair<int, int>, int> directed;
+    for (const auto& q : out.quads)
+        for (int k = 0; k < 4; ++k) ++directed[{q[k], q[(k + 1) % 4]}];
+    std::map<int, int> next;  // borde: a -> b con el quad a la izquierda
+    for (const auto& item : directed)
+        if (!directed.count({item.first.second, item.first.first})) next[item.first.first] = item.first.second;
+    std::set<int> used;
+    for (const auto& start : next) {
+        if (used.count(start.first)) continue;
+        std::vector<int> loop;
+        int at = start.first;
+        bool ok = true;
+        for (size_t guard = 0; guard <= next.size(); ++guard) {
+            loop.push_back(at);
+            used.insert(at);
+            auto found = next.find(at);
+            if (found == next.end()) { ok = false; break; }
+            at = found->second;
+            if (at == start.first) break;
+            if (used.count(at)) { ok = false; break; }
+        }
+        if (!ok || loop.size() < 4 || loop.size() % 2 || static_cast<int>(loop.size()) > HOLE_MAX_SIDES) continue;
+        int pinned = 0;
+        for (int v : loop) if (v < static_cast<int>(out.pinned.size()) && out.pinned[v]) ++pinned;
+        if (2 * pinned >= static_cast<int>(loop.size())) continue;  // borde de verdad de la entrada
+        Vec3 center;
+        for (int v : loop) center = center + out.points[v];
+        center = center * (1.0 / loop.size());
+        int c = static_cast<int>(out.points.size());
+        out.points.push_back(center);
+        out.pinned.push_back(0);
+        // el agujero se recorre al revés que el borde
+        std::vector<int> r(loop.rbegin(), loop.rend());
+        for (size_t i = 0; i + 1 < r.size(); i += 2)
+            out.quads.push_back({{r[i], r[i + 1], r[(i + 2) % r.size()], c}});
+        ++out.holes_filled;
     }
 }
 
@@ -2393,6 +2479,7 @@ static void fill_patches(const Tracer& tracer, const Layout& layout, QuadMesh& o
     out.points.swap(points);
     out.quads.swap(quads);
     clean_collapse(out);
+    fill_small_holes(out);
 }
 
 // ---------------------------------------------------------------- S7: relajado
@@ -2652,6 +2739,7 @@ static int run(int argc, char** argv) {
     tracer.degree.assign(n, 0);
     tracer.head.assign(n, -1);
     tracer.fixed_edge.assign(tracer.graph.ends.size(), 0);
+    tracer.extra_node.assign(n, 0);
     for (size_t t = 0; t < mesh.tris.size(); ++t)
         for (int k = 0; k < 3; ++k)
             if (analysis.feature_side[t * 3 + k] || mesh.across[t][k] < 0) {
@@ -2686,6 +2774,14 @@ static int run(int argc, char** argv) {
         else if (++stale >= 4) { ++rounds; break; }
     }
     if (prune_dangling(tracer) > 0) layout = build_layout(tracer, radius);
+    // remate: absorber lo diminuto otra vez y dar un cuarto nodo a los parches que solo tienen tres
+    for (int pass = 0; pass < 3 && layout.good < static_cast<int>(layout.patches.size()); ++pass) {
+        int changes = merge_bad_patches(tracer, layout, edge_length);
+        changes += add_fourth_nodes(tracer, layout);
+        if (!changes) break;
+        prune_dangling(tracer);
+        layout = build_layout(tracer, radius);
+    }
     const int forced_patches = getenv("MBL_NO_FORCE") ? 0 : force_four_corners(tracer, layout);
     double layout_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
@@ -2782,7 +2878,7 @@ static int run(int argc, char** argv) {
     fprintf(out, "},\n \"quant_variables\": %d, \"quant_constraints\": %d, \"quant_violations\": %d, \"quant_solves\": %d, \"quant_error\": %.4f,\n",
             quant.variables, quant.constraints, quant.violations, quant.solves, quant.mean_error);
     fprintf(out, " \"collapsed_patches\": %d, \"dropped_quads\": %d, \"quant_repairs\": %d, \"forced_patches\": %d,\n", quads.patches_collapsed, quads.quads_dropped, quant.repairs, forced_patches);
-    fprintf(out, " \"pillows_removed\": %d, \"doublets_merged\": %d,\n", quads.pillows_removed, quads.doublets_merged);
+    fprintf(out, " \"pillows_removed\": %d, \"doublets_merged\": %d, \"holes_filled\": %d,\n", quads.pillows_removed, quads.doublets_merged, quads.holes_filled);
     fprintf(out, " \"quads\": %d, \"quad_vertices\": %d, \"open_edges\": %d, \"quad_nonmanifold_edges\": %d, \"degenerate_quads\": %d, \"quad_poles\": %d, \"valence\": [",
             quad_report.quads, quad_report.vertices, quad_report.open_edges, quad_report.nonmanifold_edges, quad_report.degenerate, quad_report.poles);
     for (int k = 0; k < 9; ++k) fprintf(out, "%s%d", k ? ", " : "", quad_report.valence[k]);

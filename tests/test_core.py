@@ -80,6 +80,56 @@ def plane(n=30, bump=0.0):
     return points, faces
 
 
+
+def icosphere(levels=4):
+    """Esfera de triángulos regulares, como la de un escaneo o un esculpido."""
+    g = (1 + 5 ** 0.5) / 2
+    points = [(-1, g, 0), (1, g, 0), (-1, -g, 0), (1, -g, 0), (0, -1, g), (0, 1, g), (0, -1, -g), (0, 1, -g),
+              (g, 0, -1), (g, 0, 1), (-g, 0, -1), (-g, 0, 1)]
+    points = [tuple(c / math.sqrt(sum(x * x for x in p)) for c in p) for p in points]
+    faces = [(0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11), (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6),
+             (7, 1, 8), (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9), (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7),
+             (9, 8, 1)]
+    for _ in range(levels):
+        cache, new = {}, []
+
+        def middle(a, b):
+            key = (min(a, b), max(a, b))
+            if key not in cache:
+                p = [(x + y) / 2 for x, y in zip(points[a], points[b])]
+                n = math.sqrt(sum(x * x for x in p))
+                points.append(tuple(x / n for x in p))
+                cache[key] = len(points) - 1
+            return cache[key]
+        for a, b, c in faces:
+            ab, bc, ca = middle(a, b), middle(b, c), middle(c, a)
+            new += [(a, ab, ca), (b, bc, ab), (c, ca, bc), (ab, bc, ca)]
+        faces = new
+    return points, faces
+
+
+def run_quads(points, faces, target):
+    """Malla final de quads: (informe, caras de la malla final)."""
+    work = tempfile.mkdtemp(prefix="mblcore")
+    obj, out, quads = os.path.join(work, "m.obj"), os.path.join(work, "r.json"), os.path.join(work, "q.obj")
+    write_obj(obj, points, faces)
+    code = subprocess.call([EXE, obj, out, "--faces", str(target), "--quads", quads])
+    assert code == 0, code
+    with open(out) as handle:
+        report = json.load(handle)
+    with open(quads) as handle:
+        sizes = [len(line.split()) - 1 for line in handle if line.startswith("f ")]
+    return report, sizes
+
+
+def check_closed_quads(report, sizes, poles, target):
+    assert sizes and all(s == 4 for s in sizes), "no todo son quads"
+    assert report["open_edges"] == 0, "agujeros: %d aristas abiertas" % report["open_edges"]
+    assert report["quad_nonmanifold_edges"] == 0 and report["dropped_quads"] == 0
+    assert report["quad_poles"] == poles, "polos: %d, se esperaban %d" % (report["quad_poles"], poles)
+    assert 0.6 * target <= len(sizes) <= 1.5 * target, "%d caras para %d pedidas" % (len(sizes), target)
+
+
 def run(points, faces, *extra):
     work = tempfile.mkdtemp(prefix="mblcore")
     obj, out = os.path.join(work, "m.obj"), os.path.join(work, "r.json")
@@ -156,6 +206,29 @@ def test_stays_small():
     points, faces = torus(nu=100, nv=100)
     _, r = run(points, faces)
     assert r["triangles"] == 20000 and r["peak_memory_mb"] < 100 and r["seconds"] < 5, r
+
+
+
+def test_quads_box():
+    report, sizes = run_quads(*grid_box(12), target=300)
+    check_closed_quads(report, sizes, poles=8, target=300)
+
+
+def test_quads_torus():
+    report, sizes = run_quads(*torus(), target=600)
+    check_closed_quads(report, sizes, poles=0, target=600)
+
+
+def test_quads_sphere():
+    report, sizes = run_quads(*icosphere(4), target=600)
+    check_closed_quads(report, sizes, poles=8, target=600)
+    assert report["valence"][3] == 8, "una esfera lleva 8 polos de 3, como un cubo"
+
+
+def test_quads_open_plane():
+    report, sizes = run_quads(*plane(30), target=200)
+    assert all(s == 4 for s in sizes) and report["quad_poles"] == 0
+    assert report["open_edges"] == 4 * round(len(sizes) ** 0.5), "el borde de un plano es un cuadrado"
 
 
 if __name__ == "__main__":

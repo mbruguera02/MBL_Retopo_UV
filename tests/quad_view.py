@@ -96,7 +96,7 @@ def main():
     points, faces = read_obj(sys.argv[1])
     size = int(sys.argv[3]) if len(sys.argv) > 3 else 700
     yaws = [float(v) for v in sys.argv[4:]] or [0.0, 90.0, 180.0]
-    middle = points.mean(axis=0)
+    middle = (points.min(axis=0) + points.max(axis=0)) / 2
     span = np.ptp(points, axis=0).max()
     valence = np.zeros(len(points), int)
     edges = {}

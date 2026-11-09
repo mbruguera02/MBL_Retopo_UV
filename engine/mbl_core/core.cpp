@@ -1697,12 +1697,20 @@ struct QuantReport {
     double mean_error = 0;
 };
 
-static QuantReport quantize(Layout& layout, double edge_length) {
+static QuantReport quantize(Layout& layout, double edge_length, const Mesh& mesh, const std::vector<double>& size_scale) {
     QuantReport report;
     const int count = static_cast<int>(layout.segments.size());
     std::vector<double> target(count), weight(count);
     for (int s = 0; s < count; ++s) {
-        target[s] = std::max(layout.segments[s].length / edge_length, 0.05);
+        // aristas que caben en el tramo, con el tamaño local (más pequeño donde la superficie se curva)
+        const Segment& seg = layout.segments[s];
+        double divisions = 0;
+        for (size_t j = 0; j + 1 < seg.verts.size(); ++j) {
+            int a = seg.verts[j], b = seg.verts[j + 1];
+            double local = edge_length * (size_scale.empty() ? 1.0 : 0.5 * (size_scale[a] + size_scale[b]));
+            divisions += (mesh.points[b] - mesh.points[a]).norm() / local;
+        }
+        target[s] = std::max(divisions, 0.05);
         weight[s] = 1.0 / std::max(target[s], 0.5);
     }
     // filas: lado 0 - lado 2, lado 1 - lado 3 de cada parche bueno
@@ -1976,6 +1984,46 @@ static QuantReport quantize(Layout& layout, double edge_length) {
         }
     }
     return report;
+}
+
+// tamaño local de quad, como fracción del tamaño pedido: en un tubo de radio r, una arista de 0,785 r da 8 quads
+// alrededor, lo mínimo para que un dedo o un borde redondeado conserven la forma. La curvatura (suma de ángulo diedro por
+// longitud, sin los cantos) se suaviza para que las arrugas finas no cuenten, y se limita a 4 veces más denso. El ajuste
+// del total que viene después hace que lo que se añade en las zonas curvas se quite de las planas.
+static const double SIZE_AROUND = 0.785;   // 2π / 8
+static const double SIZE_MIN = 0.25;
+
+static std::vector<double> size_field(const Mesh& mesh, const Analysis& analysis, const EdgeGraph& graph, double edge_length) {
+    const size_t n = mesh.points.size();
+    std::vector<double> bend(n, 0.0), area(n, 0.0);
+    for (size_t t = 0; t < mesh.tris.size(); ++t) {
+        for (int v : mesh.tris[t]) area[v] += mesh.area[t] / 3.0;
+        for (int k = 0; k < 3; ++k) {
+            int other = mesh.across[t][k];
+            if (other < static_cast<int>(t) || analysis.feature_side[t * 3 + k]) continue;  // cada arista una vez, sin cantos
+            int a = mesh.tris[t][k], b = mesh.tris[t][(k + 1) % 3];
+            double length = (mesh.points[b] - mesh.points[a]).norm();
+            double angle = std::acos(std::max(-1.0, std::min(1.0, mesh.normal[t].dot(mesh.normal[other]))));
+            bend[a] += 0.5 * angle * length;
+            bend[b] += 0.5 * angle * length;
+        }
+    }
+    std::vector<double> curvature(n, 0.0), next(n);
+    for (size_t v = 0; v < n; ++v) curvature[v] = area[v] > 0 ? bend[v] / area[v] : 0.0;
+    // suavizado: unas cuantas medias con los vecinos (llega a unas pocas aristas finales)
+    const int rounds = std::max(4, std::min(60, static_cast<int>(std::lround(2.0 * edge_length / std::max(analysis.mean_edge, 1e-30)))));
+    for (int round = 0; round < rounds; ++round) {
+        for (size_t v = 0; v < n; ++v) {
+            double sum = curvature[v];
+            for (const auto& step : graph.around[v]) sum += curvature[step.first];
+            next[v] = sum / (1 + graph.around[v].size());
+        }
+        curvature.swap(next);
+    }
+    std::vector<double> scale(n, 1.0);
+    for (size_t v = 0; v < n; ++v)
+        if (curvature[v] > 0) scale[v] = std::max(SIZE_MIN, std::min(1.0, SIZE_AROUND / (curvature[v] * edge_length)));
+    return scale;
 }
 
 // ---------------------------------------------------------------- S6: relleno de cada parche con su rejilla
@@ -2646,7 +2694,18 @@ static int run(int argc, char** argv) {
     // vuelve a repartir (dos veces como mucho)
     const Layout before_quantize = layout;
     double quad_edge = edge_length;
-    QuantReport quant = quantize(layout, quad_edge);
+    std::vector<double> size_scale;
+    if (!getenv("MBL_UNIFORM")) {
+        size_scale = size_field(mesh, analysis, tracer.graph, edge_length);
+        // con el tamaño local, cuántas caras saldrían con la arista pedida: se corrige ya para acertar al primer reparto
+        double predicted = 0;
+        for (size_t f = 0; f < mesh.tris.size(); ++f) {
+            double s = (size_scale[mesh.tris[f][0]] + size_scale[mesh.tris[f][1]] + size_scale[mesh.tris[f][2]]) / 3.0;
+            predicted += mesh.area[f] / (edge_length * edge_length * s * s);
+        }
+        if (target_faces > 0 && predicted > 0) quad_edge = edge_length * std::sqrt(predicted / target_faces);
+    }
+    QuantReport quant = quantize(layout, quad_edge, mesh, size_scale);
     QuadMesh quads;
     fill_patches(tracer, layout, quads);
     for (int again = 0; again < 2 && target_faces > 0 && !quads.quads.empty(); ++again) {
@@ -2654,7 +2713,7 @@ static int run(int argc, char** argv) {
         if (ratio > 0.92 && ratio < 1.08) break;
         quad_edge *= std::sqrt(ratio);
         layout = before_quantize;
-        quant = quantize(layout, quad_edge);
+        quant = quantize(layout, quad_edge, mesh, size_scale);
         quads = QuadMesh();
         fill_patches(tracer, layout, quads);
     }

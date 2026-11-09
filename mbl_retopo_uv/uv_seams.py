@@ -1125,3 +1125,167 @@ def _optimize_seams(graph, seams, merge_area, passes, relocate, remove_exposed, 
     report["charts_after"] = graph.charts(seams)[1]
     report["cost_after"] = float(sum(graph.cost[e] for e in seams))
     return sorted(seams), report
+
+
+# ---------------------------------------------------------------- costuras por loops (mallas de quads limpias)
+#
+# En una malla de quads hecha por parches (el motor nativo), las líneas rectas que salen de cada polo son los loops que
+# la estructuran. Si las costuras solo pueden ir por ellas, los bordes de las islas son rectos y las islas salen como
+# rectángulos de rejilla, como en un mapa hecho a mano. Las líneas parten la malla en celdas; las celdas se juntan,
+# empezando por las que comparten más borde, mientras la isla siga siendo un disco y su curvatura total (lo que
+# obliga a estirar al aplanar) no pase del límite. Un tubo tiene curvatura cero: se queda en una pieza con un solo
+# corte a lo largo, que es lo que impide cerrarlo en anillo.
+
+LOOP_CURVATURE_LIMIT = 1.6      # radianes de curvatura total (suma de |defecto angular|) por isla
+LOOP_SMALL_FRACTION = 0.004     # islas con menos área que esto se juntan con su vecina aunque pasen del límite
+LOOP_MIN_QUADS = 0.9            # fracción de quads para usar este método
+LOOP_THIN = 0.012               # área / perímetro²: por debajo, una tira (1 x 20 quads o más) que se junta siempre
+
+
+def _loop_lines(graph):
+    """Aristas de las líneas rectas que salen de los polos (y de las esquinas del borde) hasta otro polo o un borde."""
+    valence = np.array([len(edges) for edges in graph.vertex_edges])
+    border_vertex = np.zeros(len(graph.points), dtype=bool)
+    if graph.border_vertices:
+        border_vertex[list(graph.border_vertices)] = True
+    node = (~border_vertex & (valence != 4)) | (border_vertex & (valence != 3))
+    faces_of = [set(f) for f in graph.edge_f]
+    line = np.zeros(graph.edge_count, dtype=bool)
+    for v in np.nonzero(node)[0]:
+        for e in graph.vertex_edges[v]:
+            if e in graph.border or line[e]:
+                continue
+            at, edge = int(v), e
+            for _ in range(graph.edge_count):
+                line[edge] = True
+                a, b = graph.edge_v[edge]
+                at = b if a == at else a
+                if node[at] or border_vertex[at] or valence[at] != 4:
+                    break
+                follow = [c for c in graph.vertex_edges[at] if c != edge and not (faces_of[c] & faces_of[edge])]
+                if len(follow) != 1 or line[follow[0]]:
+                    break
+                edge = follow[0]
+    return line
+
+
+def _face_curvature(graph):
+    """|defecto angular| de cada vértice interior repartido entre sus caras: sumado por isla, su curvatura total."""
+    counts, connects = graph.fn.getVertices()
+    counts = np.array(counts, dtype=np.int64)
+    flat = np.array(connects, dtype=np.int64)
+    face_id = np.repeat(np.arange(len(counts)), counts)
+    starts = np.repeat(np.cumsum(counts) - counts, counts)
+    local = np.arange(len(flat)) - starts
+    prev = flat[starts + (local - 1) % counts[face_id]]
+    nxt = flat[starts + (local + 1) % counts[face_id]]
+    u = graph.points[prev] - graph.points[flat]
+    w = graph.points[nxt] - graph.points[flat]
+    angle = np.arctan2(np.linalg.norm(np.cross(u, w), axis=1), np.einsum("ij,ij->i", u, w))
+    total = np.bincount(flat, weights=angle, minlength=len(graph.points))
+    share = np.bincount(flat, minlength=len(graph.points)).astype(float)
+    defect = np.abs(2.0 * math.pi - total)
+    if graph.border_vertices:
+        defect[list(graph.border_vertices)] = 0.0
+    return np.bincount(face_id, weights=defect[flat] / np.maximum(share[flat], 1.0), minlength=len(counts))
+
+
+def loop_seams(graph, curvature_limit=LOOP_CURVATURE_LIMIT, small_fraction=LOOP_SMALL_FRACTION):
+    """Costuras solo por loops, o None si la malla no es de quads. Devuelve (costuras, nº de islas)."""
+    if np.mean(graph.corner_count == 4) < LOOP_MIN_QUADS:
+        return None
+    line = _loop_lines(graph)
+    cell, count = graph._charts(line)
+    area = np.bincount(cell, weights=graph.face_area, minlength=count)
+    curvature = np.bincount(cell, weights=_face_curvature(graph), minlength=count)
+    total_area = float(area.sum()) or 1.0
+    # bordes compartidos entre celdas: aristas de línea interiores con una celda a cada lado
+    shared = {}
+    for e in np.nonzero(line)[0]:
+        faces = graph.edge_f[e]
+        if len(faces) != 2:
+            continue
+        a, b = int(cell[faces[0]]), int(cell[faces[1]])
+        if a != b:
+            shared.setdefault((min(a, b), max(a, b)), []).append(int(e))
+    neighbours = [set() for _ in range(count)]
+    perimeter = np.zeros(count)
+    for (a, b), edges in shared.items():
+        neighbours[a].add(b)
+        neighbours[b].add(a)
+        perimeter[a] += float(graph.length[edges].sum())
+        perimeter[b] += float(graph.length[edges].sum())
+    for e in graph.border:
+        perimeter[cell[graph.edge_f[e][0]]] += graph.length[e]
+    parent = list(range(count))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def one_arc(edges):
+        """Las aristas forman un único camino abierto: juntar dos discos por ahí deja un disco."""
+        degree = {}
+        for e in edges:
+            for v in graph.edge_v[e]:
+                degree[v] = degree.get(v, 0) + 1
+        if any(d > 2 for d in degree.values()):
+            return False
+        ends = sum(1 for d in degree.values() if d == 1)
+        if ends != 2:
+            return False
+        # conexo: V - E = 1 en un camino
+        return len(degree) - len(edges) == 1
+
+    def merge(a, b):
+        key = (min(a, b), max(a, b))
+        edges = shared.pop(key)
+        parent[b] = a
+        area[a] += area[b]
+        curvature[a] += curvature[b]
+        perimeter[a] += perimeter[b] - 2.0 * float(graph.length[edges].sum())
+        neighbours[a].discard(b)
+        for c in neighbours[b]:
+            if c == a:
+                continue
+            moved = shared.pop((min(b, c), max(b, c)))
+            shared.setdefault((min(a, c), max(a, c)), []).extend(moved)
+            neighbours[c].discard(b)
+            neighbours[c].add(a)
+            neighbours[a].add(c)
+        neighbours[b] = set()
+        return edges
+
+    def length(edges):
+        return float(graph.length[edges].sum())
+
+    for small_only in (False, True):
+        heap = [(-length(edges), a, b) for (a, b), edges in shared.items()]
+        heapq.heapify(heap)
+        while heap:
+            negative, a, b = heapq.heappop(heap)
+            if parent[a] != a or parent[b] != b:
+                continue
+            edges = shared.get((min(a, b), max(a, b)))
+            if not edges or abs(length(edges) + negative) > 1e-9:
+                continue  # entrada vieja: el borde compartido ha crecido y ya hay otra en la cola
+            thin = min(area[a] / max(perimeter[a] ** 2, 1e-30), area[b] / max(perimeter[b] ** 2, 1e-30)) < LOOP_THIN
+            small = min(area[a], area[b]) < small_fraction * total_area or thin
+            if small_only and not small:
+                continue
+            if not small and curvature[a] + curvature[b] > curvature_limit:
+                continue
+            if not one_arc(edges):
+                continue
+            keep, gone = (a, b) if area[a] >= area[b] else (b, a)
+            merge(keep, gone)
+            for c in neighbours[keep]:
+                heapq.heappush(heap, (-length(shared[(min(keep, c), max(keep, c))]), min(keep, c), max(keep, c)))
+    seams = set()
+    for (a, b), edges in shared.items():
+        if find(a) != find(b):
+            seams.update(edges)
+    islands = len({find(c) for c in range(count)})
+    return seams, islands

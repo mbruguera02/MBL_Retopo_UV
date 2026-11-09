@@ -168,7 +168,7 @@ def test_config_removed_engine():
         return config.load(path)
 
     assert config.SETTINGS_VERSION >= 7
-    assert set(retopo.ENGINES) == {"auto", "maya", "instant_meshes", "mbl"}, retopo.ENGINES
+    assert set(retopo.ENGINES) == {"auto", "maya", "instant_meshes", "mbl", "nativo"}, retopo.ENGINES
     assert config.DEFAULTS["retopo_engine"] in retopo.ENGINES
     # cualquier versión anterior a la que lo quitó (sin versión = 1), también las que ya conservaban el motor elegido (3 a 6)
     for version in (None, 3, 4, 5, 6):
@@ -1842,6 +1842,38 @@ def test_retopo_result_is_manifold():
 
 
 @test
+def test_native_engine_sphere():
+    """Motor nativo (en pruebas): una esfera densa de Maya sale como una esfera de cubo, toda de quads, cerrada y con
+    sus 8 polos de 3 aristas. Si el motor no está compilado, la prueba no aplica."""
+    if not config.find_mbl_core():
+        print("       (sin mbl_core compilado: no aplica)")
+        return
+    sphere = cmds.polySphere(subdivisionsX=80, subdivisionsY=60, constructionHistory=False, name="nativeSphere")[0]
+    settings = base_settings(retopo_engine="nativo", retopo_target_faces=1500)
+    outcome = pipeline.run([cmds.ls(sphere, long=True)[0]], ["retopo"], settings, quiet_log)
+    assert not outcome["errors"], outcome["errors"]
+    new = outcome["results"][0]
+    fn = om.MFnMesh(om.MSelectionList().add(new).getDagPath(0))
+    counts, connects = fn.getVertices()
+    assert all(c == 4 for c in counts), "no todo son quads"
+    assert 1000 <= len(counts) <= 2000, len(counts)
+    valence = [0] * fn.numVertices
+    edges = set()
+    start = 0
+    for c in counts:
+        face = connects[start:start + c]
+        start += c
+        for k in range(c):
+            edges.add((min(face[k], face[(k + 1) % c]), max(face[k], face[(k + 1) % c])))
+    for a, b in edges:
+        valence[a] += 1
+        valence[b] += 1
+    assert not cmds.polyListComponentConversion(new + ".f[*]", toEdge=True, border=True), "tiene agujeros"
+    poles = [v for v in valence if v != 4]
+    assert len(poles) == 8 and all(v == 3 for v in poles), poles
+
+
+@test
 def test_make_unfoldable_fixes_what_maya_does_not_flag():
     """Una aleta pegada a una arista (criatura y midnight con polyRetopo) y un quad con la diagonal repetida (midnight
     con Maya y con el Motor MBL) los rechaza Unfold3D; make_unfoldable los deja arreglados y las UVs salen."""
@@ -2020,7 +2052,7 @@ assert config.load(sys.argv[2])["retopo_target_faces"] == 777
 # el desplegable de motores: solo los que existen, Maya primero y recomendado, y el Motor MBL como experimental con su aviso
 # (un motor que ya no existe se queda en el de por defecto, Maya)
 combo = window.widgets["retopo_engine"]
-assert [combo.itemData(i) for i in range(combo.count())] == ["maya", "auto", "mbl", "instant_meshes"]
+assert [combo.itemData(i) for i in range(combo.count())] == ["maya", "auto", "mbl", "instant_meshes", "nativo"]
 assert "recomendado" in combo.itemText(0) and "experimental" in combo.itemText(combo.findData("mbl")), combo.itemText(0)
 assert "EXPERIMENTAL" in ui.ENGINE_NOTES["mbl"] and "Recomendado" in ui.ENGINE_NOTES["maya"]
 window.apply_settings(dict(config.DEFAULTS))

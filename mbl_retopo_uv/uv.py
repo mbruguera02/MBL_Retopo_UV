@@ -1251,12 +1251,25 @@ def _unwrap(transform, settings, log, tick):
                 name, fixed[1]))
             current = set(fixed[0])
         wanted = current
+        # mallas del motor nativo: costuras solo por los loops (bordes rectos, islas de rejilla)
+        loops = None
+        if settings.get("uv_loop_seams", settings.get("retopo_engine") == "nativo"):
+            from .uv_seams import loop_seams
+            loops = loop_seams(seam_graph())
+            if loops is not None:
+                wanted = set(loops[0]) | set(seam_graph().fixed)
+                fixed = fix_charts(transform, wanted, seam_graph())
+                if fixed:
+                    wanted = set(fixed[0])
+                log("{}: costuras por los loops de la malla: {} islas de partida.".format(name, loops[1]))
         big_fraction = float(settings.get("uv_split_big_shells", 0.0)) * (1.75 - float(settings["uv_split_shells"]))
-        if settings["uv_split_shells"] > 0 and big_fraction > 0 and settings.get("uv_seam_style") != "hidden":
+        if loops is not None:
+            pass
+        elif settings["uv_split_shells"] > 0 and big_fraction > 0 and settings.get("uv_seam_style") != "hidden":
             wanted, split = split_big_charts(seam_graph(), current, big_fraction)
             if split:
                 log("{}: {} isla(s) muy grandes partidas en zonas casi planas.".format(name, split))
-        if settings.get("uv_tailor_seams", True):
+        if settings.get("uv_tailor_seams", True) and loops is None:
             # antes de desplegar: esconde y endereza los cortes y cose las islas diminutas
             wanted, info = optimize_seams(transform, wanted, remove_exposed=(
                 True if settings.get("uv_seam_style") == "hidden" else "light"), graph=seam_graph())

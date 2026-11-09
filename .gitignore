@@ -35,3 +35,4 @@ tests/*_logs/
 
 # AutoRemesher (MIT): solo para medirlo en el banco, no va en el repositorio ni en el plugin
 engine/autoremesher-bin/
+engine/build-core/

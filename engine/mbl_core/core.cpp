@@ -1,6 +1,6 @@
 // mbl_core: núcleo nativo del Motor MBL. Por ahora, etapas S0 (entrada), S1 (análisis) y S3 (campo de direcciones).
 //
-//   mbl_core entrada.obj salida.json [--field campo.bin] [--faces caras] [--memory-mb N] [--feature-angle grados]
+//   mbl_core entrada.obj salida.json [--field campo.bin] [--poles polos.txt] [--faces caras] [--memory-mb N] [--feature-angle grados]
 //
 // Se ejecuta aparte de Maya: si falla, Maya no se cae. Es deliberadamente poco invasivo: prioridad baja, un solo hilo y
 // tope de memoria impuesto por el sistema. Determinista: la misma malla da siempre el mismo resultado.
@@ -454,6 +454,7 @@ struct FieldReport {
     int singular_total = 0, vertices_checked = 0, vertices_skipped = 0;
     double index_sum = 0, mean_turn_degrees = 0, feature_error_degrees = 0;
     uint64_t hash = 14695981039346656037ULL;
+    std::vector<std::pair<int, int>> poles;  // (vértice, índice en cuartos)
 };
 
 // salto de la cruz al pasar de a a b, en (-π/4, π/4]
@@ -497,6 +498,7 @@ static FieldReport inspect_field(const Mesh& mesh, const Analysis& analysis, con
         int quarters = static_cast<int>(std::lround(index * 4.0));
         report.index_sum += quarters / 4.0;
         if (quarters != 0) {
+            report.poles.push_back({static_cast<int>(v), quarters});
             ++report.singular_total;
             report.singular[std::min(8, std::max(0, quarters + 4))]++;
         }
@@ -547,16 +549,18 @@ static bool write_field(const char* path, const Mesh& mesh, const std::vector<Co
 
 static int run(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "uso: mbl_core entrada.obj salida.json [--field campo.bin] [--faces caras] [--memory-mb N] [--feature-angle grados]\n");
+        fprintf(stderr, "uso: mbl_core entrada.obj salida.json [--field campo.bin] [--poles polos.txt] [--faces caras] [--memory-mb N] [--feature-angle grados]\n");
         return 2;
     }
     const char* field_path = nullptr;
+    const char* poles_path = nullptr;
     size_t memory_mb = 0;
     double feature_degrees = 40.0;
     int target_faces = 0;
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string name = argv[i];
         if (name == "--field") field_path = argv[i + 1];
+        else if (name == "--poles") poles_path = argv[i + 1];
         else if (name == "--memory-mb") memory_mb = static_cast<size_t>(atoll(argv[i + 1]));
         else if (name == "--feature-angle") feature_degrees = atof(argv[i + 1]);
         else if (name == "--faces") target_faces = atoi(argv[i + 1]);
@@ -574,6 +578,16 @@ static int run(int argc, char** argv) {
     std::vector<Complex> z = solve_field(mesh, analysis, target_faces, levels);
     FieldReport field = inspect_field(mesh, analysis, z);
     if (field_path && !write_field(field_path, mesh, z)) fprintf(stderr, "no se pudo escribir %s\n", field_path);
+    if (poles_path) {
+        // un polo por línea: x y z índice_en_cuartos
+        if (FILE* file = fopen(poles_path, "w")) {
+            for (const auto& pole : field.poles) {
+                const Vec3& p = mesh.points[pole.first];
+                fprintf(file, "%.6f %.6f %.6f %d\n", p.x, p.y, p.z, pole.second);
+            }
+            fclose(file);
+        }
+    }
     double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
     FILE* out = fopen(argv[2], "w");

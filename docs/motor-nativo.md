@@ -47,6 +47,23 @@ Cómo se usa en la prueba:
 - **Prueba de humano:** 15.000 caras pedidas. Se compara con el artista: polos (cuántos y a qué distancia de los suyos), anillos por tubo, loops en ojos, boca y articulaciones, y parches.
 - **Es la referencia de los humanos, no de todo:** para no ajustar el motor solo a esta malla, el resto del banco se juzga con los requisitos generales.
 
+## Medido el 9 de noviembre
+
+**El artista, con el juez actual** (`tests/core_reference.py`): 7.869 parches si se traza desde todos sus polos, con mediana de 1 cara por parche (5.704 parches de una sola cara). El juez le pone **rojo**: 17,6 % de quads deformados (límite 10 %), aspecto medio 2,9 y 341 caras dobladas.
+
+- Sus 1.160 polos no forman una estructura de parches grandes: muchos son pares 3-5 de ajuste local. **S4 no puede trazar desde todos los polos**, solo desde los del campo (S3), y dejar los pares de ajuste para S6-S7.
+- El juez castiga cosas que el artista hace a propósito (quads alargados donde conviene). Antes de usarlo como criterio del motor nuevo hay que calibrarlo con esta referencia: no se pueden subir umbrales para aprobar, pero sí medir lo que de verdad importa (requisitos 8-11).
+
+**El campo sobre una entrada sin flujo.** `Desktop/geo/human_noflow.obj`: la malla del artista rehecha con `polyRemesh` en 129.773 triángulos isótropos, sin rastro de sus aristas. `mbl_core` a 15.000 caras pedidas: 0,6 s, 75 MB.
+
+| | Polos | A menos de 2 aristas de un polo del artista | Distancia mediana |
+|---|---|---|---|
+| Campo (S3) | 325 | 98 % | 0,4 aristas |
+| Puntos al azar (para comparar) | 325 | 21 % | 5,1 aristas |
+| Artista | 1.160 | (de los suyos, 62 % tienen uno del campo cerca) | — |
+
+El campo pone sus polos donde el artista pone los suyos, y menos: es justo lo de "solo los que sostienen la malla". Por zonas (pies-rodillas / muslos-cadera / torso-manos / cuello-cabeza): artista 396 / 30 / 402 / 332, campo 97 / 4 / 81 / 143.
+
 ## Aberturas y guías
 
 - **Aberturas:** por defecto se conserva todo lo que sea borde. Opción "cerrar agujeros pequeños", apagada por defecto.

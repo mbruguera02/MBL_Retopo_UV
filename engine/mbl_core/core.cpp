@@ -2540,7 +2540,10 @@ static Vec3 closest_on_triangle(const Vec3& p, const Vec3& a, const Vec3& b, con
     return a + ab * (vb * denom) + ac * (vc * denom);
 }
 
-static bool project_to_surface(const SurfaceGrid& grid, const Vec3& p, Vec3& out) {
+// `side`: si se da, solo valen los triángulos que miran hacia ese lado (en una tela más fina que un quad, el punto más
+// cercano puede estar en la cara de atrás y el quad se daría la vuelta). `normal_out`: normal del triángulo elegido.
+static bool project_to_surface(const SurfaceGrid& grid, const Vec3& p, Vec3& out, const Vec3* side = nullptr,
+                               Vec3* normal_out = nullptr) {
     const Mesh& mesh = *grid.mesh;
     int ci = static_cast<int>(std::floor((p.x - grid.low.x) / grid.cell));
     int cj = static_cast<int>(std::floor((p.y - grid.low.y) / grid.cell));
@@ -2553,9 +2556,11 @@ static bool project_to_surface(const SurfaceGrid& grid, const Vec3& p, Vec3& out
                 if (found == grid.cells.end()) continue;
                 for (int f : found->second) {
                     const auto& tri = mesh.tris[f];
+                    Vec3 tn = (mesh.points[tri[1]] - mesh.points[tri[0]]).cross(mesh.points[tri[2]] - mesh.points[tri[0]]);
+                    if (side && tn.dot(*side) <= 0) continue;
                     Vec3 q = closest_on_triangle(p, mesh.points[tri[0]], mesh.points[tri[1]], mesh.points[tri[2]]);
                     double d = (q - p).dot(q - p);
-                    if (d < best) { best = d; out = q; }
+                    if (d < best) { best = d; out = q; if (normal_out) *normal_out = tn; }
                 }
             }
     return best < 1e300;
@@ -2590,6 +2595,11 @@ static void relax_quads(const Mesh& mesh, QuadMesh& quads, double edge_length) {
             if (item.second != 2) frozen[item.first.first] = frozen[item.first.second] = 1;
     }
     SurfaceGrid grid = surface_grid(mesh, 1.5 * edge_length);
+    std::vector<Vec3> side(n);
+    for (size_t v = 0; v < n; ++v) {
+        Vec3 on;
+        project_to_surface(grid, quads.points[v], on, nullptr, &side[v]);
+    }
     std::vector<Vec3> next(quads.points);
     for (int round = 0; round < RELAX_ROUNDS; ++round) {
         std::fill(normal.begin(), normal.end(), Vec3());
@@ -2607,7 +2617,7 @@ static void relax_quads(const Mesh& mesh, QuadMesh& quads, double edge_length) {
             Vec3 move = (mean - quads.points[v]) * 0.5;
             move = move - nv * move.dot(nv);
             Vec3 target = quads.points[v] + move, on;
-            next[v] = project_to_surface(grid, target, on) ? on : target;
+            next[v] = project_to_surface(grid, target, on, &side[v]) ? on : target;
         }
         quads.points.swap(next);
     }
@@ -2632,7 +2642,7 @@ static void relax_quads(const Mesh& mesh, QuadMesh& quads, double edge_length) {
             for (int w : neighbors[v]) mean = mean + quads.points[w];
             mean = mean * (1.0 / neighbors[v].size());
             Vec3 on;
-            next[v] = project_to_surface(grid, mean, on) ? on : mean;
+            next[v] = project_to_surface(grid, mean, on, &side[v]) ? on : mean;
         }
         quads.points.swap(next);
         // solo se vuelve a mirar alrededor de lo que se ha movido

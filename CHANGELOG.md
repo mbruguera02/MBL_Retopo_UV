@@ -3,6 +3,11 @@
 Cada versión lleva su número en el título de la ventana (`MBL Retopo UV 1.0.1`) y en `mbl_retopo_uv/__init__.py`.
 Para actualizar: arrastra el `install.py` de la versión nueva a Maya (reemplaza la instalación anterior).
 
+## 1.0.10 (9 de noviembre de 2026)
+
+- **Motor nativo con red de seguridad:** si deja más de un 2 % de quads al revés (tela fina, modelos muy complejos como la caballera), se descarta, se avisa y el retopo se hace con Maya. Antes entregaba una malla retorcida y con agujeros.
+- **Menos quads al revés en zonas finas:** al pegar la malla a la superficie, cada vértice solo va a triángulos que miran hacia su mismo lado (caballera: 271 → 204; prop: 70 → 54).
+
 ## 1.0.9 (9 de noviembre de 2026)
 
 - **Sin limitador de RAM en ningún motor:** el Motor MBL ya no se para ni se niega por falta de memoria libre. Si va justo, avisa en el registro y sigue; irá más lento si Windows tiene que tirar de disco.

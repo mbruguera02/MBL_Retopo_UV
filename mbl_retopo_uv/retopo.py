@@ -284,6 +284,10 @@ ENGINES = {"auto": "Automático", "maya": "Maya (polyRetopo)", "instant_meshes":
 # ángulo de canto del motor nativo si no se indica otro: en mallas orgánicas, 40° marcaba como cantos miles de
 # aristas de un esculpido; 80° deja solo los pliegues de verdad
 NATIVE_CREASE_ANGLE = 80.0
+# agujeros nuevos que se cierran con el motor nativo, en aristas de borde (los originales del modelo no se tocan)
+NATIVE_FILL_HOLES = 60
+# más de esta fracción de quads al revés que la superficie: el resultado se descarta y se usa Maya
+NATIVE_MAX_FLIPPED = 0.02
 
 
 def _prepared_copy(transform, settings, log, tick):
@@ -773,12 +777,22 @@ def _native_engine(transform, settings, log, tick):
                 report = json.load(handle)
         except (OSError, ValueError):
             report = {}
+        # en pruebas: si deja la malla retorcida (muchos quads al revés que la superficie, como en la capa de la
+        # caballera), no se entrega; el que llama hace el retopo con Maya
+        quads_out = max(int(report.get("quads", 0)), 1)
+        flipped_share = float(report.get("flipped_quads", 0)) / quads_out
+        if flipped_share > NATIVE_MAX_FLIPPED:
+            raise RetopoError("el resultado tenía un {:.1f}% de quads al revés (zonas finas o muy complejas)".format(
+                100.0 * flipped_share))
         points, faces = read_obj(destination)
         # sin rellenar agujeros aquí: las aberturas del modelo (ojos, boca) se conservan; solo se cierran los nuevos
         points, faces, repair = repair_topology(points, faces, 0.01, 0)
         if not faces:
             raise RetopoError("El motor nativo no devolvió ninguna malla.")
-        points, faces, repair["holes"] = fill_new_holes(points, faces, source_border, int(settings["retopo_fill_holes"]))
+        # todos los agujeros nuevos, también los grandes (parches que el motor no pudo cuadrar): un agujero en mitad de una
+        # capa es peor que un relleno con algún polo de más
+        points, faces, repair["holes"] = fill_new_holes(points, faces, source_border,
+                                                        max(int(settings["retopo_fill_holes"]), NATIVE_FILL_HOLES))
         new = meshbuild.create_mesh(points, faces, name + "_retopo")
         if report:
             log("{}: motor nativo: {} quads, {} polos, {} parches ({} rellenados a la fuerza), {:.1f} s, {:.0f} MB.".format(

@@ -116,6 +116,35 @@ def hard_angle_edges(transform, threshold_degrees):
     return result
 
 
+# una cadena de aristas con ángulo agudo solo es un canto si mide al menos esta fracción de la diagonal del modelo
+HARD_CHAIN_MIN = 0.05
+
+
+def _long_chains(transform, edges):
+    """De `edges`, las que forman cadenas largas. Las cortas son detalle o ruido: en un águila, cortar por todo ángulo de
+    80° daba 290 islas."""
+    if not edges:
+        return []
+    fn = _mesh_fn(transform)
+    points = np.array([(p.x, p.y, p.z) for p in fn.getPoints(om.MSpace.kWorld)])
+    ends = [fn.getEdgeVertices(e) for e in edges]
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for a, b in ends:
+        parent[find(a)] = find(b)
+    lengths = {}
+    for a, b in ends:
+        root = find(a)
+        lengths[root] = lengths.get(root, 0.0) + float(np.linalg.norm(points[a] - points[b]))
+    limit = HARD_CHAIN_MIN * float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
+    return [e for e, (a, b) in zip(edges, ends) if lengths[find(a)] >= limit]
+
+
 def material_edges(transform):
     """Aristas entre caras con materiales (shadingEngine) distintos. Vacío si la malla tiene un solo material.
 
@@ -491,6 +520,42 @@ def orient_upright(transform):
     return turned
 
 
+def align_islands_to_loops(transform):
+    """Gira cada isla lo justo (menos de 45°) para que sus loops vayan rectos en U y V: la cuadrícula se ve ordenada y las
+    islas encajan mejor. Devuelve cuántas se giraron."""
+    fn = _mesh_fn(transform)
+    if fn.numUVs() == 0:
+        return 0
+    count, shell_ids = fn.getUvShellsIds()
+    shells = np.asarray(shell_ids, dtype=np.int64)
+    us, vs = fn.getUVs()
+    us, vs = np.asarray(us), np.asarray(vs)
+    uv_counts, uv_ids = fn.getAssignedUVs()
+    counts, ids = np.asarray(uv_counts, dtype=np.int64), np.asarray(uv_ids, dtype=np.int64)
+    first = np.repeat(np.cumsum(counts) - counts, counts)
+    following = ids[first + (np.arange(len(ids)) - first + 1) % np.repeat(counts, counts)]
+    du, dv = us[following] - us[ids], vs[following] - vs[ids]
+    length = np.hypot(du, dv)
+    angle = np.arctan2(dv, du)
+    # cuatro veces el ángulo: una arista en U y otra en V cuentan como la misma dirección
+    owner = shells[ids]
+    real = np.bincount(owner, weights=length * np.cos(4.0 * angle), minlength=count)
+    imag = np.bincount(owner, weights=length * np.sin(4.0 * angle), minlength=count)
+    total = np.bincount(owner, weights=length, minlength=count)
+    order = np.hypot(real, imag) / np.maximum(total, 1e-30)
+    turns = -np.degrees(np.arctan2(imag, real)) / 4.0
+    by_shell = {}
+    for uv_index, shell in enumerate(shell_ids):
+        by_shell.setdefault(shell, []).append(uv_index)
+    turned = 0
+    for shell in np.nonzero((order >= ALIGN_MIN_ORDER) & (np.abs(turns) >= 0.5))[0].tolist():
+        uvs = components(transform, "map", by_shell[shell])
+        (umin, umax), (vmin, vmax) = cmds.polyEvaluate(uvs, boundingBoxComponent2d=True)
+        cmds.polyEditUV(uvs, pivotU=(umin + umax) * 0.5, pivotV=(vmin + vmax) * 0.5, angle=float(turns[shell]))
+        turned += 1
+    return turned
+
+
 def straighten_islands(transform, log=default_log):
     """Endereza las islas que son tubos cortados a lo largo (brazos, piernas, dedos, cables, colas): las dos orillas de
     cada corte pasan a ser paralelas y de la misma longitud, y el dibujo de una textura (vetas, rayones) sigue la misma
@@ -512,7 +577,9 @@ def straighten_islands(transform, log=default_log):
         start += count
         uv_start += uv_count
     new, done = uv_straighten.straighten(points, faces, np.column_stack([us, vs]), uv_faces)
-    if not done:
+    # como Follow Active Quads o Straighten UV a mano, pero solo donde la isla es una rejilla sin polos
+    new, grids = uv_straighten.rectify_grids(points, faces, new, uv_faces)
+    if not done and not grids:
         return 0
     # las UVs de una malla con historial no se pueden escribir directamente: se escriben en una copia y se pasan
     copy = cmds.ls(cmds.duplicate(transform, name="mblStraightenTry")[0], long=True)[0]
@@ -521,12 +588,15 @@ def straighten_islands(transform, log=default_log):
         cmds.polyTransfer(transform, uvSets=True, vertices=False, vertexColor=False, alternateObject=copy)
     finally:
         cmds.delete(copy)
-    total = sum(d["length"] for d in done) or 1.0
-    log("{}: {} isla(s) enderezadas (tubos cortados a lo largo): las orillas del corte casan {:.0f}% -> {:.0f}% "
-        "de su longitud, sin estirar más.".format(
-            short_name(transform), len(done), sum(d["matched"][0] * d["length"] for d in done) / total,
-            sum(d["matched"][1] * d["length"] for d in done) / total))
-    return len(done)
+    if done:
+        total = sum(d["length"] for d in done) or 1.0
+        log("{}: {} isla(s) enderezadas (tubos cortados a lo largo): las orillas del corte casan {:.0f}% -> {:.0f}% "
+            "de su longitud, sin estirar más.".format(
+                short_name(transform), len(done), sum(d["matched"][0] * d["length"] for d in done) / total,
+                sum(d["matched"][1] * d["length"] for d in done) / total))
+    if grids:
+        log("{}: {} isla(s) sin polos enderezadas como una cuadrícula recta.".format(short_name(transform), grids))
+    return len(done) + grids
 
 
 def _mesh_arrays(transform):
@@ -962,11 +1032,18 @@ def symmetric_seams(transform, graph=None):
     return True
 
 
-# rondas de partir las islas que siguen estirando, y % de caras > 1,5x con el que ya se para
-REFINE_ROUNDS = 5
-REFINE_TARGET = 5.0
+# rondas de partir las islas que siguen estirando, y % de caras > 1,5x con el que ya se para: un poco de estiramiento se
+# acepta a cambio de islas grandes y pocos cortes (5 % dejaba un águila en decenas de trozos)
+REFINE_ROUNDS = 3
+REFINE_TARGET = 10.0
 # por debajo de esta área en UV una isla está aplastada
 COLLAPSED_AREA = 1e-10
+# hasta cuántas caras solapadas se separan al acabar los intentos
+OVERLAP_LAST_RESORT = 200
+# por debajo de esta fracción del área total una isla se cose a su vecina, si la pieza no va suelta
+SMALL_ISLAND = 0.003
+# los loops de una isla solo se alinean con los ejes si van más o menos en una dirección (0 = sin orden, 1 = rejilla)
+ALIGN_MIN_ORDER = 0.3
 
 
 def split_limiting_islands(transform, settings, graph, seams):
@@ -1010,7 +1087,9 @@ def seed_charts(transform, faces=None):
     counts, vertices = fn.getVertices()
     uv_counts, uv_ids = fn.getAssignedUVs()
     positions = np.zeros((fn.numUVs(), 3))
-    positions[np.asarray(uv_ids, dtype=np.int64)] = points[np.asarray(vertices, dtype=np.int64)]
+    # una cara sin UVs (degenerada: la proyección la salta) no tiene esquinas en uv_ids
+    mapped = np.repeat(np.asarray(uv_counts) == np.asarray(counts), np.asarray(counts))
+    positions[np.asarray(uv_ids, dtype=np.int64)] = points[np.asarray(vertices, dtype=np.int64)[mapped]]
     uv_faces, start = [], 0
     uv_ids = list(uv_ids)
     for count in uv_counts:
@@ -1107,8 +1186,23 @@ def _restore_uvs(transform, backup, transforms_before, log):
             "Deshaz con Ctrl+Z.".format(name, exc), "error")
 
 
+def _warn_before_unwrap(transform, log):
+    """Lo que estropea un despliegue sin dar error: escala sin aplicar y n-gons."""
+    name = short_name(transform)
+    scale = cmds.getAttr(transform + ".scale")[0]
+    if max(scale) - min(scale) > 1e-3:
+        log("{}: la escala no es uniforme ({:.3g}, {:.3g}, {:.3g}). Pulsa 'Limpiar' para aplicarla: las UVs pueden salir "
+            "deformadas.".format(name, *scale), "warning")
+    counts, _ = _mesh_fn(transform).getVertices()
+    ngons = sum(1 for count in counts if count > 4)
+    if ngons:
+        log("{}: {} n-gons (caras de más de 4 lados). Pueden romper el desplegado en zonas curvas.".format(name, ngons),
+            "warning")
+
+
 def _unwrap(transform, settings, log, tick):
     name = short_name(transform)
+    _warn_before_unwrap(transform, log)
     map_size = int(settings["uv_map_size"])
     pad = config.padding_px(settings)
 
@@ -1131,6 +1225,7 @@ def _unwrap(transform, settings, log, tick):
         log("{}: se respetan las {} costuras que ya tiene la malla.".format(name, len(existing)))
     else:
         hard = hard_angle_edges(transform, settings["uv_seam_angle"]) if settings["uv_seam_angle"] < 180 else []
+        hard = _long_chains(transform, hard)
         seed_uvs(transform, sorted(set(hard) | set(materials)))
         log("{}: {} costuras por ángulo (>= {:g}°).".format(name, len(hard), settings["uv_seam_angle"]))
         if materials:
@@ -1210,17 +1305,35 @@ def _unwrap(transform, settings, log, tick):
             if not automatic:
                 return None
             bad = overlapping_faces(mesh)
-            region = split_overlaps(mesh, bad) if bad else None
-            if not region:
-                return len(bad)
-            log("{}: {} caras solapadas, se separan en una isla nueva (intento {}).".format(
-                name, len(bad), attempt + 1))
-            # de cero, sin caras invertidas: lo que se pisaba (y los restos que el corte deja sin área) no se arregla
-            # desplegando desde como estaba
-            faces = sorted(set(flat_indices(region)) | set(_collapsed_faces(mesh)))
+            if not bad:
+                return 0
+            # la isla que se pisa se parte en dos partes grandes: pelarle solo lo que se pisa dejaba decenas de micro islas
+            from .uv_seams import split_charts_in_two
+            current = set(uv_seam_edges(mesh, seam_graph()))
+            wanted, faces = split_charts_in_two(seam_graph(), current, bad)
+            if not faces:
+                break
+            log("{}: {} caras solapadas, se parte la isla (intento {}).".format(name, len(bad), attempt + 1))
+            _swap_seams(mesh, current, wanted)
             seed_charts(mesh, faces)
             unfold(mesh, components(mesh, "f", faces))
+        separate_stuck(mesh)
         return None
+
+    def separate_stuck(mesh=transform):
+        """Lo poco que sigue pisándose (siempre las mismas caras) va aparte: primero las zonas enteras, para no dejar islas
+        de una cara, y cara a cara solo si aun así se pisan."""
+        for border in (True, False):
+            bad = overlapping_faces(mesh)
+            if not bad or len(bad) > OVERLAP_LAST_RESORT:
+                return
+            faces = components(mesh, "f", bad)
+            cut = cmds.polyListComponentConversion(faces, toEdge=True, border=border)
+            if cut:
+                cmds.polyMapCut(cut, constructionHistory=True)
+            seed_charts(mesh, bad)
+            unfold(mesh, faces)
+            log("{}: {} caras que seguían solapadas separadas en islas propias.".format(name, len(bad)))
 
     # solapes ya medidos sin cambios posteriores (evita repetir polyUVOverlap)
     known_overlaps = unfold_and_split()
@@ -1262,6 +1375,22 @@ def _unwrap(transform, settings, log, tick):
                 seed_charts(transform, faces)
                 known_overlaps = unfold_and_split(transform, components(transform, "f", faces))
 
+    if automatic and settings["uv_auto_seams"] and settings["uv_split_shells"] > 0 and not hidden:
+        # los restos pequeños que han quedado se cosen a su vecina
+        from .uv_seams import clean_small_cuts
+        current = set(uv_seam_edges(transform, seam_graph()))
+        wanted, slits, merged = clean_small_cuts(seam_graph(), current, SMALL_ISLAND)
+        if symmetric:
+            wanted = set(symmetrize_seams(transform, wanted, seam_graph()) or wanted)
+        if wanted != current:
+            _swap_seams(transform, current, wanted)
+            chart, _count = seam_graph().charts(wanted)
+            touched = [f for e in current ^ wanted for f in seam_graph().edge_f[e]]
+            faces = np.nonzero(np.isin(chart, np.unique(chart[touched])))[0].tolist()
+            seed_charts(transform, faces)
+            known_overlaps = unfold_and_split(transform, components(transform, "f", faces))
+            log("{}: micro cortes quitados: {} cortes en punta y {} islas pequeñas cosidas a su vecina.".format(
+                name, slits, merged))
     collapsed = _collapsed_faces(transform)
     if collapsed:
         seed_charts(transform, collapsed)
@@ -1275,10 +1404,19 @@ def _unwrap(transform, settings, log, tick):
         straightened = straighten_islands(transform, log)
         if straightened:
             known_overlaps = None
+            # enderezar mira el estiramiento, no los solapes
+            # (antes de medirlo se empaqueta: una isla que ha cambiado de forma pisa a su vecina hasta que se recoloca, y eso
+            # no es un solape que haya que cortar)
+            if automatic:
+                layout_0_1(transform, quick_layout)
+                separate_stuck()
     if settings.get("uv_straight_islands", True):
         turned = orient_upright(transform)
         if turned:
             log("{}: {} isla(s) puestas de pie (el arriba del modelo, arriba en la textura).".format(name, turned))
+        aligned = align_islands_to_loops(transform)
+        if aligned:
+            log("{}: {} isla(s) con sus loops alineados a los ejes de la textura.".format(name, aligned))
     if settings["uv_udim"]:
         tiles = layout_udim(transform, settings, log)
         log("{}: layout en {} UDIM(s).".format(name, tiles))
@@ -1297,6 +1435,11 @@ def _unwrap(transform, settings, log, tick):
     report = check(transform, udim=settings["uv_udim"], known_overlaps=known_overlaps)
     report["stretch"] = stretch(transform)
     density = texel_density(transform, map_size)
+    # la prueba del tablero: cuadrados que siguen siendo cuadrados (el estiramiento solo mira el área)
+    from . import status
+    _shape_mean, shape_bad = uv_quality.shape_stats(*status.uv_arrays(transform))
+    report["shape_bad_percent"] = shape_bad
+    log("{}: {:.1f}% del área con cuadrados deformados más de 1.5x.".format(name, shape_bad))
     log("{}: {} islas, densidad {:.2f} px/unidad a {} px, estiramiento medio {:.2f} ({:.1f}% de caras > 1.5x)."
         .format(name, report["shells"], density, map_size, report["stretch"]["mean"],
                 report["stretch"]["over_1_5_percent"]))

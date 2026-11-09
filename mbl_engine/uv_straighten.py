@@ -318,3 +318,150 @@ def straighten(points, faces, uv_points, uv_faces, **kwargs):
                 result["faces"] = len(face_ids)
                 done.append(result)
     return uv, done
+
+
+# ------------------------------------------------------------------ islas que son una rejilla
+
+# una rejilla se endereza si no gana caras con más de 1,5x de distorsión de área y su distorsión media casi no sube
+GRID_EXTRA_MEAN = 0.005
+
+
+def _grid_coordinates(island_faces, uv_faces):
+    """(fila, columna) entera de cada punto UV si las caras forman una rejilla sin polos; None si no."""
+    by_edge = {}
+    for f in island_faces:
+        corners = uv_faces[f]
+        if len(corners) != 4:
+            return None
+        for k in range(4):
+            a, b = corners[k], corners[(k + 1) % 4]
+            by_edge.setdefault((min(a, b), max(a, b)), []).append(f)
+    first = uv_faces[island_faces[0]]
+    grid = {first[0]: (0, 0), first[1]: (1, 0), first[2]: (1, 1), first[3]: (0, 1)}
+    seen, stack = {island_faces[0]}, [island_faces[0]]
+    while stack:
+        f = stack.pop()
+        corners = uv_faces[f]
+        for k in range(4):
+            a, b, c, d = corners[k], corners[(k + 1) % 4], corners[(k + 2) % 4], corners[(k + 3) % 4]
+            for other in by_edge[(min(a, b), max(a, b))]:
+                if other == f:
+                    continue
+                ring = uv_faces[other]
+                i = ring.index(a)
+                # el vecino recorre la arista compartida en sentido contrario
+                if ring[(i + 3) % 4] != b:
+                    return None
+                next_b, next_a = ring[(i + 2) % 4], ring[(i + 1) % 4]
+                step = (grid[a][0] - grid[d][0], grid[a][1] - grid[d][1])
+                wanted = {next_a: (grid[a][0] + step[0], grid[a][1] + step[1]),
+                          next_b: (grid[b][0] + step[0], grid[b][1] + step[1])}
+                for uv_id, cell in wanted.items():
+                    if grid.setdefault(uv_id, cell) != cell:
+                        return None
+                if other not in seen:
+                    seen.add(other)
+                    stack.append(other)
+    # dos puntos en la misma casilla: la isla da la vuelta sobre sí misma
+    return grid if len(set(grid.values())) == len(grid) else None
+
+
+def rectify_grids(points, faces, uv_points, uv_faces):
+    """Deja como una cuadrícula perfecta las islas que son una rejilla sin polos (tiras, correas, piezas duras): cada fila y
+    columna, recta y con el ancho medio que tiene en 3D. Solo se tocan si no estiran más que antes.
+    Devuelve (UVs nuevas, nº de islas enderezadas)."""
+    points = np.asarray(points, dtype=np.float64)
+    uv = np.array(uv_points, dtype=np.float64)
+    position = {}
+    for corners, verts in zip(uv_faces, faces):
+        for uv_id, v in zip(corners, verts):
+            position[uv_id] = v
+    owners = {}
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for corners in uv_faces:
+        for k in range(1, len(corners)):
+            parent[find(corners[0])] = find(corners[k])
+    for f, corners in enumerate(uv_faces):
+        if corners:
+            owners.setdefault(find(corners[0]), []).append(f)
+    done = 0
+
+    def distortion(island_faces, candidate):
+        """(fracción de caras con más de 1,5x, media) de la distorsión de área dentro de la isla."""
+        world = np.array([_polygon_area(points[faces[f]]) for f in island_faces])
+        flat = np.array([_polygon_area(candidate[uv_faces[f]]) for f in island_faces])
+        ok = (world > 0) & (flat > 0)
+        if not ok.any():
+            return 1.0, 4.0
+        ratio = (flat[ok] / world[ok]) / (flat[ok].sum() / world[ok].sum())
+        ratio = np.maximum(ratio, 1.0 / ratio)
+        return float(np.mean(ratio > 1.5)), float(np.mean(ratio))
+
+    for island_faces in owners.values():
+        grid = _grid_coordinates(island_faces, uv_faces)
+        if grid is None:
+            continue
+        widths, heights = {}, {}
+        along = [np.zeros(2), np.zeros(2)]
+        for f in island_faces:
+            corners = uv_faces[f]
+            for k in range(4):
+                a, b = corners[k], corners[(k + 1) % 4]
+                di, dj = grid[b][0] - grid[a][0], grid[b][1] - grid[a][1]
+                length = float(np.linalg.norm(points[position[a]] - points[position[b]]))
+                if abs(di) == 1 and dj == 0:
+                    widths.setdefault(min(grid[a][0], grid[b][0]), []).append(length)
+                    along[0] += (uv[b] - uv[a]) * di
+                elif abs(dj) == 1 and di == 0:
+                    heights.setdefault(min(grid[a][1], grid[b][1]), []).append(length)
+                    along[1] += (uv[b] - uv[a]) * dj
+
+        def positions(spans):
+            result, value = {}, 0.0
+            low, high = min(spans), max(spans)
+            result[low] = 0.0
+            for index in range(low, high + 1):
+                value += float(np.mean(spans[index])) if index in spans else 0.0
+                result[index + 1] = value
+            return result
+        if not widths or not heights:
+            continue
+        us, vs = positions(widths), positions(heights)
+        # cada eje de la rejilla, al eje de la textura al que ya apuntaba (mismo giro: no se voltea nada)
+        a, b = along
+        if abs(a[0]) >= abs(a[1]):
+            axis_i, axis_j = np.array([np.sign(a[0]) or 1.0, 0.0]), np.array([0.0, np.sign(b[1]) or 1.0])
+        else:
+            axis_i, axis_j = np.array([0.0, np.sign(a[1]) or 1.0]), np.array([np.sign(b[0]) or 1.0, 0.0])
+        ids = list(grid)
+        new = np.array([us[grid[i][0]] * axis_i + vs[grid[i][1]] * axis_j for i in ids])
+        old = uv[ids]
+        old_area = sum(_polygon_area(uv[uv_faces[f]]) for f in island_faces)
+        candidate = uv.copy()
+        candidate[ids] = new
+        new_area = sum(_polygon_area(candidate[uv_faces[f]]) for f in island_faces)
+        if new_area <= 0 or old_area <= 0:
+            continue
+        new = (new - new.mean(axis=0)) * (old_area / new_area) ** 0.5 + old.mean(axis=0)
+        candidate[ids] = new
+        new_bad, new_mean = distortion(island_faces, candidate)
+        old_bad, old_mean = distortion(island_faces, uv)
+        if new_bad > old_bad or new_mean > old_mean + GRID_EXTRA_MEAN:
+            continue
+        uv = candidate
+        done += 1
+    return uv, done
+
+
+def _polygon_area(p):
+    """Área de un polígono en 2D o en 3D."""
+    p = np.asarray(p, dtype=np.float64)
+    if p.shape[1] == 2:
+        p = np.column_stack([p, np.zeros(len(p))])
+    return 0.5 * float(np.linalg.norm(np.cross(p, np.roll(p, -1, axis=0)).sum(axis=0)))

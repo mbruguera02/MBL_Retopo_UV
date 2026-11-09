@@ -67,8 +67,8 @@ DEFAULTS = {
     "retopo_relax": 10,
     # UVs
     "uv_respect_existing": True,
-    # 180 = sin cortes por ángulo: en orgánicos funciona mejor dejar las costuras a Unfold3D
-    # (águila de prueba: 80° -> 290 islas y 84 caras solapadas; 180° -> 1 isla)
+    # 180 = sin cortes por ángulo. Medido a 90° con cadenas largas (uv._long_chains): criatura pasa a 15 % de caras > 1,5x,
+    # midnight a 20.000 caras a 99 islas y se pierde la simetría de las costuras: no compensa por defecto
     "uv_seam_angle": 180.0,
     "uv_auto_seams": True,
     "uv_cut_pipes": True,
@@ -94,7 +94,7 @@ DEFAULTS = {
     "uv_fix_stretch": False,
     # en "resolution", las islas con más de esta fracción del área se vuelven a cortar (0 = nunca).
     # Águila: tres islas con el 90% del área -> textura aprovechada 42% -> 68%, estiramiento 8% -> 4%
-    "uv_split_big_shells": 0.12,
+    "uv_split_big_shells": 0.17,
     # 5 en vez de 10: -15% de tiempo y la misma calidad práctica (águila: 13.6% vs 12.5% de caras >1.5x)
     "uv_optimize_iterations": 5,
     # costuras en los bordes entre materiales distintos (cada material tiene sus propias islas y texturas).
@@ -132,13 +132,14 @@ DEFAULTS = {
 # Versión de los ajustes. Cuando cambia un valor por defecto porque las pruebas demostraron que el
 # nuevo es mejor, se sube la versión y se añade aquí la clave: los JSON guardados con una versión
 # anterior vuelven a usar el valor nuevo en esa clave (el resto de lo que eligió el usuario se respeta).
-SETTINGS_VERSION = 8
+SETTINGS_VERSION = 9
 UPGRADED_KEYS = {
     2: ("uv_seam_angle", "uv_optimize_iterations", "uv_split_shells"),
     3: ("retopo_engine",),
     4: ("retopo_symmetry",),
     5: ("mbl_time_budget",),
     6: ("uv_allow_rotation",),
+    9: ("uv_split_big_shells",),
 }
 # Valores que ya no existen porque se quitó un motor del plugin (7) o que eran el valor por defecto de antes (8): los
 # JSON guardados con una versión anterior pasan al valor que lo sustituye. A diferencia de UPGRADED_KEYS, el resto de lo

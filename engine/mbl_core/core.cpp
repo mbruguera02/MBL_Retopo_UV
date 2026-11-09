@@ -1,6 +1,6 @@
 // mbl_core: núcleo nativo del Motor MBL. Por ahora, etapas S0 (entrada), S1 (análisis) y S3 (campo de direcciones).
 //
-//   mbl_core entrada.obj salida.json [--field campo.bin] [--poles polos.txt] [--faces caras] [--memory-mb N] [--feature-angle grados]
+//   mbl_core entrada.obj salida.json [--field campo.bin] [--poles polos.txt] [--patches parches.txt] [--faces caras] [--memory-mb N] [--feature-angle grados]
 //
 // Se ejecuta aparte de Maya: si falla, Maya no se cae. Es deliberadamente poco invasivo: prioridad baja, un solo hilo y
 // tope de memoria impuesto por el sistema. Determinista: la misma malla da siempre el mismo resultado.
@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <map>
 #include <new>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -545,15 +546,244 @@ static bool write_field(const char* path, const Mesh& mesh, const std::vector<Co
     return true;
 }
 
+// ---------------------------------------------------------------- S4: trazado y parches
+//
+// Desde cada polo del campo se siguen sus separatrices (las direcciones de la cruz que salen del polo) hasta otro polo, un
+// borde o un canto. Esas líneas, con los bordes y los cantos, parten la superficie en parches. Primera versión: las líneas
+// van por aristas de la malla de entrada (que es varias veces más fina que la malla final), sin cortar triángulos.
+
+struct EdgeGraph {
+    std::vector<std::array<int, 2>> ends;
+    std::vector<std::array<int, 2>> faces;              // -1 si no hay segunda cara
+    std::vector<std::vector<std::pair<int, int>>> around;  // por vértice: (vecino, arista)
+};
+
+static EdgeGraph edge_graph(const Mesh& mesh) {
+    EdgeGraph graph;
+    graph.around.resize(mesh.points.size());
+    std::map<std::pair<int, int>, int> index;
+    for (int t = 0; t < static_cast<int>(mesh.tris.size()); ++t)
+        for (int k = 0; k < 3; ++k) {
+            int a = mesh.tris[t][k], b = mesh.tris[t][(k + 1) % 3];
+            auto key = std::make_pair(std::min(a, b), std::max(a, b));
+            auto found = index.find(key);
+            if (found == index.end()) {
+                int e = static_cast<int>(graph.ends.size());
+                index[key] = e;
+                graph.ends.push_back({{key.first, key.second}});
+                graph.faces.push_back({{t, -1}});
+                graph.around[a].push_back({b, e});
+                graph.around[b].push_back({a, e});
+            } else {
+                graph.faces[found->second][1] = t;
+            }
+        }
+    return graph;
+}
+
+// cruz de cada vértice: la media de las de sus caras, en un marco propio del vértice
+struct VertexFrames {
+    std::vector<Vec3> normal, tangent, bitangent;
+    std::vector<double> phase;  // ángulo de una de las cuatro direcciones, en el marco del vértice
+};
+
+static VertexFrames vertex_frames(const Mesh& mesh, const EdgeGraph& graph, const std::vector<Complex>& z) {
+    size_t n = mesh.points.size();
+    VertexFrames frames;
+    frames.normal.assign(n, Vec3());
+    frames.tangent.assign(n, Vec3(1, 0, 0));
+    frames.bitangent.assign(n, Vec3(0, 1, 0));
+    frames.phase.assign(n, 0.0);
+    for (size_t t = 0; t < mesh.tris.size(); ++t)
+        for (int v : mesh.tris[t]) frames.normal[v] = frames.normal[v] + mesh.normal[t] * mesh.area[t];
+    for (size_t v = 0; v < n; ++v) {
+        double length = frames.normal[v].norm();
+        frames.normal[v] = length > 0 ? frames.normal[v] * (1.0 / length) : Vec3(0, 0, 1);
+        if (graph.around[v].empty()) continue;
+        Vec3 out = mesh.points[graph.around[v][0].first] - mesh.points[v];
+        Vec3 flat = out - frames.normal[v] * out.dot(frames.normal[v]);
+        double size = flat.norm();
+        frames.tangent[v] = size > 0 ? flat * (1.0 / size) : Vec3(1, 0, 0);
+        frames.bitangent[v] = frames.normal[v].cross(frames.tangent[v]);
+    }
+    std::vector<Complex> sum(n, Complex(0, 0));
+    for (size_t t = 0; t < mesh.tris.size(); ++t) {
+        double theta = std::arg(z[t]) / 4.0;
+        Vec3 d = mesh.tangent[t] * std::cos(theta) + mesh.bitangent[t] * std::sin(theta);
+        for (int v : mesh.tris[t]) {
+            double phi = std::atan2(d.dot(frames.bitangent[v]), d.dot(frames.tangent[v]));
+            sum[v] += std::polar(mesh.area[t], 4.0 * phi);
+        }
+    }
+    for (size_t v = 0; v < n; ++v) frames.phase[v] = std::arg(sum[v]) / 4.0;
+    return frames;
+}
+
+// cuánto se aparta una dirección 3D de la cruz del vértice (0 = alineada, π/4 = lo peor)
+static double cross_offset(const VertexFrames& frames, int v, const Vec3& d) {
+    double phi = std::atan2(d.dot(frames.bitangent[v]), d.dot(frames.tangent[v]));
+    return std::abs(std::arg(std::polar(1.0, 4.0 * (phi - frames.phase[v])))) / 4.0;
+}
+
+// dirección de la cruz del vértice más parecida a `d`
+static Vec3 cross_direction(const VertexFrames& frames, int v, const Vec3& d) {
+    double phi = std::atan2(d.dot(frames.bitangent[v]), d.dot(frames.tangent[v]));
+    double turn = std::arg(std::polar(1.0, 4.0 * (frames.phase[v] - phi))) / 4.0;
+    double best = phi + turn;
+    return frames.tangent[v] * std::cos(best) + frames.bitangent[v] * std::sin(best);
+}
+
+struct PatchReport {
+    int lines = 0, patches = 0, quad_patches = 0, line_edges = 0;
+    double median_quads_per_patch = 0;
+    std::vector<int> face_patch;
+};
+
+static PatchReport trace_patches(const Mesh& mesh, const Analysis& analysis, const std::vector<Complex>& z,
+                                 const FieldReport& field, int target_faces) {
+    PatchReport report;
+    EdgeGraph graph = edge_graph(mesh);
+    VertexFrames frames = vertex_frames(mesh, graph, z);
+    size_t edge_count = graph.ends.size(), n = mesh.points.size();
+    std::vector<char> traced(edge_count, 0), stop(n, 0), border(n, 0), on_line(n, 0);
+    // bordes y cantos ya son fronteras de parche
+    for (size_t t = 0; t < mesh.tris.size(); ++t)
+        for (int k = 0; k < 3; ++k)
+            if (analysis.feature_side[t * 3 + k]) {
+                int a = mesh.tris[t][k], b = mesh.tris[t][(k + 1) % 3];
+                for (const auto& step : graph.around[a])
+                    if (step.first == b) traced[step.second] = 1;
+                if (mesh.across[t][k] < 0) border[a] = border[b] = 1;
+            }
+    std::map<int, int> pole_quarters;
+    for (const auto& pole : field.poles) {
+        pole_quarters[pole.first] = pole.second;
+        stop[pole.first] = 1;
+    }
+    for (size_t v = 0; v < n; ++v)
+        if (border[v]) stop[v] = 1;
+    for (const auto& pole : field.poles) {
+        int p = pole.first;
+        int wanted = 4 - pole.second;  // un polo de índice +1/4 (3 aristas) saca 3 líneas; uno de -1/4, 5
+        if (wanted <= 0) continue;
+        // salidas: las aristas del polo que mejor siguen la cruz del vecino, separadas entre sí
+        std::vector<std::pair<double, int>> candidates;
+        for (size_t i = 0; i < graph.around[p].size(); ++i) {
+            int w = graph.around[p][i].first;
+            Vec3 d = mesh.points[w] - mesh.points[p];
+            candidates.push_back({cross_offset(frames, w, d), static_cast<int>(i)});
+        }
+        std::sort(candidates.begin(), candidates.end());
+        std::vector<Vec3> taken;
+        for (const auto& candidate : candidates) {
+            if (static_cast<int>(taken.size()) >= wanted) break;
+            if (candidate.first > PI / 8) break;
+            const auto& step0 = graph.around[p][candidate.second];
+            Vec3 d = mesh.points[step0.first] - mesh.points[p];
+            Vec3 flat = d - frames.normal[p] * d.dot(frames.normal[p]);
+            double size = flat.norm();
+            if (size <= 0) continue;
+            flat = flat * (1.0 / size);
+            bool close = false;
+            for (const Vec3& other : taken)
+                if (flat.dot(other) > std::cos(PI / wanted)) close = true;
+            if (close) continue;
+            taken.push_back(flat);
+            on_line[p] = 0;
+            // seguir la línea
+            ++report.lines;
+            int from = p, at = step0.first, edge = step0.second;
+            std::vector<char> seen_here;
+            for (size_t steps = 0; steps < 4 * n; ++steps) {
+                if (traced[edge]) break;  // se junta con otra línea
+                traced[edge] = 1;
+                // grafo de motocicletas: la línea acaba al chocar con otra (queda una unión en T que reparte S5)
+                if (stop[at] || on_line[at]) break;
+                on_line[from] = 1;
+                Vec3 heading = cross_direction(frames, at, mesh.points[at] - mesh.points[from]);
+                int next = -1, next_edge = -1;
+                double best = 0.5;  // como mucho 60° entre la arista y la dirección
+                double length = heading.norm();
+                for (const auto& step : graph.around[at]) {
+                    if (step.first == from) continue;
+                    Vec3 d = mesh.points[step.first] - mesh.points[at];
+                    double size = d.norm();
+                    if (size <= 0 || length <= 0) continue;
+                    double c = d.dot(heading) / (size * length);
+                    if (c > best) {
+                        best = c;
+                        next = step.first;
+                        next_edge = step.second;
+                    }
+                }
+                if (next < 0) break;
+                from = at;
+                at = next;
+                edge = next_edge;
+            }
+        }
+    }
+    // parches: caras unidas por aristas no trazadas
+    std::vector<int> parent(mesh.tris.size());
+    for (size_t i = 0; i < parent.size(); ++i) parent[i] = static_cast<int>(i);
+    auto find = [&](int x) {
+        while (parent[x] != x) x = parent[x] = parent[parent[x]];
+        return x;
+    };
+    for (size_t e = 0; e < edge_count; ++e) {
+        if (traced[e]) {
+            ++report.line_edges;
+            continue;
+        }
+        if (graph.faces[e][1] >= 0) parent[find(graph.faces[e][0])] = find(graph.faces[e][1]);
+    }
+    std::map<int, int> label;
+    report.face_patch.resize(mesh.tris.size());
+    std::vector<double> patch_area;
+    for (size_t f = 0; f < mesh.tris.size(); ++f) {
+        int root = find(static_cast<int>(f));
+        auto found = label.find(root);
+        if (found == label.end()) {
+            found = label.insert({root, static_cast<int>(label.size())}).first;
+            patch_area.push_back(0.0);
+        }
+        report.face_patch[f] = found->second;
+        patch_area[found->second] += mesh.area[f];
+    }
+    report.patches = static_cast<int>(label.size());
+    // esquinas: vértices del contorno de un parche donde se juntan 3 o más fronteras, o polos
+    std::vector<int> line_degree(n, 0);
+    for (size_t e = 0; e < edge_count; ++e)
+        if (traced[e]) {
+            ++line_degree[graph.ends[e][0]];
+            ++line_degree[graph.ends[e][1]];
+        }
+    std::vector<std::set<int>> corners(report.patches);
+    for (size_t f = 0; f < mesh.tris.size(); ++f)
+        for (int v : mesh.tris[f])
+            if (line_degree[v] >= 3 || (line_degree[v] >= 2 && pole_quarters.count(v)))
+                corners[report.face_patch[f]].insert(v);
+    for (const auto& c : corners) if (c.size() == 4) ++report.quad_patches;
+    if (target_faces > 0 && !patch_area.empty()) {
+        double face_area = analysis.total_area / target_faces;
+        std::vector<double> quads;
+        for (double a : patch_area) quads.push_back(a / face_area);
+        std::nth_element(quads.begin(), quads.begin() + quads.size() / 2, quads.end());
+        report.median_quads_per_patch = quads[quads.size() / 2];
+    }
+    return report;
+}
+
 // ---------------------------------------------------------------- programa
 
 static int run(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "uso: mbl_core entrada.obj salida.json [--field campo.bin] [--poles polos.txt] [--faces caras] [--memory-mb N] [--feature-angle grados]\n");
+        fprintf(stderr, "uso: mbl_core entrada.obj salida.json [--field campo.bin] [--poles polos.txt] [--patches parches.txt] [--faces caras] [--memory-mb N] [--feature-angle grados]\n");
         return 2;
     }
     const char* field_path = nullptr;
     const char* poles_path = nullptr;
+    const char* patches_path = nullptr;
     size_t memory_mb = 0;
     double feature_degrees = 40.0;
     int target_faces = 0;
@@ -561,6 +791,7 @@ static int run(int argc, char** argv) {
         std::string name = argv[i];
         if (name == "--field") field_path = argv[i + 1];
         else if (name == "--poles") poles_path = argv[i + 1];
+        else if (name == "--patches") patches_path = argv[i + 1];
         else if (name == "--memory-mb") memory_mb = static_cast<size_t>(atoll(argv[i + 1]));
         else if (name == "--feature-angle") feature_degrees = atof(argv[i + 1]);
         else if (name == "--faces") target_faces = atoi(argv[i + 1]);
@@ -577,6 +808,7 @@ static int run(int argc, char** argv) {
     int levels = 0;
     std::vector<Complex> z = solve_field(mesh, analysis, target_faces, levels);
     FieldReport field = inspect_field(mesh, analysis, z);
+    PatchReport patches = trace_patches(mesh, analysis, z, field, target_faces);
     if (field_path && !write_field(field_path, mesh, z)) fprintf(stderr, "no se pudo escribir %s\n", field_path);
     if (poles_path) {
         // un polo por línea: x y z índice_en_cuartos
@@ -585,6 +817,13 @@ static int run(int argc, char** argv) {
                 const Vec3& p = mesh.points[pole.first];
                 fprintf(file, "%.6f %.6f %.6f %d\n", p.x, p.y, p.z, pole.second);
             }
+            fclose(file);
+        }
+    }
+    if (patches_path) {
+        // parche de cada triángulo, uno por línea
+        if (FILE* file = fopen(patches_path, "w")) {
+            for (int value : patches.face_patch) fprintf(file, "%d\n", value);
             fclose(file);
         }
     }
@@ -615,6 +854,8 @@ static int run(int argc, char** argv) {
             field.vertices_checked, field.vertices_skipped);
     fprintf(out, " \"mean_turn_degrees\": %.4f, \"feature_error_degrees\": %.4f, \"hash\": \"%016llx\",\n",
             field.mean_turn_degrees, field.feature_error_degrees, static_cast<unsigned long long>(field.hash));
+    fprintf(out, " \"lines\": %d, \"line_edges\": %d, \"patches\": %d, \"quad_patches\": %d, \"median_quads_per_patch\": %.2f,\n",
+            patches.lines, patches.line_edges, patches.patches, patches.quad_patches, patches.median_quads_per_patch);
     fprintf(out, " \"seconds\": %.3f, \"peak_memory_mb\": %.1f\n}\n", seconds, peak_memory_mb());
     fclose(out);
     return 0;

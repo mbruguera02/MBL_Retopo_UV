@@ -2,8 +2,8 @@
 //
 //   mbl_core entrada.obj salida.json [--field campo.bin] [--poles polos.txt] [--patches parches.txt] [--quads quads.obj] [--faces caras] [--memory-mb N] [--feature-angle grados]
 //
-// Se ejecuta aparte de Maya: si falla, Maya no se cae. Es deliberadamente poco invasivo: prioridad baja, un solo hilo y
-// tope de memoria impuesto por el sistema. Determinista: la misma malla da siempre el mismo resultado.
+// Se ejecuta aparte de Maya: si falla, Maya no se cae. Es deliberadamente poco invasivo: prioridad baja y un solo hilo;
+// tope de memoria solo si se pide con --memory-mb. Determinista: la misma malla da siempre el mismo resultado.
 //
 // Código propio (licencia MIT, ver LICENSE). El campo sigue las ideas de:
 //   Ray, Vallet, Li y Lévy, "N-Symmetry Direction Field Design", ACM TOG 2008 (índices y Poincaré-Hopf).
@@ -50,11 +50,10 @@ struct Vec3 {
 
 static void limit_resources(size_t memory_mb) {
     SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
-    MEMORYSTATUSEX status;
-    status.dwLength = sizeof(status);
-    GlobalMemoryStatusEx(&status);
-    // sin tope pedido: como mucho la mitad de la memoria libre ahora mismo
-    size_t limit = memory_mb ? memory_mb * 1024 * 1024 : static_cast<size_t>(status.ullAvailPhys / 2);
+    // tope de memoria solo si se pide (--memory-mb): el de la mitad de la memoria libre cortaba modelos densos con Maya
+    // abierto sin dejar ni probarlos
+    if (!memory_mb) return;
+    size_t limit = memory_mb * 1024 * 1024;
     HANDLE job = CreateJobObjectW(nullptr, nullptr);
     if (job) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = {};

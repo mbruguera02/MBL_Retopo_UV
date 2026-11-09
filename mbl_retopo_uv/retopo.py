@@ -762,8 +762,9 @@ def _native_engine(transform, settings, log, tick):
                    "--feature-angle", "{:g}".format(angle)]
         log("{}: motor nativo con {} caras objetivo...".format(name, target))
         try:
+            # sin el freno por memoria libre del plugin: con Maya abierto saltaba antes de que el motor pudiera empezar
             _process._run_once(command, destination, settings["retopo_timeout"], os.path.join(temp_dir, "mbl_core.log"),
-                               tick, label="Motor nativo")
+                               tick, label="Motor nativo", memory_free_fn=lambda: None)
         except _process.EngineError as exc:
             raise RetopoError(str(exc))
         try:

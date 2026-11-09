@@ -1988,8 +1988,56 @@ struct QuadMesh {
     std::vector<Vec3> points;
     std::vector<char> pinned;  // sobre un canto o un borde: el relajado no lo mueve
     std::vector<std::array<int, 4>> quads;
-    int patches_filled = 0, patches_collapsed = 0, quads_dropped = 0;
+    int patches_filled = 0, patches_collapsed = 0, quads_dropped = 0, pillows_removed = 0, doublets_merged = 0;
 };
+
+// limpieza tras colapsar tiras: almohadas (dos quads con los mismos vértices, uno encima del otro) fuera, y dobletes
+// (vértice interior con solo dos quads, que comparten dos aristas) fundidos en un quad
+static void clean_collapse(QuadMesh& out) {
+    {
+        std::map<std::array<int, 4>, int> seen;
+        for (const auto& q : out.quads) {
+            std::array<int, 4> key = q;
+            std::sort(key.begin(), key.end());
+            ++seen[key];
+        }
+        std::vector<std::array<int, 4>> kept;
+        for (const auto& q : out.quads) {
+            std::array<int, 4> key = q;
+            std::sort(key.begin(), key.end());
+            if (seen[key] > 1) { ++out.pillows_removed; continue; }
+            kept.push_back(q);
+        }
+        out.quads.swap(kept);
+    }
+    for (int round = 0; round < 8; ++round) {
+        std::vector<std::vector<int>> around(out.points.size());
+        for (int i = 0; i < static_cast<int>(out.quads.size()); ++i)
+            for (int v : out.quads[i]) around[v].push_back(i);
+        std::vector<char> removed(out.quads.size(), 0);
+        int merged = 0;
+        for (size_t v = 0; v < around.size(); ++v) {
+            if (around[v].size() != 2) continue;
+            int a = around[v][0], b = around[v][1];
+            if (removed[a] || removed[b]) continue;
+            auto rotate = [&](std::array<int, 4> q) {
+                while (q[0] != static_cast<int>(v)) std::rotate(q.begin(), q.begin() + 1, q.end());
+                return q;
+            };
+            std::array<int, 4> qa = rotate(out.quads[a]), qb = rotate(out.quads[b]);
+            // qa = (v, p, x, r) y qb = (v, r, y, p): comparten v-p y v-r, el resultado es (p, x, r, y)
+            if (qa[3] != qb[1] || qa[1] != qb[3] || qa[2] == qb[2]) continue;
+            out.quads[a] = {{qa[1], qa[2], qa[3], qb[2]}};
+            removed[b] = 1;
+            ++merged;
+        }
+        if (!merged) break;
+        std::vector<std::array<int, 4>> kept;
+        for (size_t i = 0; i < out.quads.size(); ++i) if (!removed[i]) kept.push_back(out.quads[i]);
+        out.quads.swap(kept);
+        out.doublets_merged += merged;
+    }
+}
 
 static void fill_patches(const Tracer& tracer, const Layout& layout, QuadMesh& out) {
     const Mesh& mesh = *tracer.mesh;
@@ -2296,6 +2344,7 @@ static void fill_patches(const Tracer& tracer, const Layout& layout, QuadMesh& o
     }
     out.points.swap(points);
     out.quads.swap(quads);
+    clean_collapse(out);
 }
 
 // ---------------------------------------------------------------- S7: relajado
@@ -2503,6 +2552,10 @@ static int run(int argc, char** argv) {
     }
     limit_resources(memory_mb);
     auto started = std::chrono::steady_clock::now();
+    auto lap = [&](const char* what) {
+        if (getenv("MBL_CORE_DEBUG"))
+            fprintf(stderr, "tiempo %s: %.3f s\n", what, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+    };
     Mesh mesh;
     if (!load_obj(argv[1], mesh)) {
         fprintf(stderr, "no se pudo leer la malla: %s\n", argv[1]);
@@ -2517,7 +2570,9 @@ static int run(int argc, char** argv) {
             area += 0.5 * (mesh.points[tri[1]] - mesh.points[tri[0]]).cross(mesh.points[tri[2]] - mesh.points[tri[0]]).norm();
         refined = refine_mesh(mesh, std::sqrt(area / target_faces) / (getenv("MBL_REFINE_RATIO") ? atof(getenv("MBL_REFINE_RATIO")) : REFINE_RATIO));
     }
+    lap("entrada y S2");
     build_topology(mesh);
+    lap("topologia");
     if (const char* dump = getenv("MBL_CORE_MESH")) {
         // depuración: la malla tras S2, para mirar el campo sobre ella
         if (FILE* file = fopen(dump, "w")) {
@@ -2527,9 +2582,12 @@ static int run(int argc, char** argv) {
         }
     }
     Analysis analysis = analyze(mesh, feature_degrees);
+    lap("analisis");
     int levels = 0;
     std::vector<Complex> z = solve_field(mesh, analysis, target_faces, levels);
+    lap("campo");
     FieldReport field = inspect_field(mesh, analysis, z);
+    lap("polos");
     double field_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
     // S4: líneas desde los polos y partición hasta que los parches sean discos de cuatro esquinas
@@ -2568,11 +2626,16 @@ static int run(int argc, char** argv) {
     Layout layout = build_layout(tracer, radius);
     const int first_patches = static_cast<int>(layout.patches.size()), first_good = layout.good;
     int rounds = 0;
+    int fewest_bad = static_cast<int>(layout.patches.size()) - layout.good, stale = 0;
     for (; rounds < SPLIT_ROUNDS && layout.good < static_cast<int>(layout.patches.size()); ++rounds) {
         int changes = merge_bad_patches(tracer, layout, edge_length);
         changes += split_bad_patches(tracer, layout);
         if (changes == 0) break;
         layout = build_layout(tracer, radius);
+        // si en varias rondas seguidas no baja el número de parches malos, lo que queda no se arregla partiendo
+        int bad = static_cast<int>(layout.patches.size()) - layout.good;
+        if (bad < fewest_bad) { fewest_bad = bad; stale = 0; }
+        else if (++stale >= 4) { ++rounds; break; }
     }
     if (prune_dangling(tracer) > 0) layout = build_layout(tracer, radius);
     const int forced_patches = getenv("MBL_NO_FORCE") ? 0 : force_four_corners(tracer, layout);
@@ -2660,6 +2723,7 @@ static int run(int argc, char** argv) {
     fprintf(out, "},\n \"quant_variables\": %d, \"quant_constraints\": %d, \"quant_violations\": %d, \"quant_solves\": %d, \"quant_error\": %.4f,\n",
             quant.variables, quant.constraints, quant.violations, quant.solves, quant.mean_error);
     fprintf(out, " \"collapsed_patches\": %d, \"dropped_quads\": %d, \"quant_repairs\": %d, \"forced_patches\": %d,\n", quads.patches_collapsed, quads.quads_dropped, quant.repairs, forced_patches);
+    fprintf(out, " \"pillows_removed\": %d, \"doublets_merged\": %d,\n", quads.pillows_removed, quads.doublets_merged);
     fprintf(out, " \"quads\": %d, \"quad_vertices\": %d, \"open_edges\": %d, \"quad_nonmanifold_edges\": %d, \"degenerate_quads\": %d, \"quad_poles\": %d, \"valence\": [",
             quad_report.quads, quad_report.vertices, quad_report.open_edges, quad_report.nonmanifold_edges, quad_report.degenerate, quad_report.poles);
     for (int k = 0; k < 9; ++k) fprintf(out, "%s%d", k ? ", " : "", quad_report.valence[k]);

@@ -201,7 +201,7 @@ Cada fase acaba en algo que se puede medir. **Primero una vertical simple de pun
 2. **Vertical sobre mallas fáciles.** S4-S6 mínimos con enteros simples. *Listo si:* cubo, esfera y toro salen 100 % quads, sin agujeros, y el toro con todos sus anillos cerrados. **Hecho el 9 de noviembre** (`tests/test_core.py`, pruebas `test_quads_*`).
 3. **Modelos reales.** Trazado robusto y enteros globales. *Listo si:* los 5 modelos del banco salen sin agujeros ni caras volteadas. Aquí se decide si la vía de parches se queda. **En curso**: humano, mujer y prop ya salen; quedan agujeros pequeños.
 4. **Calidad.** S2 por zonas, S7 y S8. *Listo si:* fealdad ≤ Maya y anillos cerrados ≥ Maya en humano y criatura, a ≤ 2 veces el tiempo de Maya.
-5. **Entrar en el plugin.** Adaptador en Python, opción experimental en la ventana, respaldo a Maya. *Listo si:* suites en verde.
+5. **Entrar en el plugin.** Adaptador en Python, opción experimental en la ventana, respaldo a Maya. *Listo si:* suites en verde. **Empezada el 9 de noviembre**: opción «Motor nativo (en pruebas)» en la ventana (`retopo._native_engine`), que exporta la copia preparada, lanza `mbl_core` (prioridad baja, con tope de memoria) y pasa el resultado por los arreglos, el relajado y la reproyección del plugin, sin su limpieza de polos. Prueba `test_native_engine_sphere`: una esfera de Maya sale como la esfera de cubo del Platonic Solid (8 polos de 3). Falta el respaldo automático a Maya si falla.
 6. **UVs desde los parches.** *Listo si:* continuidad en los cortes +10 puntos y aprovechamiento ≥ 60 %.
 7. **Entradas completas y motor único:** modo Humano con guías, materiales, pincel, zonas sin polos.
 8. **Modo Otro con IA**, como módulo opcional.

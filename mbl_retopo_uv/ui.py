@@ -65,6 +65,7 @@ ENGINE_NOTES = {
     "auto": "Hace el retopo con Maya y con el Motor MBL (experimental) y se queda el de mejor nota. Tarda lo que los dos juntos (de 30 s a 2 min); como Maya suele ganar, normalmente basta con elegir Maya.",
     "mbl": "EXPERIMENTAL, no recomendado para trabajar. Nuestro motor: solo quads y simétrico con bucle central, pero en las pruebas con modelos reales sus quads salen más deformados y desiguales que los de Maya. Sin guías ni detalle pintado. De 30 s a 2 min. Úsalo para probar o comparar.",
     "instant_meshes": "Rápido, con opciones propias (en Avanzado). Menos preciso que los demás.",
+    "nativo": "EN PRUEBAS. El motor nuevo, desde cero: loops que siguen la forma, polos donde los pondría un artista y más caras donde la superficie se curva. Aún puede dejar algún agujero pequeño. Sin guías ni detalle pintado.",
 }
 
 
@@ -130,7 +131,8 @@ class RetopoUVWindow(QtWidgets.QDialog):
         # Retopo
         w["retopo_engine"] = QtWidgets.QComboBox()
         for key, label in (("maya", "Maya (polyRetopo, recomendado)"), ("auto", "Automático (el mejor de Maya y Motor MBL)"),
-                           ("mbl", "Motor MBL (experimental)"), ("instant_meshes", "Instant Meshes")):
+                           ("mbl", "Motor MBL (experimental)"), ("instant_meshes", "Instant Meshes"),
+                           ("nativo", "Motor nativo (en pruebas)")):
             w["retopo_engine"].addItem(label, key)
         w["retopo_engine"].setToolTip(
             "Maya (polyRetopo): recomendado. En las pruebas, 100% quads, muchos menos polos y menos error que Instant "

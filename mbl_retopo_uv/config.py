@@ -277,6 +277,19 @@ def find_quadriflow():
     return None
 
 
+def find_mbl_core():
+    """Motor nativo (mbl_core, en pruebas): bin/ junto al paquete o la carpeta de compilación del proyecto."""
+    package = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(package)
+    name = "mbl_core.exe" if sys.platform.startswith("win") else "mbl_core"
+    for folder in (os.path.join(package, "bin"), os.path.join(root, "bin"),
+                   os.path.join(root, "engine", "build-core", "Release")):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def find_instant_meshes(settings, platform=None):
     """Busca Instant Meshes: ruta guardada, carpeta bin/ junto al paquete y el PATH."""
     found = resolve_executable(settings.get("instant_meshes_path", ""), platform)

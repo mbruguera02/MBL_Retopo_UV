@@ -279,7 +279,11 @@ def orient_pieces_like(source, target):
 
 
 ENGINES = {"auto": "Automático", "maya": "Maya (polyRetopo)", "instant_meshes": "Instant Meshes",
-           "mbl": "Motor MBL"}
+           "mbl": "Motor MBL", "nativo": "Motor nativo (en pruebas)"}
+
+# ángulo de canto del motor nativo si no se indica otro: en mallas orgánicas, 40° marcaba como cantos miles de
+# aristas de un esculpido; 80° deja solo los pliegues de verdad
+NATIVE_CREASE_ANGLE = 80.0
 
 
 def _prepared_copy(transform, settings, log, tick):
@@ -442,6 +446,11 @@ def retopo(transform, settings, log=default_log, tick=None):
     engine = settings.get("retopo_engine", "maya")
     if engine == "mbl":
         return _mbl_retopo(transform, settings, log, tick)
+    if engine == "nativo":
+        new, fixes = _native_engine(transform, settings, log, tick)
+        # sus polos ya salen del campo, donde los pondría un artista: la limpieza de polos de los otros motores los
+        # movía y metía algún triángulo (humano: 236 -> 241 polos y 2 triángulos), así que aquí no se usa
+        return _finish(transform, new, fixes, ENGINES["nativo"], dict(settings, retopo_pole_cleanup=False), log, tick)
     if (engine == "auto" and not settings.get("_symmetry_half") and not settings.get("_guide_curves")
             and not settings.get("_detail") and config.find_quadriflow()):
         return _auto_with_mbl(transform, settings, log, tick)
@@ -713,6 +722,62 @@ def _instant_meshes_engine(transform, settings, log, tick):
             cmds.delete(prepared)
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+    fixes = []
+    if repair["doublets"]:
+        fixes.append("{} vértices de 2 aristas quitados".format(repair["doublets"]))
+    if repair["bowties"]:
+        fixes.append("{} vértices pajarita separados".format(repair["bowties"]))
+    if repair["pieces"]:
+        fixes.append("{} restos sueltos borrados".format(repair["pieces"]))
+    if repair["holes"]:
+        fixes.append("{} agujeros rellenados".format(repair["holes"]))
+    return new, fixes
+
+
+def _native_engine(transform, settings, log, tick):
+    """Motor nativo (mbl_core): parches desde los polos del campo, enteros por parche y rejilla en cada uno. Un proceso
+    aparte, de prioridad baja y con tope de memoria. Devuelve (malla, arreglos)."""
+    name = short_name(transform)
+    executable = config.find_mbl_core()
+    if not executable:
+        raise RetopoError("No se encuentra el motor nativo (mbl_core.exe en bin/ o en engine/build-core/Release).")
+    temp_dir = tempfile.mkdtemp(prefix="mbl_core_")
+    prepared = None
+    try:
+        source = os.path.join(temp_dir, "input.obj")
+        destination = os.path.join(temp_dir, "quads.obj")
+        report_path = os.path.join(temp_dir, "report.json")
+        prepared = _prepared_copy(transform, settings, log, tick)
+        _export_obj(prepared, source)
+        target = int(settings["retopo_target_faces"])
+        angle = float(settings["retopo_crease_angle"]) if settings["retopo_crease_angle"] > 0 else NATIVE_CREASE_ANGLE
+        command = [executable, source, report_path, "--faces", str(target), "--quads", destination,
+                   "--feature-angle", "{:g}".format(angle)]
+        log("{}: motor nativo con {} caras objetivo...".format(name, target))
+        try:
+            _process._run_once(command, destination, settings["retopo_timeout"], os.path.join(temp_dir, "mbl_core.log"),
+                               tick, label="Motor nativo")
+        except _process.EngineError as exc:
+            raise RetopoError(str(exc))
+        try:
+            import json
+            with open(report_path, "r", encoding="utf-8") as handle:
+                report = json.load(handle)
+        except (OSError, ValueError):
+            report = {}
+        points, faces = read_obj(destination)
+        points, faces, repair = repair_topology(points, faces, 0.01, int(settings["retopo_fill_holes"]))
+        if not faces:
+            raise RetopoError("El motor nativo no devolvió ninguna malla.")
+        new = meshbuild.create_mesh(points, faces, name + "_retopo")
+        if report:
+            log("{}: motor nativo: {} quads, {} polos, {} parches ({} rellenados a la fuerza), {:.1f} s, {:.0f} MB.".format(
+                name, report.get("quads", len(faces)), report.get("quad_poles", "?"), report.get("patches", "?"),
+                report.get("forced_patches", 0), report.get("seconds", 0.0), report.get("peak_memory_mb", 0.0)))
+    finally:
+        if prepared and cmds.objExists(prepared):
+            cmds.delete(prepared)
+        shutil.rmtree(temp_dir, ignore_errors=True)
     fixes = []
     if repair["doublets"]:
         fixes.append("{} vértices de 2 aristas quitados".format(repair["doublets"]))

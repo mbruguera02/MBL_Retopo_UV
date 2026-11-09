@@ -103,6 +103,29 @@ Pendiente, por orden:
 4. **Velocidad**: S2 (2,9 s) y las rondas de partir (unos 4 s) se pueden recortar.
 5. **Fase 5**: el adaptador en el plugin.
 
+## UVs con el motor nativo y camino a main (9 de noviembre)
+
+**UVs por loops** (`uv_seams.loop_seams`, solo cuando el motor es el nativo):
+- Las costuras van por las líneas rectas que salen de los polos.
+- Las celdas se juntan mientras la isla sea un disco y su curvatura total no pase de 1,6 rad.
+- Las tiras finas (área / perímetro² < 0,012) y las islas diminutas se juntan siempre.
+
+| Modelo | Islas | Aprovechado | Estiramiento medio | Juez UV |
+|---|---|---|---|---|
+| Humano (antes, cortes cara a cara) | 27, bordes en escalera | 53 % | 1,09 | verde |
+| Humano (por loops) | 29 | 62 % | 1,08 | verde |
+| Prop | 63 (rectangulares; algunas de una cara) | 80 % | 1,02 | verde |
+| Mujer | 47 | 58 % | 1,04 | verde |
+
+**Caras dadas la vuelta, con el juez del plugin:** humano 96 (Maya 132), prop 25 (Maya 41), mujer 28 (Maya 37). Los dos motores salen en rojo en estos modelos porque el juez compara con el original entero, que incluye las piezas pequeñas que el retopo ignora (ojos, dientes). Medido contra la entrada que de verdad se retopologiza, el humano tiene 19 quads al revés (0,12 %) tras la pasada de desenredado de S7.
+
+**Ya hecho para main:** `mbl_core.exe` en `bin/` sin rutas personales. Respaldo a Maya si el motor falla. Opción desactivada sin ejecutable. Se conservan las aberturas del modelo. Suites completas de una tirada: Maya 68/68, motor 67/67, seguridad 8/8, núcleo 13/13.
+
+**Falta:**
+1. **Caras dobladas en hard surface:** prop 53 (1,1 %). Una tira de quads se dobla sobre sí misma junto a un canto. El relajado de S7 las duplica (61 → 135 sin el plugin). Congelar los vértices de los pliegues lo empeoró y se descartó.
+2. **Islas de una cara en el prop.**
+3. **Versión 1.0.7 y CHANGELOG** al fusionar.
+
 ## Aberturas y guías
 
 - **Aberturas:** por defecto se conserva todo lo que sea borde. Opción "cerrar agujeros pequeños", apagada por defecto.

@@ -29,6 +29,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "decimate.h"
+
 using Complex = std::complex<double>;
 static const double PI = 3.14159265358979323846;
 
@@ -2661,7 +2663,8 @@ static bool write_quads(const char* path, const QuadMesh& quads) {
 // ---------------------------------------------------------------- programa
 
 static const int SPLIT_ROUNDS = 24;
-static const double REFINE_RATIO = 2.0;  // aristas de entrada por arista final, como mínimo
+static const double REFINE_RATIO = 2.0;
+static const double DECIMATE_TRIS_PER_FACE = 8.0;  // la entrada se reduce si pasa de 1,5 veces esto  // aristas de entrada por arista final, como mínimo
 
 static int run(int argc, char** argv) {
     if (argc < 3) {
@@ -2697,6 +2700,22 @@ static int run(int argc, char** argv) {
         return 2;
     }
     const int input_triangles = static_cast<int>(mesh.tris.size());
+    // S0: una entrada mucho más densa de lo que pide el objetivo se reduce antes (decimado por cuádricas). El detalle más
+    // fino que una cara final no debe crear polos en el campo; la malla final se pega luego a la original en S7.
+    Mesh original;
+    bool decimated = false;
+    const double decimate_ratio = getenv("MBL_DECIMATE") ? atof(getenv("MBL_DECIMATE")) : DECIMATE_TRIS_PER_FACE;
+    if (target_faces > 0 && static_cast<long>(mesh.tris.size()) > static_cast<long>(1.5 * decimate_ratio * target_faces)) {
+        original.points = mesh.points;
+        original.tris = mesh.tris;
+        std::vector<std::array<double, 3>> points;
+        for (const Vec3& q : mesh.points) points.push_back({{q.x, q.y, q.z}});
+        qem::decimate_mesh(points, mesh.tris, static_cast<long>(decimate_ratio * target_faces));
+        mesh.points.clear();
+        for (const auto& q : points) mesh.points.push_back(Vec3(q[0], q[1], q[2]));
+        decimated = true;
+    }
+    lap("S0 decimado");
     RefineReport refined;
     if (target_faces > 0) {
         // S2: aristas de como mucho un tercio de la arista final
@@ -2813,7 +2832,7 @@ static int run(int argc, char** argv) {
         quads = QuadMesh();
         fill_patches(tracer, layout, quads);
     }
-    if (!getenv("MBL_NO_RELAX")) relax_quads(mesh, quads, quad_edge);
+    if (!getenv("MBL_NO_RELAX")) relax_quads(decimated ? original : mesh, quads, quad_edge);
     QuadReport quad_report = inspect_quads(quads);
 
     if (field_path && !write_field(field_path, mesh, z)) fprintf(stderr, "no se pudo escribir %s\n", field_path);
@@ -2844,8 +2863,8 @@ static int run(int argc, char** argv) {
         std::vector<char> seen(mesh.points.size(), 0);
         for (const auto& tri : mesh.tris) for (int v : tri) if (!seen[v]) { seen[v] = 1; ++used; }
     }
-    fprintf(out, "{\n \"input_triangles\": %d, \"refine_passes\": %d, \"refine_splits\": %d, \"refine_flips\": %d,\n",
-            input_triangles, refined.passes, refined.splits, refined.flips);
+    fprintf(out, "{\n \"decimated\": %s, \"input_triangles\": %d, \"refine_passes\": %d, \"refine_splits\": %d, \"refine_flips\": %d,\n",
+            decimated ? "true" : "false", input_triangles, refined.passes, refined.splits, refined.flips);
     fprintf(out, " \"vertices\": %d, \"triangles\": %d, \"edges\": %d, \"pieces\": %d,\n", used,
             static_cast<int>(mesh.tris.size()), mesh.edge_count, mesh.pieces);
     fprintf(out, " \"euler\": %d, \"border_edges\": %d, \"nonmanifold_edges\": %d, \"flipped_pairs\": %d,\n",

@@ -64,6 +64,45 @@ Cómo se usa en la prueba:
 
 El campo pone sus polos donde el artista pone los suyos, y menos: es justo lo de "solo los que sostienen la malla". Por zonas (pies-rodillas / muslos-cadera / torso-manos / cuello-cabeza): artista 396 / 30 / 402 / 332, campo 97 / 4 / 81 / 143.
 
+## Primera malla de quads (9 de noviembre)
+
+`mbl_core` ya hace todo el camino: entrada → S2 → campo → parches → enteros → quads → relajado. Un solo proceso, un hilo, sin programas externos. Para mirar el resultado: `mayapy tests/quad_view.py quads.obj imagen.png` (rojo = polo de 3, azul = polo de 5 o más, amarillo = borde).
+
+| Malla | Caras pedidas | Resultado | Polos | Tiempo | Memoria |
+|---|---|---|---|---|---|
+| Cubo, toro, esfera regular, cápsula | 300-800 | Cerrados, 100 % quads | 8 / 0 / 8 / 8 (como un cubo redondeado) | < 0,3 s | < 20 MB |
+| Human sin flujo (130 k triángulos) | 15.000 | 15.149 quads, 100 % quads | 247 | 12 s | 204 MB |
+| Mujer (`goodretopo.obj`, 450 k) | 5.000 | 5.281 quads | 227 | 14 s | 241 MB |
+| Prop (`prop.obj`, hard surface) | 5.000 | 5.169 quads, cantos respetados | 53 | 7,5 s | 135 MB |
+
+**Human frente al artista**, con el juez actual (`tests/core_reference.py`):
+
+| | Motor nativo | Artista |
+|---|---|---|
+| Quads | 100 % | 99,5 % |
+| Quads deformados | 20,3 % | 17,6 % |
+| Caras dobladas | 44 | 341 |
+| Aristas en loops cerrados | 35 % | 21 % |
+| Polos | 181-247 | 1.160 |
+| Nuestros polos a menos de 2 aristas de uno suyo | 95 % | — |
+
+Cómo funciona cada etapa (decisiones que salieron de las pruebas):
+
+- **S2** prepara la entrada: divide por el lado más largo y voltea hacia Delaunay hasta tener 2 aristas de entrada por arista final. Sin esto, en mallas de triángulos alargados (CAD, esfera UV) las líneas salían en ángulos falsos. También calcula el **tamaño local**: como mínimo 8 quads alrededor de un tubo, sin contar los cantos y hasta 4 veces más denso. Lo que se añade en cara y manos se quita del cuerpo, como hace el artista.
+- **S3** lleva el tirón de curvatura en todos los niveles: sin él, en un cilindro o un toro cualquier giro del campo es igual de suave, el campo se tuerce unos 2° y los lazos no cierran.
+- **S4** saca de cada polo sus 4−k separatrices con el modelo θ(α) = (k/4)·α + c, y las avanza todas a la vez (grafo de motocicletas). El paso corrige el error lateral acumulado para no derivar. Si una línea encuentra de frente otra cabeza o un polo, se une a ella. Las esquinas se reparten por nodo, de forma que todas sus cuñas sumen 4 − k. Una esquina dudosa pasa de un parche de 5 a uno de 3 por el camino más barato. Los parches diminutos se absorben, se podan las líneas colgantes y, como último recurso, un disco se trata como rectángulo con las 4 esquinas que mejor igualan los lados opuestos.
+- **S5** reparte por mínimos cuadrados, redondea por tandas y repara insertando filas de quads con Dijkstra. Una tira puede valer 0 y entonces se colapsa: así desaparecen las tiras finas entre líneas casi paralelas. Si el total se aleja de lo pedido, se ajusta la arista y se repite.
+- **S6** usa un mapa de Tutte de cada parche a su rectángulo (sin pliegues por construcción). Después se cosen las tiras colapsadas y se limpian almohadas y dobletes.
+- **S7** relaja en el plano tangente y reproyecta a la superficie, con cantos y bordes fijos.
+
+Pendiente, por orden:
+
+1. **Agujeros que quedan**: en el humano, unos 8 parches (ojos, boca, dedos de los pies) aún no se rellenan, además de los bordes que ya trae la entrada.
+2. **Densidad del cuerpo**: el torso sale más denso y con quads más alargados que los del artista.
+3. **Loops en articulaciones, ojos y boca**: el artista mete anillos en rodillas y codos. Es el modo Humano con guías (fase 7).
+4. **Velocidad**: S2 (2,9 s) y las rondas de partir (unos 4 s) se pueden recortar.
+5. **Fase 5**: el adaptador en el plugin.
+
 ## Aberturas y guías
 
 - **Aberturas:** por defecto se conserva todo lo que sea borde. Opción "cerrar agujeros pequeños", apagada por defecto.
@@ -159,8 +198,8 @@ Conclusiones: los cantos no son la causa principal, y reducir ayuda pero no bast
 Cada fase acaba en algo que se puede medir. **Primero una vertical simple de punta a punta** y luego se mejora cada etapa: así hay quads cuanto antes y el riesgo de S4 se ve pronto.
 
 1. **Referencia y campo.** Medir el artista: juez, polos por zonas y, trazando desde sus polos, en cuántos parches queda dividido. Crear la entrada sin flujo. Integrar `engine/mbl_decimate` en el núcleo. *Listo si:* humano a 15.000 caras con un nº de polos del orden del artista (sin pasar de 1.160) y cerca de los suyos, y el trazado da un nº de parches del orden del suyo.
-2. **Vertical sobre mallas fáciles.** S4-S6 mínimos con enteros simples. *Listo si:* cubo, esfera y toro salen 100 % quads, sin agujeros, y el toro con todos sus anillos cerrados.
-3. **Modelos reales.** Trazado robusto y enteros globales. *Listo si:* los 5 modelos del banco salen sin agujeros ni caras volteadas. Aquí se decide si la vía de parches se queda.
+2. **Vertical sobre mallas fáciles.** S4-S6 mínimos con enteros simples. *Listo si:* cubo, esfera y toro salen 100 % quads, sin agujeros, y el toro con todos sus anillos cerrados. **Hecho el 9 de noviembre** (`tests/test_core.py`, pruebas `test_quads_*`).
+3. **Modelos reales.** Trazado robusto y enteros globales. *Listo si:* los 5 modelos del banco salen sin agujeros ni caras volteadas. Aquí se decide si la vía de parches se queda. **En curso**: humano, mujer y prop ya salen; quedan agujeros pequeños.
 4. **Calidad.** S2 por zonas, S7 y S8. *Listo si:* fealdad ≤ Maya y anillos cerrados ≥ Maya en humano y criatura, a ≤ 2 veces el tiempo de Maya.
 5. **Entrar en el plugin.** Adaptador en Python, opción experimental en la ventana, respaldo a Maya. *Listo si:* suites en verde.
 6. **UVs desde los parches.** *Listo si:* continuidad en los cortes +10 puntos y aprovechamiento ≥ 60 %.
